@@ -1,0 +1,25 @@
+name: optivibe-harness
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  # Headless layout-figure channel (render_layout): matplotlib drives the Agg
+  # backend for the y-z cross-section PNG; numpy is listed explicitly because the
+  # sag math uses it directly (vectorized aperture sampling + radical mask). Pulled
+  # from conda-forge so Windows binary wheels resolve cleanly.
+  - matplotlib
+  - numpy
+  - pip:
+      - pythonnet        # bridges Python <-> the typed .NET ZOS-API via `clr`
+      - pytest           # test runner
+      - psutil           # process introspection (server reaper, scoped to spawned PIDs)
+      - mcp              # the single OptiVibe MCP stdio server (python -m optivibe_harness)
+      # The single OptiVibe MCP composes the reference tool set in-process: after
+      # building this env, also run (from packages/optivibe-harness/):
+      #     pip install -e ../optivibe-reference
+      # to make `import optivibe_reference` resolve. It is pure-stdlib (no engine,
+      # no added dep surface) so it never competes for the single-seat license.
+      # ZOSPy is an optional convenience wrapper over the ZOS-API; add it here if
+      # the harness chooses to depend on it. Direct pythonnet is the baseline.
+      # - zospy

@@ -1,0 +1,2 @@
+*.json text eol=lf
+*.db binary

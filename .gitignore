@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Conda / virtualenvs
+.venv/
+venv/
+env/
+.conda/
+
+# Temp / scratch
+.tmp*
+*.tmp
+*.log
+*.bak
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Machine-local Claude settings
+.claude/settings.local.json
+
+# ------------------------------------------------------------------------------
+# VENDOR-DATA FENCE (see PROVENANCE.md). Everything below is built LOCALLY from
+# YOUR licensed OpticStudio install by scripts/build_vendor_data.py and must
+# NEVER be committed — committing it would redistribute license-derived data.
+# ------------------------------------------------------------------------------
+
+# Local SQLite builds (manual FTS5 corpus and any derived index)
+*.db
+*.db-wal
+*.db-shm
+
+# User-built data JSONs (derived from your install's .agf files / manual PDF /
+# live-probe captures). The operand + tolerance catalogs embed verbatim-local
+# manual descriptions, so they too are user-built + gitignored — only
+# the synonyms/semantics SOURCES are committed.
+packages/optivibe-reference/src/optivibe_reference/data/glass_catalog.json
+packages/optivibe-reference/src/optivibe_reference/data/manual_manifest.json
+packages/optivibe-reference/src/optivibe_reference/data/operand_catalog.json
+packages/optivibe-reference/src/optivibe_reference/data/tolerance_operand_catalog.json
+packages/optivibe-reference/src/optivibe_reference/data/operand_descriptions.json
+packages/optivibe-reference/src/optivibe_reference/data/tolerance_operand_descriptions.json
+
+# Verbatim manual-prose extracts (the paraphrase oracle) — never committed
+packages/optivibe-reference/scripts/captures/
+
+# ------------------------------------------------------------------------------
+# Engine artifacts (regenerable OpticStudio companions / intermediates)
+# ------------------------------------------------------------------------------
+
+# Engine binary companion (regenerable; the .zmx design itself is tracked)
+*.ZDA
+
+# Per-design intermediate candidate outputs (the BEST_* design is kept; candidates regenerate)
+**/candidates/

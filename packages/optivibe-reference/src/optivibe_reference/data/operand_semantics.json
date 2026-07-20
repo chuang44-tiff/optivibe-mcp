@@ -1,0 +1,1783 @@
+{
+  "ABCD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ABGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "ABLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "ABSO": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ACOS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "AMAG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ANAC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ANAR": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ANAX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ANAY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ANCX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ANCY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ASIN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ASTI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ATAN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "AXCL": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "BFSD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "BIOC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "BIOD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "BIPF": {
+    "sign_convention": null,
+    "sign_convention_source": null
+  },
+  "BLNK": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "BLTH": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "BSER": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CARD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CEGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "CEHX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CEHY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CELT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "CENX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CENY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CEVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "CIGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "CILT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "CIVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "CMFV": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CMGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "CMLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "CMVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "CNAX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CNAY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CNPX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CNPY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CODA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "COGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "COLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "COMA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CONF": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CONS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "COSA": {
+    "sign_convention": null,
+    "sign_convention_source": null
+  },
+  "COSI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "COVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "CTGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "CTLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "CTVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "CVGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "CVIG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CVLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "CVOL": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "CVVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "DCRV": {
+    "sign_convention": null,
+    "sign_convention_source": null
+  },
+  "DENC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DENF": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DIFF": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DIMX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DISA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DISC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DISG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DIST": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DIVB": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DIVI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DLTN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DMFS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DMGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "DMLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "DMVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "DPHS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DSAG": {
+    "sign_convention": null,
+    "sign_convention_source": null
+  },
+  "DSLP": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DXDX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DXDY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DYDX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "DYDY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "EFFL": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "EFLA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "EFLX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "EFLY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "EFNO": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ENDX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ENPP": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "EPDI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "EQUA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ERFP": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ETGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "ETLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "ETVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "EXPD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "EXPP": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "FCGS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "FCGT": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "FCUR": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "FDMO": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "FDRE": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "FICL": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "FICP": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "FOUC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "FREZ": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "FTGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "FTLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "GAOI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GBPD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GBPP": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GBPR": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GBPS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GBPW": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GBPZ": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GBSD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GBSP": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GBSR": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GBSS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GBSW": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GCOS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GENC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GENF": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GLCA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GLCB": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GLCC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GLCR": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GLCX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GLCY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GLCZ": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GMTA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GMTN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GMTS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GMTT": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GMTX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GOTO": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GPIM": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GPRT": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GPRX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GPRY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GPSX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GPSY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GRMN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GRMX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "GTCE": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "HACG": {
+    "sign_convention": null,
+    "sign_convention_source": null
+  },
+  "HHCN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "HYLD": {
+    "sign_convention": null,
+    "sign_convention_source": null
+  },
+  "I1GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "I1LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "I1VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "I2GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "I2LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "I2VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "I3GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "I3LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "I3VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "I4GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "I4LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "I4VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "I5GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "I5LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "I5VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "I6GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "I6LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "I6VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "IMAE": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "IMSF": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "INDX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ISFN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ISNA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "LACL": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "LINV": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "LOGE": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "LOGT": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "LONA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "LPTD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MAXX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MCOG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MCOL": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MCOV": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MECA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MECS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MECT": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MINN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MNAB": {
+    "citation_handle": "manual:p1169",
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "family"
+  },
+  "MNAI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MNCA": {
+    "citation_handle": "manual:p1170",
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "family"
+  },
+  "MNCG": {
+    "citation_handle": "manual:p1170",
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "family"
+  },
+  "MNCT": {
+    "citation_handle": "manual:p1170",
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "family"
+  },
+  "MNCV": {
+    "citation_handle": "manual:p1170",
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "family"
+  },
+  "MNDT": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MNEA": {
+    "citation_handle": "manual:p1170",
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "family"
+  },
+  "MNEG": {
+    "citation_handle": "manual:p1170",
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "family"
+  },
+  "MNET": {
+    "citation_handle": "manual:p1170",
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "family"
+  },
+  "MNIN": {
+    "citation_handle": "manual:p1170",
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "family"
+  },
+  "MNPD": {
+    "citation_handle": "manual:p1170",
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "family"
+  },
+  "MNRE": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MNRI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MNSD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MSWA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MSWN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MSWS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MSWT": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MSWX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MTFA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MTFN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MTFS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MTFT": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MTFX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MTHA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MTHN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MTHS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MTHT": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MTHX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MXAB": {
+    "citation_handle": "manual:p1172",
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "family"
+  },
+  "MXAI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MXCA": {
+    "citation_handle": "manual:p1172",
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "family"
+  },
+  "MXCG": {
+    "citation_handle": "manual:p1172",
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "family"
+  },
+  "MXCT": {
+    "citation_handle": "manual:p1172",
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "family"
+  },
+  "MXCV": {
+    "citation_handle": "manual:p1172",
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "family"
+  },
+  "MXDT": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MXEA": {
+    "citation_handle": "manual:p1172",
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "family"
+  },
+  "MXEG": {
+    "citation_handle": "manual:p1173",
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "family"
+  },
+  "MXET": {
+    "citation_handle": "manual:p1173",
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "family"
+  },
+  "MXIN": {
+    "citation_handle": "manual:p1173",
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "family"
+  },
+  "MXPD": {
+    "citation_handle": "manual:p1173",
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "family"
+  },
+  "MXRE": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MXRI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "MXSD": {
+    "citation_handle": "manual:p1173",
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "family"
+  },
+  "NORD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NORX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NORY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NORZ": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NPAF": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NPGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "NPLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "NPVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "NPXG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NPXL": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NPXV": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NPYG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NPYL": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NPYV": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NPZG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NPZL": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NPZV": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NSDC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NSDD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NSDE": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NSDP": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NSLT": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NSRA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NSRD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NSRM": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NSRW": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NSST": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NSTR": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NSTW": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NTXG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NTXL": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NTXV": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NTYG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NTYL": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NTYV": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NTZG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NTZL": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "NTZV": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "OBSN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "OGSS": {
+    "sign_convention": null,
+    "sign_convention_source": null
+  },
+  "OOFF": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "OPDC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "OPDM": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "OPDX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "OPGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "OPLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "OPTH": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "OPVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "OSCD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "OSUM": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "P1GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "P1LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "P1VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "P2GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "P2LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "P2VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "P3GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "P3LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "P3VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "P4GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "P4LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "P4VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "P5GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "P5LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "P5VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "P6GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "P6LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "P6VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "P7GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "P7LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "P7VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "P8GT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "P8LT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "P8VA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "PANA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PANB": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PANC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PARA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PARB": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PARC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PARR": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PARX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PARY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PARZ": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PATX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PATY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PETC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PETZ": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PIMH": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PLEN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PMAG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PMGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "PMLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "PMVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "POPD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "POPI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "POWF": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "POWP": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "POWR": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PRIM": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PROB": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PROD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "PSLP": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "QOAC": {
+    "sign_convention": null,
+    "sign_convention_source": null
+  },
+  "QSLP": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "QSUM": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RAED": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RAEN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RAGA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RAGB": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RAGC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RAGX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RAGY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RAGZ": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RAID": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RAIN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RANG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "REAA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "REAB": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "REAC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "REAR": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "REAX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "REAY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "REAZ": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RECI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RELI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RENA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RENB": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RENC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RETX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RETY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "REVR": {
+    "sign_convention": null,
+    "sign_convention_source": null
+  },
+  "RGLA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "RRET": {
+    "sign_convention": null,
+    "sign_convention_source": null
+  },
+  "RSCE": {
+    "citation_handle": "manual:p1188",
+    "sign_convention": "minimize",
+    "sign_convention_source": "manual"
+  },
+  "RSCH": {
+    "citation_handle": "manual:p1188",
+    "sign_convention": "minimize",
+    "sign_convention_source": "manual"
+  },
+  "RSRE": {
+    "citation_handle": "manual:p1188",
+    "sign_convention": "minimize",
+    "sign_convention_source": "manual"
+  },
+  "RSRH": {
+    "citation_handle": "manual:p1188",
+    "sign_convention": "minimize",
+    "sign_convention_source": "manual"
+  },
+  "RWCE": {
+    "citation_handle": "manual:p1188",
+    "sign_convention": "minimize",
+    "sign_convention_source": "manual"
+  },
+  "RWCH": {
+    "citation_handle": "manual:p1188",
+    "sign_convention": "minimize",
+    "sign_convention_source": "manual"
+  },
+  "RWRE": {
+    "citation_handle": "manual:p1189",
+    "sign_convention": "minimize",
+    "sign_convention_source": "manual"
+  },
+  "RWRH": {
+    "citation_handle": "manual:p1189",
+    "sign_convention": "minimize",
+    "sign_convention_source": "manual"
+  },
+  "SAGX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SAGY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SCRV": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SCUR": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SDRV": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SFNO": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SINE": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SKIN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SKIS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SMIA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SPCH": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SPHA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SPHD": {
+    "sign_convention": null,
+    "sign_convention_source": null
+  },
+  "SPHS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SQRT": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SSAG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SSLP": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "STHI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "STRH": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SUMM": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "SVIG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TANG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TCGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "TCLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "TCVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "TFNO": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TGTH": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TMAS": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TOLR": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TOTR": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TRAC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TRAD": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TRAE": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TRAI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TRAN": {
+    "sign_convention": null,
+    "sign_convention_source": null
+  },
+  "TRAR": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TRAX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TRAY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TRCX": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TRCY": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TSAG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TTGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "TTHI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "TTLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "TTVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "UDOC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "UDOP": {
+    "sign_convention": null,
+    "sign_convention_source": null
+  },
+  "USYM": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "VOLU": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "WFNO": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "WLEN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "XDGT": {
+    "sign_convention": "boundary_ge",
+    "sign_convention_source": "suffix"
+  },
+  "XDLT": {
+    "sign_convention": "boundary_le",
+    "sign_convention_source": "suffix"
+  },
+  "XDVA": {
+    "sign_convention": "equality",
+    "sign_convention_source": "suffix"
+  },
+  "XENC": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "XENF": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "XNEA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "XNEG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "XNET": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "XXEA": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "XXEG": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "XXET": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "YNIP": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ZERN": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ZPLM": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  },
+  "ZTHI": {
+    "sign_convention": "measurement",
+    "sign_convention_source": null
+  }
+}

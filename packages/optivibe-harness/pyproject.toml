@@ -1,0 +1,41 @@
+# pyproject.toml — packaging metadata for optivibe_harness (the ZOS-API harness MCP).
+#
+# Exists so `pip install -e .` makes `python -m optivibe_harness` resolve when Claude
+# Code launches the single OptiVibe MCP: the reference package
+# already had a pyproject; the harness did not. setuptools src-layout, mirroring
+# ../optivibe-reference/pyproject.toml.
+#
+# Runtime `dependencies` are declared HONESTLY (they are already present in the
+# `optivibe-harness` conda env, so pip sees them satisfied): pythonnet bridges the
+# ZOS-API .NET surface, mcp serves the stdio MCP loop, psutil drives the PID-scoped
+# process reaper, and matplotlib + numpy render the headless meridional layout figures
+# (Agg backend). The reference layer is installed SEPARATELY and one-way
+# (`pip install -e ../optivibe-reference`), not declared here, so the two packages keep
+# their own envs and the dependency direction stays harness -> reference.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optivibe-harness"
+version = "0.1.0"
+description = "OptiVibe harness: ZOS-API automation, typed tools, and the single OptiVibe MCP"
+requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: Microsoft :: Windows",
+]
+dependencies = [
+    "pythonnet",
+    "mcp",
+    "psutil",
+    "matplotlib",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

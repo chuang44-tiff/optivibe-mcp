@@ -1,0 +1,22 @@
+optivibe-mcp
+Copyright 2026 The OptiVibe Authors
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this software except in compliance with the License. You may obtain a
+copy of the License in the LICENSE file or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+------------------------------------------------------------------------------
+
+optivibe-mcp is an independent project. It is not affiliated with, endorsed
+by, or sponsored by Ansys, Inc. or Zemax, LLC. "Zemax" and "OpticStudio" are
+trademarks of their respective owners and are used here only to identify the
+software this project interoperates with.
+
+optivibe-mcp redistributes no vendor data or SDK files. It drives the user's
+own licensed OpticStudio installation at runtime through the installed
+ZOS-API, and all vendor-derived reference data (glass catalog, manual index,
+operand/tolerance descriptions) is built locally on the user's machine from
+their own licensed install and is never committed. See PROVENANCE.md for the
+data-source and license ledger.

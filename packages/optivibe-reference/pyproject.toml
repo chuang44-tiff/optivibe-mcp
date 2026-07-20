@@ -1,0 +1,39 @@
+# pyproject.toml — minimal packaging metadata for optivibe_reference.
+#
+# Exists so the harness env can `pip install -e ../optivibe-reference` and import
+# optivibe_reference in-process (the single OptiVibe MCP composes both tool sets;
+# the harness imports the reference one-way). setuptools src-layout.
+#
+# Runtime `dependencies = []`: the reference glass/operand path is pure-stdlib
+# (sqlite + FTS5 are stdlib), so the editable install pulls CODE only and adds zero
+# dep surface to the harness env (it never competes for the single-seat license).
+# The manual-PDF ingest dep (pymupdf) and the test runner (pytest) are OPTIONAL
+# extras so the runtime install stays lean.
+#
+# package-data ships the COMMITTED catalog JSON (resolved via __file__-relative
+# anchors, which an editable install preserves); the binary *.db is deliberately
+# NOT shipped (gitignored, rebuilt locally).
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optivibe-reference"
+version = "0.1.0"
+description = "OptiVibe reference layer: lookup tables + RAG + intent->ZOS-API grounding"
+requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = []
+
+[project.optional-dependencies]
+manual = ["pymupdf"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+optivibe_reference = ["data/*.json"]

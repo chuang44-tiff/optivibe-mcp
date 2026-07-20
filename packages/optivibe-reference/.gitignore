@@ -1,0 +1,29 @@
+# Local-only build artifacts — never vendored (see PROVENANCE.md license ledger).
+# The manual FTS5 index is built locally from the install-dir PDF; the .db and any
+# extracted manual prose stay out of the repo (no prose redistribution).
+*.db
+*.db-wal
+*.db-shm
+.scratch/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# User-built data JSONs — derived locally from YOUR licensed install by
+# scripts/build_vendor_data.py (glass .agf recompute / manual PDF manifest /
+# live-probe operand+tolerance catalogs). The operand + tolerance catalogs embed
+# verbatim-local manual descriptions, so they too are user-built +
+# gitignored — only the synonyms/semantics SOURCES are committed. Never committed:
+# committing them would redistribute license-derived data.
+src/optivibe_reference/data/glass_catalog.json
+src/optivibe_reference/data/manual_manifest.json
+src/optivibe_reference/data/operand_catalog.json
+src/optivibe_reference/data/tolerance_operand_catalog.json
+src/optivibe_reference/data/operand_descriptions.json
+src/optivibe_reference/data/tolerance_operand_descriptions.json
+
+# The VERBATIM raw operand/tolerance description extracts (the manual oracle) +
+# all live-probe captures: manual prose / license-derived, GITIGNORED, never
+# committed. Emitted by scripts/build_manual_corpus.py --emit-raw and the probe
+# scripts; merged as verbatim-local descriptions into the user-built catalogs.
+scripts/captures/

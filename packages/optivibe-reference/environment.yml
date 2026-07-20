@@ -1,0 +1,13 @@
+name: optivibe-reference
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      # ONE source of truth for the dev deps: the editable install pulls the
+      # `manual` + `dev` extras from pyproject.toml (pymupdf for the manual-PDF
+      # ingest, pytest for the test runner). sqlite + FTS5 are stdlib (no extra
+      # dep). Runtime `dependencies = []` keeps the harness-side install lean;
+      # embedding deps only if/when semantic search is added.
+      - -e .[manual,dev]

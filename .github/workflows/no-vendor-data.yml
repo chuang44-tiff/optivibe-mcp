@@ -1,0 +1,35 @@
+# Cardinal-rule guard: FAIL CI if any vendor-derived data is ever committed.
+#
+# optivibe-mcp ships CODE ONLY. All vendor-derived reference data (glass catalog,
+# manual index, operand/tolerance descriptions/catalogs) is built locally on the
+# user's machine from their own licensed OpticStudio install and is gitignored —
+# never committed (see PROVENANCE.md). This workflow enforces that on every push
+# and pull request so a fork or PR cannot slip license-derived data into history.
+name: no-vendor-data
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Fail if any vendor-derived data is tracked
+        run: |
+          set -eu
+          # Files that must NEVER be committed (built locally, gitignored).
+          bad="$(git ls-files | grep -E \
+            '(^|/)(glass_catalog|manual_manifest|operand_catalog|tolerance_operand_catalog|operand_descriptions|tolerance_operand_descriptions)\.json$|\.db$|(^|/)scripts/captures/|\.agf$' \
+            || true)"
+          if [ -n "$bad" ]; then
+            echo "::error::Vendor-derived data must never be committed (see PROVENANCE.md). Offending tracked files:"
+            printf '%s\n' "$bad"
+            exit 1
+          fi
+          echo "OK: no vendor-derived data is tracked."

@@ -1,0 +1,1677 @@
+{
+  "rows": {
+    "ABCD": {
+      "synonyms": "abcd matrix grid distortion generalized distortion paraxial"
+    },
+    "ABGT": {
+      "synonyms": "absolute value greater than boundary constraint magnitude bound"
+    },
+    "ABLT": {
+      "synonyms": "absolute value less than boundary constraint magnitude bound"
+    },
+    "ABSO": {
+      "synonyms": "absolute value operand arithmetic magnitude"
+    },
+    "ACOS": {
+      "synonyms": "arccosine inverse cosine math operand radians degrees"
+    },
+    "AMAG": {
+      "synonyms": "angular magnification chief ray angle ratio afocal",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "ANAC": {
+      "synonyms": "angular aberration radial centroid image space direction cosine",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "ANAR": {
+      "synonyms": "angular aberration radius chief ray direction cosine"
+    },
+    "ANAX": {
+      "synonyms": "angular aberration x chief ray direction cosine",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "ANAY": {
+      "synonyms": "angular aberration y chief ray direction cosine",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "ANCX": {
+      "synonyms": "angular aberration x centroid direction cosine trac",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "ANCY": {
+      "synonyms": "angular aberration y centroid direction cosine trac",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "ASIN": {
+      "synonyms": "arcsine inverse sine math operand radians degrees"
+    },
+    "ASTI": {
+      "synonyms": "astigmatism seidel aberration",
+      "units": "waves",
+      "units_source": "authored"
+    },
+    "ATAN": {
+      "synonyms": "arctangent inverse tangent math operand radians degrees"
+    },
+    "AXCL": {
+      "synonyms": "axial color longitudinal chromatic aberration",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "BFSD": {
+      "synonyms": "best fit sphere bfs sag curvature radius volume"
+    },
+    "BIOC": {
+      "synonyms": "biocular convergence eye configuration milliradians binocular vision",
+      "units": "radians",
+      "units_source": "authored"
+    },
+    "BIOD": {
+      "synonyms": "biocular dipvergence eye configuration milliradians binocular vision",
+      "units": "radians",
+      "units_source": "authored"
+    },
+    "BLNK": {
+      "synonyms": "blank comment spacer no effect"
+    },
+    "BLTH": {
+      "synonyms": "blank thickness glass blank minimum sag semi-diameter manufacturing",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "BSER": {
+      "synonyms": "boresight error angular deviation chief ray focal length",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "CARD": {
+      "synonyms": "cardinal points principal plane nodal focal object image",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "CEGT": {
+      "synonyms": "coating extinction offset greater than boundary constraint layer"
+    },
+    "CEHX": {
+      "synonyms": "huygens psf centroid x position field apodization polarization",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "CEHY": {
+      "synonyms": "huygens psf centroid y position field apodization polarization",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "CELT": {
+      "synonyms": "coating extinction offset less than boundary constraint layer"
+    },
+    "CENX": {
+      "synonyms": "centroid x position ray grid field apodization polarization",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "CENY": {
+      "synonyms": "centroid y position ray grid field apodization polarization",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "CEVA": {
+      "synonyms": "coating extinction offset equal boundary constraint layer"
+    },
+    "CIGT": {
+      "synonyms": "coating index offset greater than boundary constraint layer",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "CILT": {
+      "synonyms": "coating index offset less than boundary constraint layer",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "CIVA": {
+      "synonyms": "coating index offset equal boundary constraint layer",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "CMFV": {
+      "synonyms": "construction merit function value hologram optically fabricated operand"
+    },
+    "CMGT": {
+      "synonyms": "coating multiplier greater than boundary constraint layer",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "CMLT": {
+      "synonyms": "coating multiplier less than boundary constraint layer",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "CMVA": {
+      "synonyms": "coating multiplier equal boundary constraint layer",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "CNAX": {
+      "synonyms": "centroid angular x direction angle radians ray grid",
+      "units": "radians",
+      "units_source": "authored"
+    },
+    "CNAY": {
+      "synonyms": "centroid angular y direction angle radians ray grid",
+      "units": "radians",
+      "units_source": "authored"
+    },
+    "CNPX": {
+      "synonyms": "centroid position x ray grid field point cnax",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "CNPY": {
+      "synonyms": "centroid position y coma normalized cnay spot center",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "CODA": {
+      "synonyms": "coating data polarization reflectance transmittance absorption e field phase"
+    },
+    "COGT": {
+      "synonyms": "conic greater than boundary minimum surface",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "COLT": {
+      "synonyms": "conic less than boundary maximum surface",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "COMA": {
+      "synonyms": "coma seidel aberration",
+      "units": "waves",
+      "units_source": "authored"
+    },
+    "CONF": {
+      "synonyms": "configuration switch multi config zoom optimization"
+    },
+    "CONS": {
+      "synonyms": "constant value literal"
+    },
+    "COSI": {
+      "synonyms": "cosine operand trigonometric radians degrees arithmetic",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "COVA": {
+      "synonyms": "conic value constant surface return",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "CTGT": {
+      "synonyms": "center thickness greater than boundary minimum",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "CTLT": {
+      "synonyms": "center thickness less than boundary maximum",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "CTVA": {
+      "synonyms": "center thickness value",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "CVGT": {
+      "synonyms": "curvature greater than boundary",
+      "units": "inverse_lens_units",
+      "units_source": "authored"
+    },
+    "CVIG": {
+      "synonyms": "clear vignetting factors reset configuration"
+    },
+    "CVLT": {
+      "synonyms": "curvature less than boundary",
+      "units": "inverse_lens_units",
+      "units_source": "authored"
+    },
+    "CVOL": {
+      "synonyms": "cylinder volume package size envelope semi diameter"
+    },
+    "CVVA": {
+      "synonyms": "curvature value surface",
+      "units": "inverse_lens_units",
+      "units_source": "authored"
+    },
+    "DENC": {
+      "synonyms": "diffraction encircled energy ensquared spot fraction",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "DENF": {
+      "synonyms": "diffraction encircled energy fraction ensquared enslitted distance",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "DIFF": {
+      "synonyms": "difference subtract operands arithmetic"
+    },
+    "DIMX": {
+      "synonyms": "maximum distortion field",
+      "units": "percent",
+      "units_source": "authored"
+    },
+    "DISA": {
+      "synonyms": "distortion abcd grid chief ray field user coefficients"
+    },
+    "DISC": {
+      "synonyms": "calibrated distortion f theta scan lens linearity deviation",
+      "units": "percent",
+      "units_source": "authored"
+    },
+    "DISG": {
+      "synonyms": "generalized distortion percent absolute length field pupil ray",
+      "units": "percent",
+      "units_source": "authored"
+    },
+    "DIST": {
+      "synonyms": "distortion percent field image height error"
+    },
+    "DIVB": {
+      "synonyms": "divide operand factor scale arithmetic"
+    },
+    "DIVI": {
+      "synonyms": "divide two operands quotient ratio arithmetic another"
+    },
+    "DLTN": {
+      "synonyms": "delta n gradient index grin refractive index range",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "DMFS": {
+      "synonyms": "default merit function start marker append row flag"
+    },
+    "DMGT": {
+      "synonyms": "diameter semi-diameter greater than boundary",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "DMLT": {
+      "synonyms": "diameter semi-diameter less than boundary",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "DMVA": {
+      "synonyms": "diameter value surface semi diameter target equal",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "DPHS": {
+      "synonyms": "phase data surface rms pv waves diffractive freeform sampling",
+      "units": "waves",
+      "units_source": "authored"
+    },
+    "DSLP": {
+      "synonyms": "slope data surface rms pv freeform manufacturability gradient",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "DXDX": {
+      "synonyms": "derivative transverse aberration x pupil ray fan slope"
+    },
+    "DXDY": {
+      "synonyms": "derivative transverse aberration x y pupil ray fan slope"
+    },
+    "DYDX": {
+      "synonyms": "derivative transverse aberration y x pupil ray fan slope"
+    },
+    "DYDY": {
+      "synonyms": "derivative transverse aberration y pupil ray fan slope"
+    },
+    "EFFL": {
+      "synonyms": "effective focal length system power focal length efl",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "EFLA": {
+      "synonyms": "effective focal length air element power surface range",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "EFLX": {
+      "synonyms": "effective focal length x plane anamorphic cylindrical",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "EFLY": {
+      "synonyms": "effective focal length y plane anamorphic cylindrical",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "EFNO": {
+      "synonyms": "effective f number fnumber field aperture speed polarization",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "ENDX": {
+      "synonyms": "end execution stop terminate merit function skip"
+    },
+    "ENPP": {
+      "synonyms": "entrance pupil position location",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "EPDI": {
+      "synonyms": "entrance pupil diameter aperture size epd",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "EQUA": {
+      "synonyms": "equal operands range match average tolerance constraint two"
+    },
+    "ERFP": {
+      "synonyms": "edge response function position line spread esf fraction",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "ETGT": {
+      "synonyms": "edge thickness greater than boundary minimum surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "ETLT": {
+      "synonyms": "edge thickness less than boundary maximum surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "ETVA": {
+      "synonyms": "edge thickness value equal surface target axis",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "EXPD": {
+      "synonyms": "exit pupil diameter paraxial pupil size centered",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "EXPP": {
+      "synonyms": "exit pupil position location",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "FCGS": {
+      "synonyms": "sagittal field curvature geometric focus shift"
+    },
+    "FCGT": {
+      "synonyms": "tangential field curvature geometric focus shift",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "FCUR": {
+      "synonyms": "field curvature seidel petzval",
+      "units": "waves",
+      "units_source": "authored"
+    },
+    "FDMO": {
+      "synonyms": "field data modify override field coordinates vignetting temporary"
+    },
+    "FDRE": {
+      "synonyms": "field data restore revert field reset vignetting"
+    },
+    "FICL": {
+      "synonyms": "single mode fiber coupling efficiency numerical aperture huygens",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "FICP": {
+      "synonyms": "fiber coupling physical optics propagation pop efficiency polarization",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "FOUC": {
+      "synonyms": "foucault knife edge shadowgram rms wavefront analysis"
+    },
+    "FREZ": {
+      "synonyms": "freeform z object constraint volume slope increment boundary"
+    },
+    "FTGT": {
+      "synonyms": "full thickness greater than boundary sag zone minimum",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "FTLT": {
+      "synonyms": "full thickness less than boundary sag zone maximum",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GAOI": {
+      "synonyms": "ghost angle incidence double bounce reflection stray",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "GBPD": {
+      "synonyms": "gaussian beam paraxial divergence waist m squared"
+    },
+    "GBPP": {
+      "synonyms": "gaussian beam paraxial position waist distance surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GBPR": {
+      "synonyms": "gaussian beam paraxial radius of curvature phase front",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GBPS": {
+      "synonyms": "gaussian beam paraxial size radius surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GBPW": {
+      "synonyms": "gaussian beam paraxial waist minimum radius surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GBPZ": {
+      "synonyms": "gaussian beam paraxial rayleigh range surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GBSD": {
+      "synonyms": "skew gaussian beam divergence chief ray waist field"
+    },
+    "GBSP": {
+      "synonyms": "skew gaussian beam position waist distance surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GBSR": {
+      "synonyms": "skew gaussian beam radius wavefront surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GBSS": {
+      "synonyms": "skew gaussian beam size radius surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GBSW": {
+      "synonyms": "skew gaussian beam waist minimum radius surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GCOS": {
+      "synonyms": "glass cost relative factor material catalog surface",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GENC": {
+      "synonyms": "geometric encircled energy ensquared fraction",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GENF": {
+      "synonyms": "geometric encircled energy fraction ensquared enslitted distance",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GLCA": {
+      "synonyms": "global orientation vector x component surface direction",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GLCB": {
+      "synonyms": "global orientation vector y component surface direction",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GLCC": {
+      "synonyms": "global orientation vector z component surface direction",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GLCR": {
+      "synonyms": "global rotation matrix component surface orientation element",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GLCX": {
+      "synonyms": "global vertex x coordinate surface position",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GLCY": {
+      "synonyms": "global vertex y coordinate surface position",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GLCZ": {
+      "synonyms": "global vertex z coordinate surface position",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GMTA": {
+      "synonyms": "geometric mtf average sagittal tangential contrast resolution",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GMTN": {
+      "synonyms": "geometric mtf minimum sagittal tangential contrast resolution",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GMTS": {
+      "synonyms": "geometric mtf sagittal contrast resolution spatial frequency",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GMTT": {
+      "synonyms": "geometric mtf tangential contrast resolution spatial frequency",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GMTX": {
+      "synonyms": "geometric mtf maximum sagittal tangential contrast resolution",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GOTO": {
+      "synonyms": "goto skip jump merit function row flow control"
+    },
+    "GPIM": {
+      "synonyms": "ghost pupil image stray light double bounce flare suppression",
+      "units": "inverse_lens_units",
+      "units_source": "authored"
+    },
+    "GPRT": {
+      "synonyms": "ghost ray transmission double bounce stray light throughput",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GPRX": {
+      "synonyms": "ghost ray real x coordinate image surface double bounce",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GPRY": {
+      "synonyms": "ghost ray real y coordinate image surface double bounce",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GPSX": {
+      "synonyms": "ghost ray paraxial x coordinate image surface double bounce",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GPSY": {
+      "synonyms": "ghost ray paraxial y coordinate image surface double bounce",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "GRMN": {
+      "synonyms": "gradient index minimum refractive index grin boundary lower limit",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GRMX": {
+      "synonyms": "gradient index maximum refractive index grin boundary upper limit",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "GTCE": {
+      "synonyms": "glass tce thermal expansion coefficient alpha material"
+    },
+    "HHCN": {
+      "synonyms": "hyperhemisphere test surface shape sag constraint boundary"
+    },
+    "IMAE": {
+      "synonyms": "image analysis efficiency centroid rms geometric spot diagram"
+    },
+    "IMSF": {
+      "synonyms": "image surface intermediate redefine evaluate refocus"
+    },
+    "INDX": {
+      "synonyms": "index of refraction material glass",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "ISFN": {
+      "synonyms": "image space f-number fnumber",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "ISNA": {
+      "synonyms": "image space numerical aperture na paraxial conjugates",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "LACL": {
+      "synonyms": "lateral color transverse chromatic aberration",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "LINV": {
+      "synonyms": "lagrange invariant optical invariant etendue paraxial",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "LOGE": {
+      "synonyms": "natural log base e logarithm operand arithmetic",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "LOGT": {
+      "synonyms": "log base 10 logarithm operand arithmetic",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "LONA": {
+      "synonyms": "longitudinal aberration defocus spherical zone focal shift",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "LPTD": {
+      "synonyms": "gradient index axial profile slope sign boundary grin"
+    },
+    "MAXX": {
+      "synonyms": "maximum largest value operand range arithmetic two"
+    },
+    "MCOG": {
+      "synonyms": "multi configuration operand greater than constraint zoom"
+    },
+    "MCOL": {
+      "synonyms": "multi configuration operand less than constraint zoom"
+    },
+    "MCOV": {
+      "synonyms": "multi configuration operand value zoom target"
+    },
+    "MECA": {
+      "synonyms": "moore elliott contrast mtf average sagittal tangential frequency",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MECS": {
+      "synonyms": "moore elliott contrast sagittal mtf response",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MECT": {
+      "synonyms": "moore elliott contrast tangential mtf response",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MINN": {
+      "synonyms": "minimum smallest value operand range arithmetic two"
+    },
+    "MNAB": {
+      "synonyms": "minimum abbe number dispersion glass",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MNAI": {
+      "synonyms": "minimum angle of incidence aoi boundary marginal chief ray"
+    },
+    "MNCA": {
+      "synonyms": "minimum center thickness air boundary",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "MNCG": {
+      "synonyms": "minimum center thickness glass boundary",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "MNCT": {
+      "synonyms": "minimum center thickness boundary range surfaces lower limit",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "MNCV": {
+      "synonyms": "minimum curvature boundary range surfaces lower limit",
+      "units": "inverse_lens_units",
+      "units_source": "authored"
+    },
+    "MNDT": {
+      "synonyms": "minimum diameter to thickness ratio boundary aspect manufacturability",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MNEA": {
+      "synonyms": "minimum edge thickness air boundary",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "MNEG": {
+      "synonyms": "minimum edge thickness glass boundary",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "MNET": {
+      "synonyms": "minimum edge thickness boundary range surfaces lower limit",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "MNIN": {
+      "synonyms": "minimum index d light nd boundary glass lower limit",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MNPD": {
+      "synonyms": "minimum partial dispersion deviation pgf boundary glass",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MNRE": {
+      "synonyms": "minimum real ray angle exitance exit boundary surface",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "MNRI": {
+      "synonyms": "minimum real ray angle incidence boundary surface aoi",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "MNSD": {
+      "synonyms": "minimum semi diameter clear aperture lower bound surface range",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "MSWA": {
+      "synonyms": "square wave mtf average sagittal tangential modulation",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MSWN": {
+      "synonyms": "square wave mtf minimum sagittal tangential worst",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MSWS": {
+      "synonyms": "square wave mtf sagittal modulation",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MSWT": {
+      "synonyms": "square wave mtf tangential modulation",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MSWX": {
+      "synonyms": "square wave mtf maximum sagittal tangential best",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MTFA": {
+      "synonyms": "mtf diffraction modulation transfer function average sagittal tangential spatial frequency",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MTFN": {
+      "synonyms": "mtf minimum sagittal tangential worst modulation",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MTFS": {
+      "synonyms": "sagittal mtf modulation transfer function contrast resolution",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MTFT": {
+      "synonyms": "tangential mtf modulation transfer function contrast resolution",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MTFX": {
+      "synonyms": "mtf maximum sagittal tangential best modulation",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MTHA": {
+      "synonyms": "huygens mtf average sagittal tangential diffraction modulation transfer",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MTHN": {
+      "synonyms": "huygens mtf minimum sagittal tangential worst",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MTHS": {
+      "synonyms": "huygens mtf sagittal modulation",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MTHT": {
+      "synonyms": "huygens mtf tangential modulation",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MTHX": {
+      "synonyms": "huygens mtf maximum sagittal tangential best",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MXAB": {
+      "synonyms": "maximum abbe number dispersion glass",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MXAI": {
+      "synonyms": "maximum angle incidence ray surface marginal chief"
+    },
+    "MXCA": {
+      "synonyms": "maximum center thickness air boundary",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "MXCG": {
+      "synonyms": "maximum center thickness glass boundary",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "MXCT": {
+      "synonyms": "maximum center thickness upper bound surface range",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "MXCV": {
+      "synonyms": "maximum curvature upper bound surface range",
+      "units": "inverse_lens_units",
+      "units_source": "authored"
+    },
+    "MXDT": {
+      "synonyms": "maximum diameter thickness ratio upper bound surface range",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MXEA": {
+      "synonyms": "maximum edge thickness air upper bound surface range",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "MXEG": {
+      "synonyms": "maximum edge thickness glass upper bound surface range",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "MXET": {
+      "synonyms": "maximum edge thickness upper bound surface range",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "MXIN": {
+      "synonyms": "maximum index refraction nd d light upper bound",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MXPD": {
+      "synonyms": "maximum partial dispersion deviation pgf upper bound glass",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "MXRE": {
+      "synonyms": "maximum real ray exit angle exitance surface normal degrees",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "MXRI": {
+      "synonyms": "maximum real ray incidence angle surface normal degrees",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "MXSD": {
+      "synonyms": "maximum semi diameter clear aperture upper bound surface range",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "NORD": {
+      "synonyms": "normal distance next surface along vector coordinate",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "NORX": {
+      "synonyms": "normal vector x component surface coordinate global local",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "NORY": {
+      "synonyms": "normal vector y component surface coordinate global local",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "NORZ": {
+      "synonyms": "normal vector z component surface coordinate global local",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "NPAF": {
+      "synonyms": "non sequential paf file save name nstr"
+    },
+    "NPGT": {
+      "synonyms": "non sequential parameter greater than nsc object param"
+    },
+    "NPLT": {
+      "synonyms": "non sequential parameter less than nsc object param"
+    },
+    "NPVA": {
+      "synonyms": "non sequential parameter value nsc object param"
+    },
+    "NPXG": {
+      "synonyms": "non sequential object x position greater than nsc reference",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "NPXL": {
+      "synonyms": "non sequential object x position less than nsc reference",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "NPXV": {
+      "synonyms": "nsc object x position value place object x coordinate non-sequential position",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "NPYG": {
+      "synonyms": "nsc object y position greater minimum y coordinate non-sequential position bound",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "NPYL": {
+      "synonyms": "nsc object y position less maximum y coordinate non-sequential position bound",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "NPYV": {
+      "synonyms": "nsc object y position value place object y coordinate non-sequential position",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "NPZG": {
+      "synonyms": "nsc object z position greater minimum z coordinate non-sequential position bound",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "NPZL": {
+      "synonyms": "nsc object z position less maximum z coordinate non-sequential position bound",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "NPZV": {
+      "synonyms": "nsc object z position value place object z coordinate non-sequential position",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "NSDC": {
+      "synonyms": "nsc coherent detector data pixel amplitude power phase non-sequential"
+    },
+    "NSDD": {
+      "synonyms": "nsc incoherent detector data flux pixel centroid clear detector non-sequential"
+    },
+    "NSDE": {
+      "synonyms": "nsc detector color data chromaticity tristimulus lumens cie non-sequential"
+    },
+    "NSDP": {
+      "synonyms": "nsc polar detector data solid angle power chromaticity non-sequential"
+    },
+    "NSLT": {
+      "synonyms": "nsc lightningtrace mesh ray trace sampling source non-sequential optimization"
+    },
+    "NSRA": {
+      "synonyms": "nsc single ray trace segment cosine normal intensity phase non-sequential"
+    },
+    "NSRD": {
+      "synonyms": "nsc zrd ray database file format save trace non-sequential"
+    },
+    "NSRM": {
+      "synonyms": "nsc rotation matrix component object orientation reference non-sequential",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "NSRW": {
+      "synonyms": "nsc roadway lighting luminance illuminance uniformity road metrics non-sequential"
+    },
+    "NSST": {
+      "synonyms": "nsc single ray trace intercept cosine normal face object non-sequential"
+    },
+    "NSTR": {
+      "synonyms": "nsc trace sources splitting scattering polarization detector non-sequential optimization"
+    },
+    "NSTW": {
+      "synonyms": "nsc roadway raytrace mounting height road lighting trace non-sequential"
+    },
+    "NTXG": {
+      "synonyms": "nsc object tilt x greater minimum tilt about x non-sequential bound"
+    },
+    "NTXL": {
+      "synonyms": "nsc object tilt x less maximum tilt about x non-sequential bound"
+    },
+    "NTXV": {
+      "synonyms": "nsc object tilt x value set tilt about x non-sequential orientation"
+    },
+    "NTYG": {
+      "synonyms": "nsc object tilt y greater minimum tilt about y non-sequential bound"
+    },
+    "NTYL": {
+      "synonyms": "nsc object tilt y less maximum tilt about y non-sequential bound"
+    },
+    "NTYV": {
+      "synonyms": "nsc object tilt y value set tilt about y non-sequential orientation"
+    },
+    "NTZG": {
+      "synonyms": "nsc object tilt z greater minimum tilt about z non-sequential bound"
+    },
+    "NTZL": {
+      "synonyms": "nsc object tilt z less maximum tilt about z non-sequential bound"
+    },
+    "NTZV": {
+      "synonyms": "nsc object tilt z value set tilt about z non-sequential orientation"
+    },
+    "OBSN": {
+      "synonyms": "object space numerical aperture na finite conjugate primary wavelength",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "OOFF": {
+      "synonyms": "unused operand blank placeholder unrecognized merit function row off"
+    },
+    "OPDC": {
+      "synonyms": "optical path difference opd chief ray waves wavefront pupil",
+      "units": "waves",
+      "units_source": "authored"
+    },
+    "OPDM": {
+      "synonyms": "optical path difference opd mean reference waves wavefront pupil",
+      "units": "waves",
+      "units_source": "authored"
+    },
+    "OPDX": {
+      "synonyms": "optical path difference opd mean tilt removed waves wavefront pupil",
+      "units": "waves",
+      "units_source": "authored"
+    },
+    "OPGT": {
+      "synonyms": "operand greater than boundary reference row"
+    },
+    "OPLT": {
+      "synonyms": "operand less than boundary reference row below under limit keep bound"
+    },
+    "OPTH": {
+      "synonyms": "optical path length opl ray distance surface index grating",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "OPVA": {
+      "synonyms": "operand value match constrain reference op equal target"
+    },
+    "OSCD": {
+      "synonyms": "offense sine condition osc abbe coma pupil zone aplanatic",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "OSUM": {
+      "synonyms": "sum operands add range total summation accumulate"
+    },
+    "PANA": {
+      "synonyms": "paraxial surface normal x component local normal vector ray intercept",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "PANB": {
+      "synonyms": "paraxial surface normal y component local normal vector ray intercept",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "PANC": {
+      "synonyms": "paraxial surface normal z component local normal vector ray intercept",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "PARA": {
+      "synonyms": "paraxial ray direction cosine x refracted ray slope",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "PARB": {
+      "synonyms": "paraxial ray direction cosine y refracted ray slope",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "PARC": {
+      "synonyms": "paraxial ray direction cosine z refracted ray slope",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "PARR": {
+      "synonyms": "paraxial ray radial coordinate height radius surface intercept",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "PARX": {
+      "synonyms": "paraxial ray x coordinate position surface intercept",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "PARY": {
+      "synonyms": "paraxial ray y coordinate position surface intercept",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "PARZ": {
+      "synonyms": "paraxial ray z coordinate position surface intercept",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "PATX": {
+      "synonyms": "paraxial ray tangent x slope angle xz plane",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "PATY": {
+      "synonyms": "paraxial ray tangent y slope angle yz plane",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "PETC": {
+      "synonyms": "petzval curvature field curvature inverse lens units",
+      "units": "inverse_lens_units",
+      "units_source": "authored"
+    },
+    "PETZ": {
+      "synonyms": "petzval radius field curvature radius lens units",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "PIMH": {
+      "synonyms": "paraxial image height",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "PLEN": {
+      "synonyms": "path length optical path opl ray between surfaces",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "PMAG": {
+      "synonyms": "paraxial magnification image height ratio",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "PMGT": {
+      "synonyms": "parameter greater than boundary constraint minimum surface parameter"
+    },
+    "PMLT": {
+      "synonyms": "parameter less than boundary constraint maximum surface parameter"
+    },
+    "PMVA": {
+      "synonyms": "parameter value equal boundary constraint surface parameter target"
+    },
+    "POPD": {
+      "synonyms": "physical optics propagation pop fiber coupling beam width m-squared irradiance"
+    },
+    "POPI": {
+      "synonyms": "physical optics propagation pixel ex ey irradiance phase field"
+    },
+    "POWF": {
+      "synonyms": "power field point efl diopters refraction tangential sagittal astigmatic"
+    },
+    "POWP": {
+      "synonyms": "power pupil point efl diopters refraction tangential sagittal astigmatic"
+    },
+    "POWR": {
+      "synonyms": "surface power inverse lens units standard surface refractive power",
+      "units": "inverse_lens_units",
+      "units_source": "authored"
+    },
+    "PRIM": {
+      "synonyms": "primary wavelength set change merit function wavelength reference"
+    },
+    "PROB": {
+      "synonyms": "product multiply operand factor scale weight"
+    },
+    "PROD": {
+      "synonyms": "product multiply operands arithmetic"
+    },
+    "PSLP": {
+      "synonyms": "phase slope binary diffractive surface gradient periods orientation",
+      "units": "inverse_lens_units",
+      "units_source": "authored"
+    },
+    "QSLP": {
+      "synonyms": "phase slope statistics rms pv min max sampling diffractive surface"
+    },
+    "QSUM": {
+      "synonyms": "quadratic sum rss root sum square operands range"
+    },
+    "RAED": {
+      "synonyms": "real ray angle exitance degrees surface normal refraction reflection",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "RAEN": {
+      "synonyms": "real ray exitance cosine angle surface normal refraction reflection",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "RAGA": {
+      "synonyms": "global ray direction cosine x real ray global coordinates",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "RAGB": {
+      "synonyms": "global ray direction cosine y real ray global coordinates",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "RAGC": {
+      "synonyms": "global ray direction cosine z real ray global coordinates",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "RAGX": {
+      "synonyms": "global ray x coordinate position real ray global coordinates",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "RAGY": {
+      "synonyms": "global ray y coordinate position global frame",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "RAGZ": {
+      "synonyms": "global ray z coordinate position global frame",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "RAID": {
+      "synonyms": "ray angle of incidence aoi surface",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "RAIN": {
+      "synonyms": "ray angle of incidence cosine aoi surface normal",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "RANG": {
+      "synonyms": "ray angle radians z axis slope direction",
+      "units": "radians",
+      "units_source": "authored"
+    },
+    "REAA": {
+      "synonyms": "real ray x direction cosine after refraction",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "REAB": {
+      "synonyms": "real ray y direction cosine after refraction",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "REAC": {
+      "synonyms": "real ray z direction cosine after refraction",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "REAR": {
+      "synonyms": "real ray radial coordinate intercept surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "REAX": {
+      "synonyms": "real ray x coordinate intercept surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "REAY": {
+      "synonyms": "real ray y coordinate intercept surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "REAZ": {
+      "synonyms": "real ray z coordinate intercept surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "RECI": {
+      "synonyms": "reciprocal inverse one over operand arithmetic"
+    },
+    "RELI": {
+      "synonyms": "relative illumination irradiance falloff vignetting brightness field",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "RENA": {
+      "synonyms": "surface normal x component ray intercept direction",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "RENB": {
+      "synonyms": "surface normal y component ray intercept direction",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "RENC": {
+      "synonyms": "surface normal z component ray intercept direction",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "RETX": {
+      "synonyms": "ray tangent x slope direction surface",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "RETY": {
+      "synonyms": "ray tangent y slope direction surface",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "RGLA": {
+      "synonyms": "relative glass real glass catalog constraint substitution"
+    },
+    "RSCE": {
+      "synonyms": "rms spot radius centroid spot size image quality good performance sharpness",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "RSCH": {
+      "synonyms": "rms spot radius chief ray spot size image quality good performance",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "RSRE": {
+      "synonyms": "rms spot radius centroid spot size image quality",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "RSRH": {
+      "synonyms": "rms spot radius chief ray image quality",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "RWCE": {
+      "synonyms": "rms wavefront error centroid waves image quality aberration",
+      "units": "waves",
+      "units_source": "authored"
+    },
+    "RWCH": {
+      "synonyms": "rms wavefront error chief ray waves aberration",
+      "units": "waves",
+      "units_source": "authored"
+    },
+    "RWRE": {
+      "synonyms": "rms wavefront error waves image quality good performance aberration sharpness",
+      "units": "waves",
+      "units_source": "authored"
+    },
+    "RWRH": {
+      "synonyms": "rms wavefront error chief ray waves grid",
+      "units": "waves",
+      "units_source": "authored"
+    },
+    "SAGX": {
+      "synonyms": "surface sag x semi-diameter edge profile",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "SAGY": {
+      "synonyms": "surface sag y semi-diameter edge profile",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "SCRV": {
+      "synonyms": "surface curvature local point orientation best-fit sphere",
+      "units": "inverse_lens_units",
+      "units_source": "authored"
+    },
+    "SCUR": {
+      "synonyms": "surface curvature tangential sagittal maximum data selector",
+      "units": "inverse_lens_units",
+      "units_source": "authored"
+    },
+    "SDRV": {
+      "synonyms": "surface derivative sag slope second derivative tangential sagittal"
+    },
+    "SFNO": {
+      "synonyms": "sagittal working f-number fnumber aperture speed",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "SINE": {
+      "synonyms": "sine trigonometric function operand radians degrees",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "SKIN": {
+      "synonyms": "skip if not symmetric merit function control branch"
+    },
+    "SKIS": {
+      "synonyms": "skip if symmetric merit function control branch rotational"
+    },
+    "SMIA": {
+      "synonyms": "smia tv distortion video television field width"
+    },
+    "SPCH": {
+      "synonyms": "spherochromatism axial color chromatic spherical aberration zone",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "SPHA": {
+      "synonyms": "spherical aberration seidel",
+      "units": "waves",
+      "units_source": "authored"
+    },
+    "SPHS": {
+      "synonyms": "surface phase waves diffractive tilt power term remove",
+      "units": "waves",
+      "units_source": "authored"
+    },
+    "SQRT": {
+      "synonyms": "square root operand arithmetic math function"
+    },
+    "SSAG": {
+      "synonyms": "surface sag local point profile best-fit sphere",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "SSLP": {
+      "synonyms": "surface slope local point gradient orientation",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "STHI": {
+      "synonyms": "surface thickness local point gap next surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "STRH": {
+      "synonyms": "strehl ratio diffraction limited image quality good performance",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "SUMM": {
+      "synonyms": "sum operands arithmetic combine"
+    },
+    "SVIG": {
+      "synonyms": "set vignetting factors configuration precision optimization"
+    },
+    "TANG": {
+      "synonyms": "tangent trigonometric operand radians degrees arithmetic",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "TCGT": {
+      "synonyms": "thermal expansion coefficient tce greater than boundary minimum"
+    },
+    "TCLT": {
+      "synonyms": "thermal expansion coefficient tce less than boundary maximum"
+    },
+    "TCVA": {
+      "synonyms": "thermal expansion coefficient tce value surface"
+    },
+    "TFNO": {
+      "synonyms": "tangential working f-number fnumber aperture field",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "TGTH": {
+      "synonyms": "sum glass thickness range non-air total material",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TMAS": {
+      "synonyms": "total mass glass elements weight range"
+    },
+    "TOLR": {
+      "synonyms": "tolerance data sensitivity analysis performance estimate"
+    },
+    "TOTR": {
+      "synonyms": "total track length overall length package size",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TRAC": {
+      "synonyms": "transverse aberration radial centroid spot blur image quality",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TRAD": {
+      "synonyms": "transverse aberration x component radial blur",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TRAE": {
+      "synonyms": "transverse aberration y component radial blur",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TRAI": {
+      "synonyms": "transverse aberration radius surface chief ray blur",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TRAR": {
+      "synonyms": "transverse ray aberration radial spot blur image quality good performance sharpness",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TRAX": {
+      "synonyms": "transverse ray aberration x blur",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TRAY": {
+      "synonyms": "transverse ray aberration y blur",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TRCX": {
+      "synonyms": "transverse aberration x centroid image blur",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TRCY": {
+      "synonyms": "transverse aberration y centroid image blur",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TSAG": {
+      "synonyms": "sag surface lens units reference point tilt",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TTGT": {
+      "synonyms": "total thickness greater than boundary sag axis minimum",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TTHI": {
+      "synonyms": "total thickness sum range length",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TTLT": {
+      "synonyms": "total thickness less than boundary sag maximum",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TTVA": {
+      "synonyms": "total thickness value surface sag",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "UDOC": {
+      "synonyms": "user defined operand zos-api external program custom"
+    },
+    "USYM": {
+      "synonyms": "assume radial symmetry merit function speed user symmetry"
+    },
+    "VOLU": {
+      "synonyms": "volume element cubic cm range size"
+    },
+    "WFNO": {
+      "synonyms": "working f-number fnumber aperture speed",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "WLEN": {
+      "synonyms": "wavelength micrometers value wave"
+    },
+    "XENC": {
+      "synonyms": "extended source encircled energy distance ensquared fraction"
+    },
+    "XENF": {
+      "synonyms": "extended source encircled energy fraction ensquared distance",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "XNEA": {
+      "synonyms": "minimum edge thickness air range perimeter boundary",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "XNEG": {
+      "synonyms": "minimum edge thickness glass range perimeter boundary",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "XNET": {
+      "synonyms": "minimum edge thickness range perimeter boundary surfaces",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "XXEA": {
+      "synonyms": "maximum edge thickness air range perimeter boundary",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "XXEG": {
+      "synonyms": "maximum edge thickness glass range perimeter boundary",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "XXET": {
+      "synonyms": "maximum edge thickness range perimeter boundary surfaces",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "YNIP": {
+      "synonyms": "yni paraxial marginal ray narcissus thermal surface"
+    },
+    "ZERN": {
+      "synonyms": "zernike coefficient fringe standard annular wavefront fit"
+    },
+    "ZPLM": {
+      "synonyms": "zpl macro user defined operand custom result"
+    },
+    "ZTHI": {
+      "synonyms": "total thickness variation zoom configuration multi-config boundary",
+      "units": "lens_units",
+      "units_source": "authored"
+    }
+  },
+  "schema_version": 1
+}

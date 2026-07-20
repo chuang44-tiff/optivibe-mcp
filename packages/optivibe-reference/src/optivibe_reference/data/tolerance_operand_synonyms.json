@@ -1,0 +1,307 @@
+{
+  "rows": {
+    "ISOA": {
+      "category": "iso",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "iso peak to valley power surface form iso-10110 power term nanometers"
+    },
+    "ISOB": {
+      "category": "iso",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "iso peak to valley irregularity total surface form iso-10110 nanometers figure error"
+    },
+    "ISOC": {
+      "category": "iso",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "iso peak to valley rotationally symmetric irregularity rsi surface form iso-10110 nanometers"
+    },
+    "ISOD": {
+      "category": "iso",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "iso rms irregularity total surface form iso-10110 nanometers figure error"
+    },
+    "TABB": {
+      "category": "index",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "abbe number vd dispersion v-number glass dispersion",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "TARR": {
+      "category": "tir_roll",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "radial roll angle element roll tilt roll surface center of curvature random radial",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "TARX": {
+      "category": "tir_roll",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "roll angle element roll tilt about x roll surface center of curvature bonded cemented",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "TARY": {
+      "category": "tir_roll",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "roll angle element roll tilt about y roll surface center of curvature bonded cemented",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "TCON": {
+      "category": "parameter",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "conic constant conic asphere conic error eccentricity",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "TCUR": {
+      "category": "parameter",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "curvature surface power inverse radius bend",
+      "units": "inverse_lens_units",
+      "units_source": "authored"
+    },
+    "TEDR": {
+      "category": "element",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "element radial decenter offset shift lateral surface range random radial group",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TEDX": {
+      "category": "element",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "element decenter offset shift lateral surface range along x group cartesian",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TEDY": {
+      "category": "element",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "element decenter offset shift lateral surface range along y group cartesian",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TETX": {
+      "category": "element",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "element tilt tip angular wedge surface range about x group",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "TETY": {
+      "category": "element",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "element tilt tip angular wedge surface range about y group",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "TETZ": {
+      "category": "element",
+      "precondition_class": "tde_native",
+      "run_verdict": "inert",
+      "synonyms": "element tilt tip angular roll surface range about z group clocking",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "TEXI": {
+      "category": "irregularity",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "surface irregularity fringe zernike form error figure error zero to peak term range",
+      "units": "fringes",
+      "units_source": "authored"
+    },
+    "TEZI": {
+      "category": "irregularity",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "surface irregularity standard zernike form error figure error rms term range",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TFRN": {
+      "category": "parameter",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "fringe radius test plate newton rings flat surface long radius power",
+      "units": "fringes",
+      "units_source": "authored"
+    },
+    "TIND": {
+      "category": "index",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "index refractive index material index melt index variation refraction",
+      "units": "dimensionless",
+      "units_source": "authored"
+    },
+    "TIRR": {
+      "category": "irregularity",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "surface irregularity form error fringe figure error sag departure astigmatism",
+      "units": "fringes",
+      "units_source": "authored"
+    },
+    "TIRX": {
+      "category": "surface",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "surface tir total indicator runout wedge tilt sag departure about x",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TIRY": {
+      "category": "surface",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "surface tir total indicator runout wedge tilt sag departure about y",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TPAR": {
+      "category": "parameter",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "parameter value surface parameter aspheric coefficient parameter number"
+    },
+    "TRAD": {
+      "category": "parameter",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "radius curvature radius of curvature surface power test plate",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TRLR": {
+      "category": "tir_roll",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "element radial roll tir total indicator runout prism roll tilt roll surface random",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TRLX": {
+      "category": "tir_roll",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "element roll tir total indicator runout prism roll tilt about x roll surface bonded",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TRLY": {
+      "category": "tir_roll",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "element roll tir total indicator runout prism roll tilt about y roll surface bonded",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TSDR": {
+      "category": "surface",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "surface radial decenter offset shift lateral random radial single surface",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TSDX": {
+      "category": "surface",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "surface decenter offset shift lateral along x single surface cartesian",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TSDY": {
+      "category": "surface",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "surface decenter offset shift lateral along y single surface cartesian",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TSTX": {
+      "category": "surface",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "surface tilt tip angular wedge about x single surface standard",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "TSTY": {
+      "category": "surface",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "surface tilt tip angular wedge about y single surface standard",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "TTHI": {
+      "category": "parameter",
+      "precondition_class": "tde_native",
+      "run_verdict": "bites",
+      "synonyms": "thickness axial separation position air gap spacing adjuster center thickness",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TUDX": {
+      "category": "mechanical_decenter",
+      "precondition_class": "cb_required",
+      "run_verdict": "needs_precondition",
+      "synonyms": "user defined decenter offset shift lateral coordinate break along x mechanical",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TUDY": {
+      "category": "mechanical_decenter",
+      "precondition_class": "cb_required",
+      "run_verdict": "needs_precondition",
+      "synonyms": "user defined decenter offset shift lateral coordinate break along y mechanical",
+      "units": "lens_units",
+      "units_source": "authored"
+    },
+    "TUTX": {
+      "category": "mechanical_tilt",
+      "precondition_class": "cb_required",
+      "run_verdict": "needs_precondition",
+      "synonyms": "user defined mechanical pivot tilt tip angular coordinate break about x",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "TUTY": {
+      "category": "mechanical_tilt",
+      "precondition_class": "cb_required",
+      "run_verdict": "needs_precondition",
+      "synonyms": "user defined mechanical pivot tilt tip angular coordinate break about y",
+      "units": "degrees",
+      "units_source": "authored"
+    },
+    "TUTZ": {
+      "category": "mechanical_tilt",
+      "precondition_class": "cb_required",
+      "run_verdict": "needs_precondition",
+      "synonyms": "user defined mechanical pivot tilt tip angular coordinate break about z clocking",
+      "units": "degrees",
+      "units_source": "authored"
+    }
+  },
+  "schema_version": 1
+}
