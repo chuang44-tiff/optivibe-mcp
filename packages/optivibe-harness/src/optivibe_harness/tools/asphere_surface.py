@@ -160,7 +160,7 @@ def set_asphere(session, params):
 # =========================================================================== #
 # §6 (S1 GAP-6) — revert a surface to Standard (the shared hard-reset primitive).
 # =========================================================================== #
-def _revert_to_standard_proven(system, surface):
+def _revert_to_standard_proven(system, surface, *, attempt=None):
     """ChangeType surface ``surface`` to ``Standard`` + read-back-prove Type==Standard.
 
     The S1 gap-6 PRIMITIVE (probe C idiom — the inverse of ``set_asphere``'s ChangeType).
@@ -173,11 +173,22 @@ def _revert_to_standard_proven(system, surface):
     BOTH ``set_asphere(surface_type="Standard")`` AND the ``apply_lens_spec`` hard-reset
     pre-pass call THIS (L30 — ONE revert path). Raises ``AsphereWriteError`` on a ChangeType
     throw OR a read-back that is not Standard (a silent no-op). Returns the re-fetched row.
+
+    GRIN: the backward-compatible ``attempt=None`` out-param (a dict). When a
+    dict is passed, ``attempt["changetype_invoked"]`` is set ``True`` IMMEDIATELY before
+    ``row.ChangeType(settings)`` (after ``GetSurfaceTypeSettings`` — a settings throw leaves
+    it ``False``, a clean, unmutated refusal). The ``set_grin`` revert arm reads this flag +
+    the raised exception's ``actual`` to derive ``partial_state`` honestly. Asphere callers
+    pass no ``attempt`` (keyword-only, default ``None``) and are byte-unchanged.
     """
     standard_member = _ac._surface_type_member(system, "Standard")
     row = system.LDE.GetSurfaceAt(surface)
     try:
         settings = row.GetSurfaceTypeSettings(standard_member)
+        # Mark the invoke IMMEDIATELY before ChangeType (a settings throw above
+        # leaves ``changetype_invoked`` False = a clean, never-mutated refusal).
+        if attempt is not None:
+            attempt["changetype_invoked"] = True
         row.ChangeType(settings)
     except Exception as exc:  # noqa: BLE001 — a ChangeType THROW -> surface_asphere
         raise SurfaceWriteError(

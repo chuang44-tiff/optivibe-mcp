@@ -219,7 +219,7 @@ def _solve_type_variable_enum(system):
         )
 
 
-def _min_positive_target(mfe, token):
+def _min_positive_target(mfe, token, *, surface=None):
     """The MIN strictly-positive finite ``Target`` among LIVE MFE rows typed ``token``.
 
     The ONE shared operand-target reader consumed by BOTH the (a)
@@ -227,6 +227,17 @@ def _min_positive_target(mfe, token):
     audit's floor source (§D-FLOOR OPTION-ii / MIN). Scans the LIVE MFE for operands
     whose ``TypeName == token`` and whose ``Target`` is a positive finite float;
     returns the MIN such target, or ``None`` when none is readable.
+
+    ``surface`` (GRIN §3.6): ``None`` (default) is byte-for-byte the shipped
+    behavior (the glass ``MNEG``/``MNCG`` callers are unchanged — the surface block is
+    skipped entirely, no import, no read). ``surface=int`` ADDS a constraint: a row
+    counts only when it ALSO carries a live ``Surf`` param equal to ``surface`` (read
+    through ``_merit_cells.read_param_map``) — the per-surface floor scoping the GRIN
+    box reader's row iteration needs. Per-row faults skip-and-continue; a total scan
+    fault -> ``None``. NOTE: this generic helper is NOT the GRIN silencing
+    predicate — GRIN coverage goes through ``_grin_index_common.read_authored_box``
+    (wave + weight + coherence). It remains available for the glass floors and for the
+    box reader's row iteration.
 
     NEVER raises. Per-row guarded (a flaky row is skipped, never counted); a total
     scan failure (``NumberOfOperands`` throws) -> ``None``. ``None`` ⟺ "no positive
@@ -243,6 +254,16 @@ def _min_positive_target(mfe, token):
             op = mfe.GetOperandAt(i)
             if str(op.TypeName) != token:
                 continue
+            if surface is not None:
+                # GRIN §3.6 — the row must ALSO carry Surf == surface. Lazy import
+                # (only reached when a surface is requested) keeps the surface=None path
+                # byte-identical (no import, no read) and avoids any import cycle.
+                from . import _merit_cells as _mc
+                params = _mc.read_param_map(op)
+                entry = params.get("Surf")
+                sv = entry.get("value") if isinstance(entry, dict) else None
+                if sv is None or isinstance(sv, bool) or int(sv) != int(surface):
+                    continue
             t = safe_float(op.Target)  # nan/inf -> non-numeric string sentinel
             if (
                 isinstance(t, (int, float))
@@ -275,6 +296,30 @@ def _cell_is_variable(cell, variable_member):
     except Exception:  # noqa: BLE001 — a cell with no solve is simply not Variable
         return False
     return str(solve_type) == str(variable_member)
+
+
+def _cell_solve_state(cell, variable_member):
+    """Fault-aware solve reader: ``"variable"`` | ``"not_variable"`` | ``None``.
+
+    The GRIN enumerator + clear path's solve reader — NEVER ``_cell_is_variable`` (whose
+    throw->False contract, above, would silently make a deterministically-wedged solve read
+    on a genuinely-Variable cell invisible -> a lying ``cleared_all:true``). A
+    ``GetSolveData()`` THROW returns ``None`` (UNREADABLE — a FAULT to the caller), never
+    ``"not_variable"``. A clean read compares the solve-type STRING to the live ``Variable``
+    member's (the ``_cell_is_variable`` comparison idiom). Do NOT modify
+    ``_cell_is_variable`` — the lde/asphere/mce arms carry the same latent throw->False
+    sibling; sweeping them is deliberately OUT OF SCOPE for this change.
+    """
+    try:
+        solve_type = cell.GetSolveData().Type
+        # The str() conversions are INSIDE the guard — a wedged .NET ``__str__`` on the
+        # solve member (or the variable member) is UNREADABLE, must return None + record a
+        # fault, NEVER escape as a raw RuntimeError past this fault-aware reader.
+        actual = str(solve_type)
+        expected = str(variable_member)
+    except Exception:  # noqa: BLE001 — a wedged solve read/ToString is UNREADABLE, never "not_variable"
+        return None
+    return "variable" if actual == expected else "not_variable"
 
 
 def _cell_is_variable_failclosed(cell, variable_member, surface, token):
@@ -857,6 +902,10 @@ def _row_is_mirror_or_cb(row):
     A surface whose air<->air geometry is NOT inert because it carries power INDEPENDENT of
     its bounding materials:
       - a MIRROR (``Material == "MIRROR"``) — a fold mirror's radius is a real DOF;
+      - a GRIN surface (``Type`` a recognized GRIN family member) whose
+        power is its INTERNAL index gradient, not a glass interface, so an air<->air
+        radius/conic on it is a genuine DOF (the primitive reads air-like AND
+        Material is inert, so without this arm it would be false-inert-flagged);
       - a coordinate break (``Type`` contains ``"COORD"`` or ``"BREAK"``) — structural;
       - a powered/diffractive non-Standard type (``Type`` contains GRATING / FRESNEL / PHASE /
         BINARY — BUG-2/L-4) — a curved grating diffracts differently, a Fresnel/phase surface
@@ -872,9 +921,20 @@ def _row_is_mirror_or_cb(row):
     if material == "MIRROR":
         return True
     try:
-        type_name = str(row.Type).upper()
-    except Exception:  # noqa: BLE001 — an unreadable Type -> unprovable
+        raw_type = str(row.Type)          # RAW — the exact-token GRIN check needs original case
+    except Exception:  # noqa: BLE001 — an unreadable Type -> unprovable (fail-closed)
         return None
+    # Keyed on the 12-member FAMILY recognition resolver (a loaded Gradient3
+    # with a radius Variable is SPARED, not false-inert-flagged); exact-full-token
+    # (Gradient1 ⊂ Gradient10/12) — NEVER a "GRAD"/"GRADIENT" substring in
+    # ``_POWERED_NONSTANDARD_TYPE_SUBSTRINGS``. A resolver throw -> fail-closed None.
+    try:
+        from . import _grin_cells as _grin           # lazy (cycle-safe)
+        if _grin.grin_family_type_of_name(raw_type) is not None:
+            return True
+    except Exception:  # noqa: BLE001 — a GRIN resolver throw -> unprovable (fail-closed)
+        return None
+    type_name = raw_type.upper()          # the existing coarse arms below are unchanged
     if "COORD" in type_name or "BREAK" in type_name:
         return True
     # A powered/diffractive non-Standard type has real power independent of its materials.
@@ -1080,6 +1140,137 @@ def _enumerate_lde_variables(system, variable_member, faults=None):
     return items
 
 
+def _enumerate_grin_variables(system, surf, variable_member, faults=None):
+    """Emit the inventory ITEMS for a surface's GRIN Par cells (fail-safe). NEVER raises.
+
+    The per-interior-surface GRIN arm of ``_variable_inventory`` (§4.1). Walks ALL 8
+    Double GRIN Par cells of the RESOLVED type (``info.params`` — Gradient2 Par1..Par8
+    Delta T..Nr12, Gradient3 Par1..Par8 Delta T..Nz3) — NEVER Par9+ — for reader-fidelity to
+    ``opt.Variables`` (which counts ANY Variable Double cell, incl. a pathological loaded
+    Variable ``Delta T``; the WRITER refuses it for policy, the READER counts it for
+    fidelity). Lazy import of ``_grin_cells`` (the ``_refetch_inventory_cell`` asphere idiom
+    — no import cycle).
+
+    The type gate is the FAMILY-RECOGNITION resolver, NOT the authorable one:
+      - a Type-read / resolver THROW -> a fault, contribute nothing;
+      - ``fam is None`` (not a GRIN family member) -> the silent skip is CORRECT;
+      - ``fam not in GRIN_TYPE_INFO`` (a recognized-family loaded member this primitive cannot author,
+        e.g. Gradient4, whose cell map is unknown) -> a FAULT (never walked with the WRONG
+        map, never silently dropped — a Variable on it would be invisible), contribute nothing;
+      - ``fam in GRIN_TYPE_INFO`` (Gradient2 / Gradient3) -> walk that type's cells.
+    Per row: ``_grin_cell`` guarded (fetch throw -> fault), ``_expect_grin_layout`` guarded
+    (Header/DataType drift -> fault, never emitted as the token — the inventory/clear
+    acceptance set is EXACTLY the writer's), and the fault-aware ``_cell_solve_state``
+    (never ``_cell_is_variable``'s throw->False). A confirmed-Variable cell whose value read
+    fails stays in the inventory with ``value:None`` (the fingerprint then fails closed).
+
+    ``faults`` (optional): a list threads the completeness signal. ``faults is None`` (the
+    counters' delegation) -> a fault is a silent skip (the DOCUMENTED count-parity asymmetry,
+    byte-identical to every other source's count contract).
+    """
+    items = []
+    from . import _grin_cells as _grin
+    # The type gate — the FAMILY-RECOGNITION resolver.
+    try:
+        raw = str(surf.Type)
+    except Exception:  # noqa: BLE001 — a Type-read throw -> fault, contribute nothing
+        _record_enumeration_fault(
+            faults, "grin",
+            f"GRIN Type read threw on surface {_safe_surface_index(surf)}",
+        )
+        return items
+    try:
+        fam = _grin.grin_family_type_of_name(raw)
+    except Exception:  # noqa: BLE001 — a resolver throw -> fault, contribute nothing
+        _record_enumeration_fault(
+            faults, "grin",
+            f"GRIN family resolver threw on surface {_safe_surface_index(surf)}",
+        )
+        return items
+    if fam is None:
+        return items  # not a GRIN family member -> the silent skip is CORRECT here
+    if fam not in _grin.GRIN_TYPE_INFO:
+        # A recognized GRIN family member the harness cannot author (e.g. Gradient4): its cell
+        # map is unknown, so a Variable on it would be INVISIBLE. Fault (never walked with the
+        # wrong map, never silently dropped) and contribute nothing.
+        _record_enumeration_fault(
+            faults, "grin",
+            f"recognized GRIN family member {fam!r} is not authorable; its cell map is "
+            "unknown — a Variable on it would be invisible",
+        )
+        return items
+    # resolve the per-type descriptor and walk ITS params (was the module-global
+    # Gradient2 table) — so a Gradient3 Nz DOF (Par6..8) is enumerated, not header-faulted.
+    info = _grin.GRIN_TYPE_INFO[fam]
+    surface_index = _safe_surface_index(surf)
+    for token, par, _header, _kind, _role, _power in info.params:
+        try:
+            cell = _grin._grin_cell(system, surf, par)
+        except Exception:  # noqa: BLE001 — a cell fetch throw -> fault, contribute nothing
+            _record_enumeration_fault(
+                faults, "grin",
+                f"GRIN cell fetch {par} threw on surface {surface_index}",
+            )
+            continue
+        try:
+            _grin._expect_grin_layout(cell, token, info)
+        except Exception:  # noqa: BLE001 — a Header/DataType drift -> fault, never emit as token
+            _record_enumeration_fault(
+                faults, "grin",
+                f"GRIN cell {par} layout drift on surface {surface_index} (expected {token})",
+            )
+            continue
+        state = _cell_solve_state(cell, variable_member)
+        if state is None:
+            # A wedged solve read on a possibly-Variable cell -> fault (never a silent
+            # omission that would lie cleared_all:true). faults=None -> silent skip.
+            _record_enumeration_fault(
+                faults, "grin",
+                f"GRIN {token} solve read on surface {surface_index} is unreadable",
+            )
+            continue
+        if state != "variable":
+            continue
+        if surface_index is None:
+            # A Variable coefficient with no re-fetch/fingerprint handle -> FAULT + NO emit
+            # (a surface:None item would collide in aperture_ramp._variable_key).
+            _record_enumeration_fault(
+                faults, "grin",
+                f"GRIN Variable {token} found but the surface index is unreadable "
+                "(no re-fetch handle) — not emitted",
+            )
+            continue
+        # A confirmed-Variable cell is KEPT even when its value read fails (the item exists
+        # because the SOLVE is Variable, not because the value reads back); but the
+        # value:None is a FAULT so the completeness signal + the ramp fingerprint fail closed
+        # to geometry_uncertain rather than silently dropping a DOF from the proof.
+        value = _safe_cell_value(cell)
+        if value is None:
+            _record_enumeration_fault(
+                faults, "grin",
+                f"GRIN Variable {token} value read failed on surface {surface_index} "
+                "(item retained with value:None)",
+            )
+        items.append({
+            "source": "grin",
+            "surface": surface_index,
+            "cell": "grin",
+            "token": token,
+            "par": par,
+            "value": value,
+            "solve": "Variable",
+        })
+    return items
+
+
+def _count_grin_variables(system, surf, variable_member):
+    """Count Variable solves on a surface's GRIN Par cells (the filtered view; §4.1).
+
+    ``len(_enumerate_grin_variables(...))`` — never a summand anywhere. NEVER raises.
+    """
+    return len(_enumerate_grin_variables(system, surf, variable_member))
+
+
 def _variable_inventory(system, variable_member=None, faults=None):
     """Enumerate EVERY Variable-solved optimizer cell across LDE + asphere + MCE.
 
@@ -1089,7 +1280,7 @@ def _variable_inventory(system, variable_member=None, faults=None):
     proxies; a value-read failure -> ``value:None``, the item NEVER dropped). Possibly
     empty; NEVER raises (every per-cell read guarded exactly as the three counters are).
 
-    Order: LDE items (surface-ascending), then per-interior-surface asphere items
+    Order: LDE items (surface-ascending), then per-interior-surface asphere + GRIN items
     (surface-ascending), then the SYSTEM-GLOBAL MCE items. ``len(_variable_inventory(...))``
     equals ``_count_variables(system.LDE, vm, system=system)`` AND ``opt.Variables`` for the
     same system (the back-compat invariant — they share the SAME per-source emit walks).
@@ -1121,6 +1312,8 @@ def _variable_inventory(system, variable_member=None, faults=None):
             )
             continue
         items.extend(_enumerate_asphere_variables(system, surf, variable_member, faults))
+        # GRIN is PER-INTERIOR-SURFACE (the same surface walk as the LDE/asphere arms).
+        items.extend(_enumerate_grin_variables(system, surf, variable_member, faults))
     # MCE is SYSTEM-GLOBAL once (NOT per-surface — a per-surface placement would emit the
     # per-config DOFs N times).
     items.extend(_enumerate_mce_variables(system, variable_member, faults))
@@ -1176,8 +1369,8 @@ _VARIABLE_LIFECYCLE_FAMILY = "variable_lifecycle"
 
 
 def _by_source_tally(inventory):
-    """The per-source ``{lde, asphere, mce}`` tally of an inventory (envelope-level)."""
-    tally = {"lde": 0, "asphere": 0, "mce": 0}
+    """The per-source ``{lde, asphere, mce, grin}`` tally of an inventory (envelope-level)."""
+    tally = {"lde": 0, "asphere": 0, "mce": 0, "grin": 0}
     for item in inventory:
         src = item.get("source")
         if src in tally:
@@ -1244,6 +1437,24 @@ def _refetch_inventory_cell(system, item):
         if source == "mce":
             op = system.MCE.GetOperandAt(int(item["row"]))
             return op.GetOperandCell(int(item["config"]))
+        if source == "grin":
+            from . import _grin_cells as _grin
+            surf = system.LDE.GetSurfaceAt(int(item["surface"]))
+            # the item carries no type, so resolve the per-type ``info`` off the
+            # LIVE re-fetched row (an Nz token against the module-global Gradient2 map would
+            # be "unknown" -> None -> a permanent false ``unclear_residual``; an Nz DOF could
+            # NEVER be cleared). A not/no-longer-authorable-GRIN row -> None -> honest
+            # ``unclear_residual`` (fail-closed, never a MakeSolveFixed of the wrong cell).
+            key = _grin.grin_type_of(surf)
+            if key is None:
+                return None
+            info = _grin.GRIN_TYPE_INFO[key]
+            cell = _grin._grin_cell(system, surf, item["par"])
+            # Re-verify the layout BEFORE returning the cell for the clear. A
+            # post-inventory drift (Par3 now an Integer control cell) RAISES here -> None ->
+            # an honest ``unclear_residual``, NEVER a MakeSolveFixed of the WRONG cell.
+            _grin._expect_grin_layout(cell, item["token"], info)
+            return cell
     except Exception:  # noqa: BLE001 — a re-fetch throw -> None (the read-back proof catches it)
         return None
     return None

@@ -635,6 +635,102 @@ def declared_roles(meta: TolOperandMeta) -> frozenset:
     )
 
 
+# --------------------------------------------------------------------------- #
+# (GRIN §1.1) The col-3 report-render + reconcile-routing primitives — the
+# SINGLE source of the parser's col3 semantics + the authorable-perturbation gate
+# (NO token literal in the parser / reconcile / disclosure / coverage).
+# --------------------------------------------------------------------------- #
+def _secondary_role_of_meta(meta: TolOperandMeta) -> Optional[str]:
+    """The ``CellSpec.role`` of the col-3 int cell for ``meta`` (or None if it has none)."""
+    for spec in meta.int_cells:
+        if spec.col == 3:
+            return spec.role
+    return None
+
+
+def sensitivity_secondary_role(token: str) -> Optional[str]:
+    """The ``CellSpec.role`` of the col-3 int cell for ``token`` (GRIN §1.1).
+
+    The SINGLE source of the report col3 semantics. Reads
+    ``TOL_OPERAND_META[token].int_cells`` (the same tuple the author walks + the
+    validator resolves). Returns the role at ``col == 3`` ("param" | "surface2" |
+    "mce_config" | "code" | "layer" | ...), or None when the operand declares no col-3
+    int cell (a single-Surf op whose report col3 is blank). NO token literal.
+    """
+    meta = TOL_OPERAND_META.get(token)
+    if meta is None:
+        return None
+    return _secondary_role_of_meta(meta)
+
+
+def parser_secondary_key(token: str) -> str:
+    """The parsed-row KEY the report's col-3 value is stored under for ``token`` (§1.1).
+
+    "param" when the col-3 int-cell role is ``param`` (today SIX ops: TPAR/TPAI/TEDV/
+    CPAR/CEDV/CNPA — all carry a Par# col3, verified against the catalog table; the
+    PARSER render is honest for all six); else "surface2" (range ops, TMCO's Config#
+    legacy bridge, TRAD's Code, single ops). The parser writes col3 to THIS key. NOTE
+    (v2): this is the RENDER primitive only — the disclosure gate, the coverage
+    predicate, the reconcile param-branch routing, and the count belt ALL gate on
+    ``is_param_perturbation_op`` (below), NOT on this render key. Derived from
+    int_cells/_ROLE_BY_HEADER, NO token literal.
+
+    The non-param collapse is the DOCUMENTED bridge policy:
+      - role "surface2"  -> a genuine range marker (byte-identical).
+      - role "mce_config"-> TMCO: the shipped multi-config reconcile branch reinterprets
+                            surface2->mce_config; migrating it is pure risk —
+                            the bridge lives in THIS comment, one place.
+      - role "code"      -> TRAD Code: pre-existing latent mis-render, dormant (default
+                            budget authors code=0).
+    """
+    return "param" if sensitivity_secondary_role(token) == "param" else "surface2"
+
+
+def is_param_perturbation_op(token: str) -> bool:
+    """The ONE shared AUTHORABLE-PERTURBATION predicate.
+
+    True iff the operand is a param-role ±delta perturbation the author can drive:
+    ``"param" in {c.role for c in meta.int_cells}`` AND ``meta.has_minmax`` AND
+    ``meta.tier in _AUTHORABLE_TIERS`` — today EXACTLY {TPAR, TPAI} (audit-verified:
+    TEDV/CEDV/CNPA are ``_control`` has_minmax=False, CPAR is ``_compensator``
+    has_minmax=False). Consumed by FOUR sites so they cannot diverge: the required-param
+    firewall, the ``grin_perturbation`` disclosure gate, the coverage predicate, and the
+    reconcile param-branch routing + count belt. Table-derived — NO token literal.
+    """
+    meta = TOL_OPERAND_META.get(token)
+    if meta is None:
+        return False
+    if "param" not in {spec.role for spec in meta.int_cells}:
+        return False
+    return bool(meta.has_minmax) and meta.tier in _AUTHORABLE_TIERS
+
+
+def _assert_multi_config_param_disjoint(table=None) -> None:
+    """Assert NO table row is BOTH multi_config AND param-secondary-key.
+
+    The multi_config-checked-FIRST reconcile ordering is sound ONLY under this
+    invariant; a future row violating it would silently shadow the param branch. Called
+    at import (against the real table) and by a unit test (against a cloned violating
+    table). Raises ``AssertionError`` on a violation — a stale/wrong table fails LOUD.
+    """
+    table = table if table is not None else TOL_OPERAND_META
+    both = sorted(
+        code for code, meta in table.items()
+        if meta.family == "multi_config" and _secondary_role_of_meta(meta) == "param"
+    )
+    if both:
+        raise AssertionError(
+            f"tolerance catalog invariant violated: operand(s) {both} are BOTH "
+            "family=='multi_config' AND param-secondary-key; the multi_config-checked-"
+            "first reconcile ordering would silently shadow the param branch — "
+            "fix the table"
+        )
+
+
+# The invariant is enforced at import (fail LOUD on a stale/wrong table).
+_assert_multi_config_param_disjoint()
+
+
 __all__ = [
     "CellSpec",
     "TolOperandMeta",
@@ -646,6 +742,10 @@ __all__ = [
     "declared_roles",
     "param_required_cells",
     "CatalogResolveError",
+    "sensitivity_secondary_role",
+    "parser_secondary_key",
+    "is_param_perturbation_op",
+    "_assert_multi_config_param_disjoint",
     "_TIERS",
     "_ROLES",
     "_AUTHORABLE_TIERS",

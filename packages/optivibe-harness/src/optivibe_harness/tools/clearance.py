@@ -134,7 +134,22 @@ def _gap_kind(row_i):
 
     A real glass = material NOT in {air "", CB "-", MIRROR}. A mirror/CB/air gap is
     an AIR clearance (it carries no glass thickness floor).
+
+    An AUTHORABLE GRIN primitive (Gradient2/Gradient3) is a SOLID element
+    whose FOLLOWING gap IS its gradient-medium body (the sequential representation: a
+    surface's Thickness is the medium to the next surface: the GRIN at surf 2's
+    body is gap 2->3). Its Material reads air-like "" -> classify glass so its edge/center
+    is audited at min_glass. Keyed on the AUTHORABLE resolver (the probe-proven set), NOT
+    the family recognizer -> a loaded NON-authorable member (Gradium/GridGradient
+    Gradient6...) is NOT classified here (un-probed representation) -> disclosed not-audited
+    at the result level (§2.3.4). No try/except-to-material fall-through: a (near-impossible)
+    resolver throw over a stored string must NOT silently classify a GRIN as air.
+    ``_gap_kind`` only ever sees OK rows with a real ``type_name`` string (a degraded row
+    is ``ok:False`` and is ``continue``'d upstream in ``_audit_gaps``), so this cannot throw.
     """
+    from . import _grin_cells as _grin
+    if _grin.grin_type_of_name(str(row_i.get("type_name", ""))) is not None:
+        return "glass"
     mat = str(row_i.get("material", ""))
     if _geom._is_air_material(mat) or _geom._is_mirror(mat):
         return "air"
@@ -552,6 +567,93 @@ def _impl(session, min_air, min_glass):
                 "OpticStudio"
             )
 
+    # GRIN (§6.2) disclosure: a GRIN surface's INTERNAL index profile is not
+    # drawn/audited — the audited geometry here is the Standard sphere/conic base (live-
+    # probed: the index profile does NOT perturb the sag, residual 0.0, so the clearance edge audit
+    # is CORRECT on the base geometry; the flag is informational). NO ``_modelled``/
+    # ``_approximate`` split (index profile ⊥ sag). A degraded/unreadable row routes to the
+    # EXISTING degraded channel above — never claimed GRIN. Additive key + one flag, emitted
+    # ONLY when non-empty (a non-GRIN system is byte-for-byte unchanged). Fail-safe: a
+    # resolver throw -> no GRIN disclosure (never crashes the read-only audit).
+    grin_index_profile_not_drawn = []
+    try:
+        from . import _grin_cells as _grin
+        for i in range(n):
+            if not rows[i].get("ok", True):
+                continue  # degraded -> the existing degraded channel, never claimed GRIN
+            if _grin.grin_type_of_name(str(rows[i].get("type_name", ""))) is not None:
+                grin_index_profile_not_drawn.append(i)
+    except Exception:  # noqa: BLE001 — a GRIN resolver hiccup -> no GRIN disclosure, never raise
+        grin_index_profile_not_drawn = []
+    if grin_index_profile_not_drawn:
+        # This flag makes NO edge/center-audited claim — that claim is
+        # keyed on the FAMILY/type surface list, which would falsely assert "audited" for a
+        # primitive whose gap was SKIPPED (it lands in grin_not_audited, reason gap_unaudited).
+        # The per-surface audited/not-audited truth is the GAP-DERIVED structured evidence
+        # (grin_geometric_audit.audited vs grin_not_audited); this flag only discloses the
+        # index profile (true for every recognized primitive regardless of gap coverage).
+        flags.append(
+            "GRIN: internal index profile not drawn (surfaces "
+            f"{grin_index_profile_not_drawn}); bulk-index manufacturability is not audited. "
+            "See grin_geometric_audit for the surfaces whose edge/center clearance WAS audited "
+            "at min_glass (solid-medium policy) and grin_not_audited for any that were not"
+        )
+
+    # Positive evidence + unconditional not-audited disclosure, derived from the ACTUAL
+    # evaluated gap records, NOT the
+    # family-recognized surface list: a classified primitive whose gap was SKIPPED (its next
+    # surface unreadable -> not in ``gaps``) is placed in ``grin_not_audited`` (never counted
+    # as "audited as solid"). A recognized FAMILY member that is NOT an authorable primitive
+    # (a loaded Gradium/GridGradient/…) is UNCONDITIONALLY disclosed not-audited (its
+    # representation is un-probed — never classified glass, §2.3.4). Both keys emitted ONLY
+    # when non-empty (a non-GRIN system is byte-for-byte unchanged). Fail-safe: the assembly
+    # never breaks the read-only audit.
+    grin_audited = []
+    grin_not_audited = []
+    try:
+        from . import _grin_cells as _grin
+        gap_by_surface = {g["surface"]: g for g in gaps}
+        for i in range(n):
+            r = rows[i]
+            if not r.get("ok", True):
+                continue                                   # degraded -> existing degraded channel
+            tn = str(r.get("type_name", ""))
+            is_prim = _grin.grin_type_of_name(tn) is not None
+            is_fam = _grin.grin_family_type_of_name(tn) is not None
+            if is_prim:
+                g = gap_by_surface.get(i)
+                if (g is not None and g.get("kind") == "glass"
+                        and g.get("threshold") == min_glass):
+                    grin_audited.append({
+                        "surface": i, "next_surface": g["next_surface"], "kind": "glass",
+                        "threshold": min_glass, "center_thickness": g["center_thickness"],
+                        "edge_thickness": g["edge_thickness"], "violation": g["violation"],
+                    })
+                else:  # a classified primitive whose gap was SKIPPED/unmatched -> NOT audited
+                    grin_not_audited.append(
+                        {"surface": i, "type": tn, "reason": "gap_unaudited"})
+            elif is_fam:  # family member, NOT authorable -> un-probed -> UNCONDITIONAL not-audited
+                grin_not_audited.append(
+                    {"surface": i, "type": tn, "reason": "grin_family_non_authorable"})
+    except Exception:  # noqa: BLE001 — evidence assembly never breaks the read-only audit
+        grin_audited, grin_not_audited = [], []
+
+    if grin_audited:
+        flags.append(
+            f"GRIN: element(s) at surface(s) {[e['surface'] for e in grin_audited]} are a "
+            f"SOLID medium, audited (edge AND center) at min_glass ({min_glass}) under the "
+            "solid-medium geometric policy (tunable via min_glass; NOT a catalog-glass "
+            "assertion). Their internal index profile is not drawn."
+        )
+    if grin_not_audited:
+        flags.append(
+            f"GRIN: surface(s) {[e['surface'] for e in grin_not_audited]} are a recognized "
+            "GRIN family member NOT covered by the solid-medium geometric audit "
+            "(loaded/non-authorable representation, un-probed, OR its gap was skipped) — NOT "
+            "audited for edge/center manufacturability. Treat their edge and center "
+            "clearance as UNKNOWN and check them in OpticStudio."
+        )
+
     # The per-config divergence headline: the SMALLEST finite
     # gap clearance (min over each gap's center+edge). A zoom's gaps move per config,
     # so this differs across configs on a real sweep (a repeated value across configs
@@ -589,6 +691,22 @@ def _impl(session, min_air, min_glass):
         "asphere_sag_approximate": asphere_sag_approximate,
         "flags": flags,
     }
+    # GRIN (§6.2): the additive index-not-audited surface list — emitted ONLY when
+    # non-empty (a non-GRIN system stays byte-for-byte unchanged).
+    if grin_index_profile_not_drawn:
+        result["grin_index_profile_not_drawn"] = grin_index_profile_not_drawn
+    # The additive positive-audit + unconditional not-audited keys, emitted
+    # ONLY when non-empty (a non-GRIN system stays byte-for-byte unchanged). ``audited`` maps
+    # one-to-one to a real evaluated kind:"glass" min_glass gap (audited-and-passed
+    # violation:false vs audited-and-violated violation:true vs never-examined absent).
+    if grin_audited:
+        result["grin_geometric_audit"] = {
+            "basis": "grin_surface_type",   # NOT an AGF/catalog glass assertion
+            "threshold": min_glass,          # the applied solid-medium floor (tunable)
+            "audited": grin_audited,         # one entry per REAL evaluated kind:"glass" min_glass gap
+        }
+    if grin_not_audited:
+        result["grin_not_audited"] = grin_not_audited
     if note is not None:
         result["note"] = note
     return result
@@ -621,8 +739,10 @@ CHECK_CLEARANCE_SPEC = ToolSpec(
         "optical surface) — for a folded/Cassegrain system this behind_first_optic is "
         "the true behind-primary clearance, NOT the misleading raw back-airgap "
         "thickness that get_first_order.back_focal_length reports. "
-        "Run after optimize to catch a thin/negative gap a merit floor missed. See "
-        "get_first_order, describe_surfaces."
+        "Run after optimize to catch a thin/negative gap a merit floor missed. An authored "
+        "GRIN element (Gradient2/Gradient3) is audited as a solid (glass) element at "
+        "min_glass; see grin_geometric_audit. A non-authorable GRIN family member is listed "
+        "under grin_not_audited. See get_first_order, describe_surfaces."
     ),
 )
 

@@ -43,6 +43,7 @@ from . import _analysis_common as _ac
 from . import _asphere_cells as _asph
 from . import _collimation as _col
 from . import _config_common as _cfg
+from . import _grin_index_common as _grin_idx
 from . import _layout_geometry as _geom
 from . import _measurement_common as _mc
 from . import _optimize_common as _oc
@@ -1727,6 +1728,276 @@ def analyze_lateral_color(session, params):
 
 
 # --------------------------------------------------------------------------- #
+# analyze_grin_profile — a thin READ-ONLY envelope over the GRIN optimization layer's
+# _grin_index_common reader. NO engine authoring, NO new module, NO
+# new error family. Grades the RESULTING GRIN index-profile manufacturability on ONE
+# GRIN surface: delta_n, min/max bulk index, the n<1 physicality flag, the 6-point
+# vector. never-fake-0 (a read fault -> null, never a fabricated 0). axial_monotonic
+# is DEFERRED (this grader is read-only; there is no z-sampled n(z) source).
+# --------------------------------------------------------------------------- #
+
+# The axial-monotonicity disclosure notes. These MODULE-LEVEL constants
+# are the ONLY place the "LPTD" token legally appears in the grin section — they are
+# referenced by NAME from the grin functions, never a string literal in a call arg
+# (the AST guard forbids an LPTD operand READ/dispatch, not the disclosure text).
+_GRIN_AXIAL_MONO_NOTE_RADIAL = (
+    "n/a - a radial Gradient2 has no axial index profile"
+)
+_GRIN_AXIAL_MONO_NOTE_AXIAL = (
+    "deferred - LPTD is a satisfied-display constraint (illegal for a read-only "
+    "grader), no read-only z-sampled n(z) source exists (INDX is surf/wave-keyed), "
+    "and a DLTN sign can reverse between endpoints on a cubic Nz profile. No "
+    "axial-monotonicity verdict is reported rather than a fabricated one."
+)
+_GRIN_READOUT_SCOPE_NOTE = (
+    "reads the STORED index profile - this proves what the surface stores, NOT that the "
+    "ray trace consumes it; only a live ray-trace comparison proves consumption"
+)
+_GRIN_WAVELENGTH_BLIND_NOTE = (
+    "grin_wavelength_blind: the GRIN index readout is monochromatic - taken at the "
+    "interpreted reference wavelength (wave index echoed); it is NOT a chromatic grade"
+)
+
+
+def _grin_gate_refusal(system, surface, faults):
+    """Not in ``grin_surfaces()`` entries -> the fault-taxonomy family split (§1.1a).
+
+    - a ``grin_unreadable`` fault (a recognized GRIN family with no supported cell map,
+      e.g. Gradient4) -> ``measurement_param``;
+    - an ``unclassified_row`` / ``enumeration_failed`` fault (a Type-throw row, or the
+      whole-walk throw with ``surface: None``) -> ``analysis_empty`` (fail-CLOSED —
+      operands are NEVER read on an unclassifiable row);
+    - NO fault -> a genuine non-GRIN surface. The IMAGE surface (N-1) reaches here (it
+      passes the range check but is OUTSIDE ``grin_surfaces()``'s interior 1..N-2 walk,
+      so it has NO fault entry). The diagnostic ``str(row.Type)`` read is the
+      DISCRIMINATOR: a CLEAN read -> honest ``measurement_param`` + ``surface_type``;
+      the read ITSELF THROWING -> ``analysis_empty`` (fail-CLOSED — never a
+      ``measurement_param`` carrying a fabricated ``"?"`` type). NEVER raises.
+    """
+    # 1. A fault entry for THIS surface (the interior GRIN walk found it unreadable).
+    for fault in faults:
+        if fault.get("surface") == surface:
+            reason = fault.get("reason")
+            if reason == "grin_unreadable":
+                return _ac.error_envelope(
+                    "analyze_grin_profile", "measurement_param",
+                    f"surface {surface} is a recognized GRIN family member with no "
+                    f"supported cell map ({reason}); its index profile cannot be read",
+                    surface=surface, grin_reason=reason,
+                )
+            # unclassified_row (a Type-throw row) -> fail-CLOSED analysis_empty.
+            return _ac.error_envelope(
+                "analyze_grin_profile", "analysis_empty",
+                f"surface {surface} could not be classified ({reason}); refusing to read "
+                "operands on an unclassifiable row (fail-closed)",
+                surface=surface, grin_reason=reason,
+            )
+    # 2. A total-walk fault (surface None) -> analysis_empty (the enumeration failed).
+    for fault in faults:
+        if fault.get("surface") is None:
+            reason = fault.get("reason")
+            return _ac.error_envelope(
+                "analyze_grin_profile", "analysis_empty",
+                f"the GRIN surface enumeration failed ({reason}); surface {surface} could "
+                "not be classified (fail-closed)",
+                surface=surface, grin_reason=reason,
+            )
+    # 3. No fault -> a genuine non-GRIN surface (incl. the IMAGE surface). The
+    # diagnostic Type read is the discriminator: a clean read is honest non-GRIN; a
+    # THROW here -> analysis_empty (fail-CLOSED — a Type throw nets to analysis_empty on
+    # EVERY path, never a measurement_param with a fabricated "?" type).
+    try:
+        row = system.LDE.GetSurfaceAt(surface)
+        type_name = str(row.Type)
+    except Exception:  # noqa: BLE001 — a Type-throw here -> fail-closed analysis_empty
+        return _ac.error_envelope(
+            "analyze_grin_profile", "analysis_empty",
+            f"surface {surface} Type read threw; it cannot be classified (fail-closed)",
+            surface=surface,
+        )
+    return _ac.error_envelope(
+        "analyze_grin_profile", "measurement_param",
+        f"surface {surface} is not a GRIN surface (Type={type_name!r}); index-profile "
+        "manufacturability grading is only meaningful for a GRIN medium",
+        surface=surface, surface_type=type_name,
+    )
+
+
+def _read_wavelength_um(system, wave):
+    """The interpreted wavelength VALUE in um, throw-guarded -> ``None``.
+
+    ``float(system.SystemData.Wavelengths.GetWavelength(int(wave)).Wavelength)`` or
+    ``None`` on ANY throw. Best-effort disclosure only (the wave INDEX is always echoed
+    regardless); a ``None`` here ADDS the ``wavelength_value_unreadable`` flag in the
+    envelope ("the interpreted wavelength VALUE was unreadable" is a distinct
+    honesty statement from "the reading is wavelength-blind"). Resolved ONCE outside the
+    config sweep (the wavelength set is config-independent).
+    """
+    try:
+        return float(system.SystemData.Wavelengths.GetWavelength(int(wave)).Wavelength)
+    except Exception:  # noqa: BLE001 — best-effort; the wave INDEX is still echoed
+        return None
+
+
+def _build_grin_envelope(s, surface, is_axial, wave, wl_um):
+    """Pure map: an ``index_summary`` dict -> the §2 envelope. NO engine touch.
+
+    NO ``sqrt(`` / ``**2`` / ``math.pow`` on index data (the ONLY index sqrt-locus is the
+    reader's cell->index converter, held by an AST pin); consumer-side aggregation is
+    limited to ``max(index_vector)`` and the ``<`` comparison on ``min_index``. Every index
+    number here is the PHYSICAL index — the I#VA operands report it directly for every
+    GRIN type; no per-type conversion exists.
+    never-fake-0 per the §2 table (a reader fault -> null everywhere, never a fabricated
+    0; no ``or 0.0`` coalescing).
+
+    Every ``readings.*`` object is built via the REAL ``_reading(code, raw,
+    suspicious, *, units, **extra)`` helper — ``suspicious`` is the THIRD POSITIONAL
+    argument (a ``susp=`` keyword would be swallowed by ``**extra`` and leave
+    ``suspicious`` unbound -> TypeError). ONE local tri-state ``below_unity``
+    is computed ONCE; BOTH ``headline.index_below_unity`` AND the ``grin_index_nonphysical``
+    flag derive from that same local (no second ``min_index < 1.0`` comparison).
+    """
+    fault = bool(s["fault"])
+    dltn_fault = bool(s["dltn_fault"])
+    dn_source = s["dn_source"]
+
+    # The ONE below-unity tri-state, computed ONCE, on the reader's PHYSICAL
+    # ``min_index`` (the I#VA reads are the physical index for every GRIN type).
+    # None on a vector fault -> below_unity None (NEVER False on a failed read).
+    mi = s["min_index"]
+    below_unity = (mi < 1.0) if mi is not None else None
+
+    # index_max is the consumer-side max over the reader's PHYSICAL-index 6-vector; None
+    # when the vector is null (never a fabricated aggregate).
+    _imax = max(s["index_vector"]) if s["index_vector"] is not None else None
+
+    readings = {
+        "delta_n": _reading(
+            "GRIN", s["dn"], (fault or s["dn"] is None),
+            units="index", source=dn_source),
+        "delta_n_sampled": _reading(
+            "GRIN", s["dn_sampled"], (fault or s["dn_sampled"] is None),
+            units="index", source="I#VA-spread"),
+        "delta_n_axial": _reading(
+            "GRIN", s["dn_axial"], (fault or dltn_fault or (is_axial and s["dn_axial"] is None)),
+            units="index", source="DLTN"),
+        "index_min": _reading(
+            "GRIN", s["min_index"], (fault or s["min_index"] is None), units="index"),
+        "index_max": _reading(
+            "GRIN", _imax, (fault or _imax is None), units="index"),
+        "index_vector": _reading(
+            "GRIN", None, fault, units="index", vector=s["index_vector"]),
+    }
+
+    headline = {
+        "delta_n": s["dn"],
+        "index_min": s["min_index"],
+        "index_max": _imax,
+        "index_below_unity": below_unity,
+    }
+
+    axial_monotonic_note = (
+        _GRIN_AXIAL_MONO_NOTE_AXIAL if is_axial else _GRIN_AXIAL_MONO_NOTE_RADIAL)
+
+    flags = []
+    if fault:
+        flags.append(
+            "grin_index_read_faulted: the I#VA index vector could not be read; "
+            "delta_n/index_min/index_max reported null, not fabricated")
+    if below_unity is True:
+        flags.append(
+            f"grin_index_nonphysical: min bulk index {s['min_index']:.4f} < 1.0 "
+            "(nonphysical for a passive medium) - readable on demand, not only "
+            "post-optimize")
+    if is_axial and dltn_fault:
+        flags.append(
+            "grin_axial_dltn_unread: the axial DLTN half is unreadable; delta_n is the "
+            f"radial I#VA spread only (dn_source={dn_source})")
+    if is_axial:
+        flags.append(_GRIN_AXIAL_MONO_NOTE_AXIAL)
+    flags.append(_GRIN_WAVELENGTH_BLIND_NOTE)
+    if wl_um is None:
+        flags.append(
+            "wavelength_value_unreadable: the interpreted wavelength VALUE (um) could "
+            f"not be read; the wave INDEX {wave} is still echoed")
+
+    return {
+        "ok": True,
+        "tool": "analyze_grin_profile",
+        "surface": surface,
+        "surface_type": s["grin_type"],
+        "is_axial": s["is_axial"],
+        "wave": wave,
+        "wavelength_interpreted_at": wl_um,
+        "grin_wavelength_blind": True,
+        "dn_source": dn_source,
+        "readings": readings,
+        "axial_monotonic": None,        # null ALWAYS (never fabricated)
+        "axial_monotonic_note": axial_monotonic_note,
+        "headline": headline,
+        "manufacturing_hint": {
+            "delta_n_number": (
+                "delta_n - radial: peak-to-valley over the 6 sampled points; axial: "
+                "max(radial spread, abs(DLTN)); dn_source is authoritative; compare "
+                "against YOUR process limit (no universal threshold; never a 'pass')"),
+            "physicality": (
+                "index_below_unity - min bulk index must be >= 1.0 for a passive medium"),
+            "dn_source": dn_source,
+        },
+        "sampled_coverage_note": _grin_idx._GRIN_SAMPLED_COVERAGE_NOTE,
+        "readout_scope_note": _GRIN_READOUT_SCOPE_NOTE,
+        "fault": s["fault"],
+        "config_headline": headline["delta_n"],   # the per-config divergence scalar
+        "flags": flags,
+    }
+
+
+@_never_raise("analyze_grin_profile")
+def analyze_grin_profile(session, params):
+    """GRIN index-profile MANUFACTURABILITY grade. Read-only.
+
+    Reads the STORED index profile on ONE GRIN surface via the shared
+    ``_grin_index_common`` reader: the index swing ``delta_n`` (radial: peak-to-valley
+    over the 6 sampled I#VA points; axial: ``max(radial spread, abs(DLTN))``), min/max
+    bulk index, the ``index_below_unity`` physicality flag, and the 6-point index vector.
+
+    The fail-closed gate (§1.1a): classification routes through ``grin_surfaces()`` (ONE
+    authority) BEFORE any operand read — a non-GRIN surface -> ``measurement_param``;
+    a Type-throw / unreadable row -> ``analysis_empty`` (operands NEVER read on an
+    unclassifiable row). A read fault -> null + a flag, NEVER a fabricated 0. Monochromatic
+    (``grin_wavelength_blind``); ``axial_monotonic`` is deferred (read-only). ``config``
+    (None|int|"all") sweeps configurations. Never raises past the handler.
+    """
+    if not isinstance(params, dict) or "surface" not in params:
+        return _ac.error_envelope(
+            "analyze_grin_profile", "measurement_param",
+            "the 'surface' param (the GRIN surface number) is required")
+    surface = _coerce_profile_surface(params["surface"])   # existing asphere coercion
+    system = session.system
+    n = int(system.LDE.NumberOfSurfaces)
+    if not (1 <= surface <= n - 1):
+        raise ToolParamError(
+            f"surface {surface} out of range for a GRIN-profile read; valid 1..{n - 1} "
+            f"(OBJECT 0 and beyond IMAGE are refused; N={n})")
+
+    entries, faults = _grin_idx.grin_surfaces(system)      # NEVER raises; ONE authority
+    match = next((e for e in entries if e[0] == surface), None)
+    if match is None:
+        return _grin_gate_refusal(system, surface, faults)  # §1.1a family split
+    _surf, info, is_axial = match
+
+    wave = _resolve_wave(system, params)                   # ONCE, outside the sweep
+    wl_um = _read_wavelength_um(system, wave)              # throw-guarded um, ONCE
+    config = params.get("config")
+
+    def _grade(sess):
+        s = _grin_idx.index_summary(sess.system, surface, info, is_axial, wave)
+        return _build_grin_envelope(s, surface, is_axial, wave, wl_um)
+
+    return _cfg.evaluate_over_configs(session, config, _grade)
+
+
+# --------------------------------------------------------------------------- #
 # ToolSpecs (locked D11 — param_types + agent-facing descriptions).
 # --------------------------------------------------------------------------- #
 GET_FIRST_ORDER_SPEC = ToolSpec(
@@ -1865,6 +2136,30 @@ ANALYZE_LATERAL_COLOR_SPEC = ToolSpec(
     ),
 )
 
+ANALYZE_GRIN_PROFILE_SPEC = ToolSpec(
+    name="analyze_grin_profile",
+    handler=analyze_grin_profile,
+    required_params=("surface",),
+    param_types={"surface": "number", "wave": "number", "config": "number"},
+    description=(
+        "Measure a GRIN element's RESULTING index-profile manufacturability on ONE GRIN "
+        "surface: the index swing delta_n (radial: peak-to-valley over the 6 sampled "
+        "points; axial: max(radial spread, abs(DLTN)); dn_source is authoritative), "
+        "min/max bulk index, the physicality flag index_below_unity (min index "
+        "< 1.0 is nonphysical), and the 6-point index vector. Every index number is the "
+        "PHYSICAL index, for every GRIN type — NOT the Par cell value (a Gradient2's cells "
+        "hold the index SQUARED, so index_min of a surface authored with set_grin(n0=2.25) "
+        "reads 1.5). dn_source discloses radial "
+        "(I#VA spread) vs axial (DLTN). Compare delta_n against YOUR process's "
+        "manufacturing limit — the tool asserts no universal threshold and never says "
+        "'pass'. Reads the STORED profile (proves storage, not trace consumption). "
+        "Monochromatic (grin_wavelength_blind); wavelength_interpreted_at echoed. "
+        "axial_monotonic is deferred (read-only; no n(z) monotonicity signal). Refuses a "
+        "non-GRIN surface (measurement_param). config (None|int|'all') sweeps "
+        "configurations. See set_grin, analyze_aspheric_profile."
+    ),
+)
+
 TOOL_SPECS = (
     GET_FIRST_ORDER_SPEC,
     ANALYZE_STREHL_SPEC,
@@ -1874,4 +2169,5 @@ TOOL_SPECS = (
     ANALYZE_DISTORTION_SPEC,                 # NEW (S4)
     ANALYZE_RELATIVE_ILLUMINATION_SPEC,      # NEW (S4)
     ANALYZE_LATERAL_COLOR_SPEC,              # NEW (G2 iterative-0706)
+    ANALYZE_GRIN_PROFILE_SPEC,               # NEW (GRIN)
 )

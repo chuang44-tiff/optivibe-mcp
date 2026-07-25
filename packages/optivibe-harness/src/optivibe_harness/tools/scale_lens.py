@@ -1,4 +1,4 @@
-"""tools/scale_lens.py — the catalog-bench S1 geometric-scale tool.
+"""tools/scale_lens.py — the geometric-scale tool: to a target EFL, or by a factor.
 
 ONE dispatchable tool ``scale_lens(mode, value)`` driving the native single-slot
 ``Tools.OpenScale()`` BY-FACTOR (never by-units — the inert-no-op trap), proving

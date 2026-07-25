@@ -157,6 +157,47 @@ def _read_surface_dict(system, lde, surface, n):
         except Exception:  # noqa: BLE001 — a drifted/throwing coeff cell -> graceful (b.3)
             out["aspheric_coefficients"] = None
             out["coefficients_unreadable"] = True
+
+    # GRIN (§6.1) additive read block — keyed on the AUTHORABLE resolver
+    # (``grin_type_of_name`` over ``GRIN_TYPE_INFO``): a GRIN surface reports its base
+    # index ``n0``, its radial coefficient MAP (Nr2..Nr12), the internal Delta-T trace step,
+    # and the wavelength-blind caveat. A non-GRIN surface gets NONE of these keys
+    # (byte-unchanged control). Map-driven Par1..Par8 ONLY (Par9+ never fetched); a real 0.0
+    # coefficient stays visible (zero != unused). A drifted/wedged coefficient cell AFTER
+    # positive type ID -> ``grin_coefficients:null`` + ``grin_coefficients_unreadable:true``
+    # (never a fabricated 0.0, never a whole-surface error, never silently non-GRIN). Wrapped
+    # so this additive read NEVER crashes the base surface read. (``out["type"]`` is the
+    # already-read guarded ``str(row.Type)``; a degraded Type read -> None -> non-GRIN.)
+    try:
+        from . import _grin_cells as _grin
+        grin_key = _grin.grin_type_of_name(out.get("type") or "")
+    except Exception:  # noqa: BLE001 — a GRIN resolver hiccup -> treat as non-GRIN (omit block)
+        grin_key = None
+    if grin_key is not None:
+        out["grin_surface_type"] = grin_key
+        out["grin_wavelength_blind"] = True
+        try:
+            info = _grin.GRIN_TYPE_INFO[grin_key]
+            grin_coeffs = {}
+            grin_n0 = None
+            grin_step = None
+            # Iterate the RESOLVED type's params (was the module-global Gradient2 table — the
+            # false ``grin_coefficients_unreadable`` on a good Gradient3); n0 keyed on
+            # the TOKEN, never ``power == 0``.
+            for tok, _p, _h, _k, role, _pw in info.params:
+                val = _grin.read_grin_cell(system, row, tok, info)
+                if role == "step":
+                    grin_step = val
+                elif tok == "n0":
+                    grin_n0 = val
+                else:
+                    grin_coeffs[tok] = val
+            out["grin_n0"] = grin_n0
+            out["grin_coefficients"] = grin_coeffs
+            out["grin_step_size"] = grin_step
+        except Exception:  # noqa: BLE001 — a drifted/wedged coeff cell -> graceful degrade
+            out["grin_coefficients"] = None
+            out["grin_coefficients_unreadable"] = True
     return out
 
 

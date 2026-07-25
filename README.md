@@ -15,7 +15,9 @@ This is early-stage and provided as-is. Expect rough edges; see [Status](#status
 
 - **Tools** (`optivibe-harness`) — more than 80 typed tools that drive OpticStudio over
   the ZOS-API. Each returns a uniform result envelope rather than raising, so the
-  agent checks a read-back value instead of assuming a call succeeded.
+  agent checks a read-back value instead of assuming a call succeeded. Beyond
+  spherical surfaces it authors aspheres, coordinate breaks, fold mirrors,
+  diffraction gratings, and gradient-index media.
 - **Reference layer** (`optivibe-reference`) — operand and glass lookups plus manual
   search, to help ground the agent's choices. Engine-free and license-free; its data
   is built locally (see [Build the reference data](#build-the-reference-data)).
@@ -29,7 +31,7 @@ install.
 - **Windows.** OpticStudio and the ZOS-API .NET surface are Windows-only.
 - **Zemax OpticStudio**, licensed for the ZOS-API. Developed against
   **2025 R1 (25.1.0, Premium)**; other versions are untested. Access is gated at
-  startup on `IsValidLicenseForAPI`.
+  first engine open on `IsValidLicenseForAPI`.
 - **Python 3.11+.**
 - **.NET Framework** — used automatically. The bootstrap sets
   `PYTHONNET_RUNTIME=netfx` and locates your install directory (via env override,

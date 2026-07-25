@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "optivibe-harness"
-version = "0.1.0"
+version = "0.1.1"
 description = "OptiVibe harness: ZOS-API automation, typed tools, and the single OptiVibe MCP"
 requires-python = ">=3.11"
 classifiers = [

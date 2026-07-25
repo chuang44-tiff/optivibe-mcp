@@ -166,6 +166,32 @@ class AsphereWriteError(SurfaceWriteError):
     error_family = "surface_asphere"
 
 
+class GrinWriteError(SurfaceWriteError):
+    """A GRIN coefficient write did NOT take effect / was not proven (surface-grin).
+
+    A ``SurfaceWriteError`` subclass so it inherits the structured
+    ``(field, intended, actual, surface)`` attrs AND the existing
+    ``except SurfaceWriteError`` envelope plumbing (no new dispatch wiring). Only
+    the ``error_family`` is overridden to the DISTINCT ``"surface_grin"`` so the
+    agent can branch on "the GRIN write failed" (the remedy is to re-author the
+    GRIN profile on that surface, distinct from a generic LDE geometry write).
+
+    Raised by ``_grin_cells`` / ``grin_surface`` on a read-back-as-proof failure: a
+    ChangeType to a GRIN type that silently no-opped (the surface did not retype), a
+    Par cell whose live Header/DataType drifted from the ``GRIN_PARAMS`` catalog, a
+    coefficient that did not read back == intended (the typed-setter / collapse-to-
+    zero silent no-op — including the ZERO-BOUNDARY case where a 0.0 write no-ops
+    over a stale-tiny term or a tiny intended collapses to 0.0), or an unreadable
+    ``row.Type``. The cell substrate refuses rather than write/read the wrong cell
+    or claim an unverified coefficient. (The shared ``_revert_to_standard_proven``
+    reused by the Standard-revert arm raises the BASE ``SurfaceWriteError`` — family
+    ``"surface_write"`` — so the GRIN family contract is a QUARTET: ``grin_param`` /
+    ``surface_grin`` / ``grin_write`` / ``surface_write`` (revert only).)
+    """
+
+    error_family = "surface_grin"
+
+
 class CatalogLoadError(SurfaceWriteError):
     """A material-catalog load did NOT take effect / was not proven (catalog-load).
 

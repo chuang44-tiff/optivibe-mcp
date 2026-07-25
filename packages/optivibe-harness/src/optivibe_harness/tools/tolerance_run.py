@@ -196,9 +196,10 @@ def _author_tolerance_set(tde, operand_enum, authored):
     ``surface2``, RollSurf from ``roll_surf``, Code/Par# from ``code``/``param``) writing
     each through ``_tol_cells.write_verified_cell`` (cell.DataType Int/Double
     discriminator + Header-match + read-back proof, D6). For a ``has_minmax`` operand the
-    Min/Max are written as typed Double properties (``op.Min``/``op.Max`` — probe-proven
-    to persist) and read-back-verified. A control/compensator/structural op (no
-    ``min``/``max`` in its validated entry) authors its int cells ONLY (no perturbation).
+    Min/Max are written via ``_tol_cells.write_double_verified`` into the Min@col6 / Max@col7
+    Double CELLS (``_MIN_COL`` / ``_MAX_COL``, DataType Double, read-back-proven) — NOT the
+    ``op.Min``/``op.Max`` typed property (the v2 cell path). A control/compensator/structural
+    op (no ``min``/``max`` in its validated entry) authors its int cells ONLY (no perturbation).
 
     The compensator cells are authored for ``.zmx`` fidelity but the run discloses
     ``compensator_participates:false`` (D13/G-COMP-INERT). NO per-token code — the
@@ -459,6 +460,12 @@ def tolerance(session, params):
             known_gaps=known_gaps,
         )
 
+    # (GRIN §1.3e) the GRIN Par# perturbation disclosures + the variable-gradient
+    # coverage warning — computed post-validation PRE-run (both read-only; never raise).
+    # Threaded ONLY into the SUCCESS + reconcile-ESCALATION envelopes (v2).
+    grin_perturbation = _grin_perturbation_disclosures(system, authored)
+    grin_coverage_warning = _grin_coverage_warning(system, authored)
+
     # preflight WARN-and-run: classify system.SystemFile. A non-blessed
     # backing file (empty / New-default / %TEMP% / a harness checkpoint) WARNS that the
     # run will likely produce no report (load_design a saved design) — never a refuse
@@ -612,7 +619,26 @@ def tolerance(session, params):
             f"a parsed sensitivity row matched no authored operand "
             f"(engine/author desync, surfaced not swallowed): {extra!r}"
         )
+    # (GRIN §1.3e) surface the count-fallback disclosure AND the matched-row
+    # error lines ABOVE the escalation return — a MIXED result (one group count-fallback +
+    # another escalating) must NOT drop these warnings into the void (the escalation
+    # envelope already threads warnings=warnings).
+    for w in recon.get("par_unresolved", []):
+        warnings.append(w)
+    for me in recon.get("matched_operand_errors", []):
+        warnings.append(
+            f"the engine emitted an error line for authored operand {me.get('type')!r} "
+            f"whose row ALSO reconciled (surfaced not swallowed): "
+            f"{me.get('reason_line')!r}"
+        )
     if recon.get("escalate"):
+        # (GRIN §1.3e, BUG-COV-ESC) the coverage warning rides BOTH the SUCCESS
+        # AND the reconcile-ESCALATION envelopes — a variable GRIN gradient with no coefficient
+        # TPAR (unbounded fabrication sensitivity) must NOT be silently lost when the run ALSO
+        # escalates. Conditional top-level key (matching _build_envelope's non-None posture).
+        escalation_extra = {}
+        if grin_coverage_warning is not None:
+            escalation_extra["grin_tolerance_coverage_warning"] = grin_coverage_warning
         return _ac.error_envelope(
             "tolerance", _tc._RECONCILE_FAMILY,
             "one or more SUPPORTED authored operands produced NEITHER a sensitivity row "
@@ -623,7 +649,11 @@ def tolerance(session, params):
             refused_operands=recon["refused"],
             operand_errors=operand_errors,
             authored_operands=_authored_summary(authored),
+            grin_perturbation=grin_perturbation,
+            reconciled_operand_keys=recon.get("reconciled_operand_keys", []),
+            reconciliation_mode=recon.get("reconciliation_mode"),
             warnings=warnings,
+            **escalation_extra,
         )
 
     # (MCE) the Config#-vs-current-config WARN (tmco_config_mismatch) — the
@@ -643,6 +673,8 @@ def tolerance(session, params):
     return _build_envelope(
         mode, parsed, authored, trials, echoed_trials, full, strehl_nominal,
         state_mutated, warnings, output_path, tde_cleared, recon, known_gaps,
+        grin_perturbation=grin_perturbation,
+        grin_coverage_warning=grin_coverage_warning,
     )
 
 
@@ -698,8 +730,174 @@ def _authored_summary(authored):
                "tier": e.get("tier"), "units": e.get("units")}
         if e.get("surface2") is not None:
             row["surface2"] = e["surface2"]
+        # GRIN display carry: name the Par# so the escalation envelope's
+        # authored_operands / unaccounted_operands identify the coefficient.
+        if e.get("param") is not None:
+            row["param"] = e["param"]
         out.append(row)
     return out
+
+
+def _grin_quantity_for_par(info, par):
+    """Map an integer Par# to its quantity dict via the RESOLVED ``GrinTypeInfo.params``.
+
+    (GRIN §1.3b) Walks ``info.params`` rows ``(token, "ParN", header, dtype, kind,
+    power)``:
+      token "n0"        -> base_index_n0
+      kind == "coeff"   -> index_profile_coefficient (coefficient = the live Header)
+      else (Delta T)    -> trace_step_delta_t (a numerical trace step, NOT an
+                           index-profile quantity; never counts toward gradient coverage)
+    A Par# beyond THIS type's table -> grin_par_unmapped (disclosed, never silent).
+    """
+    target = f"Par{par}"
+    for row in info.params:
+        token = row[0]
+        par_str = row[1]
+        header = row[2]
+        kind = row[4]
+        if par_str != target:
+            continue
+        if token == "n0":
+            return {"quantity": "base_index_n0", "par": par, "coefficient": "n0"}
+        if kind == "coeff":
+            return {"quantity": "index_profile_coefficient", "par": par,
+                    "coefficient": header}
+        return {"quantity": "trace_step_delta_t", "par": par, "coefficient": header,
+                "note": "numerical trace step, NOT an index-profile quantity; does not "
+                        "count toward gradient coverage"}
+    return {"quantity": "grin_par_unmapped", "par": par}
+
+
+def _grin_perturbation_disclosures(system, authored):
+    """One disclosure entry per authored GRIN Par# perturbation (GRIN §1.3c).
+
+    Returns a list, NEVER raises. One entry per authored op passing the SHARED
+    ``is_param_perturbation_op`` predicate (NOT ``parser_secondary_key``,
+    which also selects TEDV/CPAR/CEDV/CNPA; a control/compensator with a supplied
+    ``param`` must NEVER earn a ``grin_perturbation`` entry) whose LDE row resolves GRIN
+    via ``_grin_cells.grin_type_of`` (the AUTHORABLE resolver — the disclosure needs the
+    per-type cell map). Non-GRIN -> no entry; a per-op read throw -> skip that op (never
+    a false GRIN claim, never fails the run).
+    """
+    out = []
+    for e in authored:
+        if not isinstance(e, dict):
+            continue
+        token = e.get("type")
+        if not _cat.is_param_perturbation_op(token):
+            continue
+        param = e.get("param")
+        if param is None:
+            continue
+        surface = e.get("surface")
+        try:
+            from . import _grin_cells as _grin  # lazy — circular-import avoidance
+            row = system.LDE.GetSurfaceAt(surface)
+            key = _grin.grin_type_of(row)     # the resolved GRIN_TYPE_INFO KEY (or None)
+            info = _grin.GRIN_TYPE_INFO.get(key) if key is not None else None
+        except Exception:  # noqa: BLE001 — a per-op read throw -> skip (no false claim)
+            continue
+        if info is None:
+            continue                       # non-GRIN surface -> no entry
+        entry = dict(_grin_quantity_for_par(info, param))
+        entry["surface"] = surface
+        entry["type"] = token
+        out.append(entry)
+    return out
+
+
+# (GRIN §1.3d) the INDETERMINATE coverage string — a NON-EMPTY faults list
+# of ANY source (or the inventory throwing) can never read as clean: a shared LDE
+# GetSurfaceAt(i) throw is recorded source:"asphere" yet the `continue` skips the GRIN walk
+# for that surface too, so a "grin"-scoped filter reads a false clean over an unenumerated
+# GRIN surface. The any-fault rule costs nothing (the warning is advisory).
+_GRIN_COVERAGE_INDETERMINATE = (
+    "grin_tolerance_coverage: the variable inventory could not be fully enumerated; "
+    "gradient tolerance coverage is INDETERMINATE for this run — re-run after resolving "
+    "the enumeration fault, or author TPAR per optimized GRIN coefficient to be safe."
+)
+
+
+def _grin_surface_covered(system, authored, surface):
+    """True iff an authored TPAR bounds a gradient coefficient on ``surface`` (§1.3d).
+
+    Covered iff an authored **TPAR** (TPAI does NOT certify — the brief-literal trigger)
+    with ``surface==surface`` has a ``param`` the RESOLVED GRIN map classifies
+    ``index_profile_coefficient`` (map-driven via ``_grin_quantity_for_par`` — no {3..8}
+    literal; n0 / Delta-T / unmapped never cover). A Type-resolve throw -> not covered
+    (advisory-safe: over-warn). NEVER raises.
+    """
+    try:
+        from . import _grin_cells as _grin  # lazy — circular-import avoidance
+        row = system.LDE.GetSurfaceAt(surface)
+        key = _grin.grin_type_of(row)         # the resolved GRIN_TYPE_INFO KEY (or None)
+        info = _grin.GRIN_TYPE_INFO.get(key) if key is not None else None
+    except Exception:  # noqa: BLE001 — cannot resolve -> not covered (advisory over-warn)
+        return False
+    if info is None:
+        return False
+    for e in authored:
+        if not isinstance(e, dict):
+            continue
+        token = e.get("type")
+        # coverage is the FOURTH consumer of the authorable-perturbation
+        # predicate — gate on ``is_param_perturbation_op`` (NOT a hand-coded token literal)
+        # so a catalog drift (a TPAR row that loses has_minmax / drifts to a control tier)
+        # no longer falsely certifies coverage. KEEP the TPAR-only rule (TPAI does NOT
+        # certify — the brief-literal trigger) AND inherit the catalog-drift safety.
+        if token != "TPAR" or not _cat.is_param_perturbation_op(token):
+            continue
+        if e.get("surface") != surface:
+            continue
+        param = e.get("param")
+        if param is None:
+            continue
+        if _grin_quantity_for_par(info, param).get("quantity") \
+                == "index_profile_coefficient":
+            return True
+    return False
+
+
+def _grin_coverage_warning(system, authored):
+    """The ``grin_tolerance_coverage_warning`` string, or None (GRIN §1.3d).
+
+    NEVER raises. Universe: ``_optimize_common._variable_inventory(system, faults=faults)``
+    items ``source=="grin"`` (reuse) -> the surfaces with a VARIABLE (optimized)
+    index profile. Fault posture (ANY-source fail-closed): a NON-EMPTY faults
+    list of ANY source, OR the inventory call itself throwing, -> the INDETERMINATE
+    string, NEVER a silent None. Clean (no grin items, no fault) -> None. Uncovered
+    surfaces -> a string NAMING each uncovered surface.
+    """
+    try:
+        from . import _optimize_common as _oc  # lazy — circular-import avoidance
+        faults = []
+        try:
+            inv = _oc._variable_inventory(system, faults=faults)
+        except Exception:  # noqa: BLE001 — an inventory throw -> INDETERMINATE
+            return _GRIN_COVERAGE_INDETERMINATE
+        if faults:
+            return _GRIN_COVERAGE_INDETERMINATE   # ANY-source fault -> INDETERMINATE
+        grin_surfaces = sorted({
+            it.get("surface") for it in inv
+            if isinstance(it, dict) and it.get("source") == "grin"
+            and it.get("surface") is not None
+        })
+        if not grin_surfaces:
+            return None                            # no variable GRIN -> nothing to warn
+        uncovered = [s for s in grin_surfaces
+                     if not _grin_surface_covered(system, authored, s)]
+        if not uncovered:
+            return None
+        names = ", ".join(str(s) for s in uncovered)
+        return (
+            f"grin_tolerance_coverage: the optimized (variable) index gradient on "
+            f"surface(s) {names} has NO gradient-coefficient TPAR (Par#=3..8) tolerance "
+            "authored; the fabrication sensitivity of the index gradient is UNBOUNDED in "
+            "this run — author TPAR(surface=S, param=<Par#>) per optimized coefficient "
+            "(Par2=n0 is the base index; Par3..Par8 are the profile coefficients)."
+        )
+    except Exception:  # noqa: BLE001 — never raise past the handler (advisory only)
+        return None
 
 
 def _units_by_family(authored):
@@ -714,7 +912,8 @@ def _units_by_family(authored):
 
 def _build_envelope(mode, parsed, authored, trials, echoed_trials, full,
                     strehl_nominal, state_mutated, warnings, output_path,
-                    tde_cleared=True, recon=None, known_gaps=None):
+                    tde_cleared=True, recon=None, known_gaps=None,
+                    grin_perturbation=None, grin_coverage_warning=None):
     """Build the SENSITIVITY / MONTE_CARLO result envelope (D8/D9/D11/D12/D13/D16)."""
     recon = recon or {"ran": [], "refused": [], "unaccounted": []}
     base = {
@@ -760,7 +959,20 @@ def _build_envelope(mode, parsed, authored, trials, echoed_trials, full,
         "operand_errors": parsed.get("operand_errors") or [],
         "known_gaps": known_gaps or [],
         "units_by_family": _units_by_family(authored),
+        # (GRIN §1.3f) the GRIN Par# perturbation disclosures + the per-op reconcile
+        # proof fields. ``grin_perturbation`` + coverage are authored-set-derived (both
+        # modes); ``reconciliation_mode`` is None in MC (no per-op table — reconcile is a
+        # structural no-op there).
+        "grin_perturbation": grin_perturbation or [],
+        "reconciled_operand_keys": recon.get("reconciled_operand_keys", []),
+        "reconciliation_mode": (
+            recon.get("reconciliation_mode") if mode == "sensitivity" else None
+        ),
     }
+    # (GRIN §1.3f) the coverage warning is a CONDITIONAL top-level key (the
+    # glass_floor_warning posture) — present ONLY when non-None, never flips ok.
+    if grin_coverage_warning is not None:
+        base["grin_tolerance_coverage_warning"] = grin_coverage_warning
 
     if mode == "sensitivity":
         base["sensitivity"] = parsed["sensitivity"]
@@ -831,8 +1043,13 @@ TOLERANCE_SPEC = ToolSpec(
         "lens prescription is left untouched. Gotcha: tolerance a design LOADED from "
         "disk via load_design — a freshly-built/just-applied in-memory system produces "
         "an empty report (tolerancing_empty_report; the engine blesses only a saved "
-        ".zmx loaded fresh from its own path). See load_design, optimize, "
-        "analyze_strehl, analyze_wavefront."
+        ".zmx loaded fresh from its own path). GRIN: TPAR/TPAI take a REQUIRED 'param' "
+        "(the 1-based Par#); on a GRIN surface n0 is param=2 and the profile "
+        "coefficients are param=3..8 (each perturbation is disclosed in "
+        "grin_perturbation with its quantity/coefficient); a variable GRIN gradient with "
+        "no TPAR coefficient tolerance raises grin_tolerance_coverage_warning. TIND/TABB "
+        "refuse a bare-cell GRIN surface (AIR) — use TPAR(param=2) for the base index. "
+        "See load_design, optimize, analyze_strehl, analyze_wavefront."
     ),
 )
 
