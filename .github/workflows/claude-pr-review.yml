@@ -20,16 +20,29 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# Only review the latest push to a PR. Without this, every intermediate commit
+# starts its own review and they all run to completion on the owner's quota.
+concurrency:
+  group: claude-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   review:
+    # GitHub does not expose repo secrets to a workflow triggered by a fork PR, so
+    # the review cannot authenticate there and would fail red on every outside
+    # contribution. Skip cleanly instead; no-vendor-data.yml is the hard guard that
+    # still runs on forks.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    # Bound a runaway review so one PR cannot drain the quota.
+    timeout-minutes: 20
     permissions:
       contents: read
       pull-requests: write
       id-token: write
     steps:
       - name: Checkout PR
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
