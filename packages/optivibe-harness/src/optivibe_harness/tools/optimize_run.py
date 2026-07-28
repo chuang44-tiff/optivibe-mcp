@@ -32,6 +32,7 @@ from ..enums import _resolve_enum
 from ..errors import OptimizeError, ToolParamError
 from ..server import ToolSpec
 from . import _config_common as _ccfg
+from . import _grin_index_common as _gic  # GRIN — cycle-safe (never imports optimize_run)
 from . import _optimize_common as _oc
 from . import analysis_spot  # cycle-safe (analysis_spot never imports optimize_run)
 from . import clearance  # cycle-safe (clearance never imports optimize_run)
@@ -753,6 +754,10 @@ def _optimize_impl(session, params):
     # value is rejected -> optimize_param even with NO offender (zero mutation, engine unopened).
     # Default False PRESERVES the fail-closed optimize_per_config_thin hard-refuse.
     recover_thin = _bool_param(params, "recover_thin", False)
+    # GRIN §4.1: the opt-in no-floor spread-check envelope. Read EARLY (before the
+    # preflight) so a bad value refuses opening NOTHING (the recover_thin precedent). None
+    # when absent -> the floored path's box audit still runs (weight-/param-independent).
+    grin_dn_max = _grin_dn_max_param(params)
     guard_warning = None
 
     # (1) embed the preflight gate — open NOTHING on a fail. The stop-convention
@@ -904,6 +909,7 @@ def _optimize_impl(session, params):
             variables=variables,
             wall_start=wall_start,
             nudge_disclosure=nudge_disclosure,
+            grin_dn_max=grin_dn_max,
         )
 
     # (4) open the optimizer ONCE; (5) run the bounded passes; (4-finally) reap.
@@ -1107,6 +1113,10 @@ def _optimize_impl(session, params):
         "warning": warning,
     }
     result.update(edge_audit)  # 0-3 additive keys; never overwrites a base key
+    # GRIN §4.4: the post-optimize GRIN index audit — ONCE on the RESULT, after the
+    # edge audit (the both-tails drift-pin). Additive keys, never flips ok,
+    # never raises. The box audit runs regardless of grin_dn_max (weight-/param-independent).
+    result.update(_grin_index_audit_warnings(session, grin_dn_max))
     # the post-optimize merit<->reality (chromatic-blindness) audit — ONCE on
     # the RESULT, additive keys, never flips ok, never raises. merit_scalar = the in-hand
     # merit_after (human context; NO extra CalculateMeritFunction call).
@@ -1119,7 +1129,7 @@ def _optimize_impl(session, params):
 
 def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, run_id,
                           artifact_trail, guard_warning, warning, variables, wall_start,
-                          nudge_disclosure=None):
+                          nudge_disclosure=None, grin_dn_max=None):
     """The Hammer (global-search) fork of ``optimize`` (§2.4/§2.5).
 
     Hammer opens ``Tools.OpenHammerOptimization()`` (NOT the local optimizer), sets
@@ -1362,6 +1372,9 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
         "warning": warning,
     }
     result.update(edge_audit)  # 0-4 additive keys; never overwrites a base key
+    # GRIN §4.4: the post-optimize GRIN index audit rides a Hammer result too (the
+    # both-tails drift-pin — the same leaf helper as the DLS tail).
+    result.update(_grin_index_audit_warnings(session, grin_dn_max))
     # the post-optimize merit<->reality (chromatic-blindness) audit rides a
     # Hammer result too (the same leaf helper as the DLS tail). merit_after is in scope.
     result.update(_merit_reality_divergence_warning(session, safe_float(merit_after)))
@@ -1554,6 +1567,18 @@ def _edge_audit_warnings(session, glass_floor, air_floor):
                 "IN FRONT of the last optical surface (rear group / field-flattener may be "
                 "misplaced)."
             )
+
+        # thread the positive audit-coverage + not-audited evidence
+        # through the optimize result tail, so a CLEAN-passing GRIN is distinguishable from a
+        # never-examined one (the exact ambiguity grin_geometric_audit closes). Additive
+        # (non-string) keys; the whole body is already under the outer never-raise try, so a
+        # malformed env degrades to no key.
+        ga = env.get("grin_geometric_audit")
+        if isinstance(ga, dict) and ga.get("audited"):
+            out["grin_geometric_audit"] = ga
+        gna = env.get("grin_not_audited")
+        if isinstance(gna, list) and gna:
+            out["grin_not_audited"] = gna
         return out
     except Exception:  # noqa: BLE001 — §2.4: the advisory audit NEVER raises -> {} on any fault
         return {}
@@ -1727,6 +1752,241 @@ def _merit_reality_divergence_warning(session, merit_scalar):
         return {}
 
 
+# =========================================================================== #
+# GRIN — the post-run index audit (detect side, §4). Additive STRING keys,
+# never flips ``ok``, never overwrites a base key, runs ONCE per success on BOTH tails.
+# =========================================================================== #
+# §4.2 — the STATIC audit-failed constant (its construction cannot throw, so the outer
+# except can always return it; NEVER {} — a detect-side failure is DISCLOSED).
+_GRIN_AUDIT_FAILED_MSG = (
+    "the post-optimize GRIN index audit FAILED to run — no GRIN warnings from this run "
+    "are meaningful; verify the index profile manually."
+)
+
+
+def _grin_dn_max_param(params):
+    """The §4.1 opt-in ``grin_dn_max`` param (the NO-FLOOR path's spread-check input).
+
+    ``None`` if absent (the floored path needs NO param — the box audit discovers the
+    authored box on the live MFE). Finite, non-bool, ``> 0`` -> ``float(v)``; else
+    ``OptimizeError(family="optimize_param")`` — raised EARLY in ``_optimize_impl`` (before
+    the preflight; a bad value opens NOTHING — the ``recover_thin`` precedent).
+    """
+    if "grin_dn_max" not in params:
+        return None
+    value = params["grin_dn_max"]
+    if isinstance(value, bool):
+        raise OptimizeError(
+            f"'grin_dn_max' must be a number, not a bool ({value!r})",
+            family="optimize_param",
+        )
+    if not isinstance(value, (int, float)):
+        raise OptimizeError(
+            f"'grin_dn_max' must be a number, got {type(value).__name__} {value!r}",
+            family="optimize_param",
+        )
+    value = float(value)
+    if not math.isfinite(value):
+        raise OptimizeError(
+            f"'grin_dn_max' must be a finite number, got {value!r}", family="optimize_param"
+        )
+    if value <= 0:
+        raise OptimizeError(
+            f"'grin_dn_max' must be > 0, got {value}", family="optimize_param"
+        )
+    return value
+
+
+def _grin_axial_disclosure(surfaces):
+    """The §4.3 ``grin_axial_monotonicity_not_audited`` LOUD disclosure — fires on
+    EVERY axial-capable surface's existence (a DISCLOSURE, not
+    a fired verdict), so a clean audit NEVER falsely certifies a monotonic OR fully-bounded
+    axial profile."""
+    names = ", ".join(f"S{s}" for s in surfaces)
+    return (
+        f"axial GRIN surface(s) {names}: axial n(z) monotonicity is NOT audited in this "
+        "release, and n>=1 / index-range are verified at the 6 sampled points only — an "
+        "interior-z extremum between samples is unaudited (both are sampled checks, "
+        "not analytic ones); a "
+        "clean audit does not certify a monotonic or fully-bounded axial profile."
+    )
+
+
+def _grin_box_violation_message(surf, violations):
+    """Build the §4.3 ``grin_index_box_violated_warning`` message for one surface.
+
+    ``violations`` = ``[(point, va, gt|None, lt|None)]`` — ALL in PHYSICAL INDEX. The I#VA
+    readings report the physical index for every GRIN type and the floor authors its bounds
+    in that same space, so NO conversion is applied here. Names each live index
+    + its authored bound(s) — the floor was authored but the run finished outside it
+    (slipped/drowned, weight-independent detection). A checkpoint-reload recovery pointer + the
+    sampled-coverage note.
+    """
+    parts = []
+    for (point, va, gt, lt) in violations:
+        lo = "-inf" if gt is None else f"{float(gt):.4f}"
+        hi = "+inf" if lt is None else f"{float(lt):.4f}"
+        parts.append(f"point {point} index {float(va):.4f} outside [{lo}, {hi}]")
+    return (
+        f"GRIN index floor slipped/drowned on S{surf}: " + "; ".join(parts) + ". The floor "
+        "was authored but the run finished outside it (weight-independent detection) — "
+        "reload a checkpoint and re-optimize (raise the floor weight or reduce the "
+        "competing operand)."
+    )
+
+
+def _grin_index_audit_warnings(session, grin_dn_max):
+    """The §4.2/§4.3 post-run GRIN index audit -> ``dict[str, str]`` (0..6 additive keys).
+
+    NEVER flips ``ok``, NEVER overwrites a base key, NEVER aborts a successful optimize;
+    runs ONCE per successful return. Every fired key carries ``_GRIN_SAMPLED_COVERAGE_NOTE``
+    (the audit never presents itself as a full-field verdict).
+
+    STRUCTURE: a PER-SURFACE try — a per-surface throw / malformed summary routes THAT
+    surface to ``grin_index_unread_warning`` and the loop CONTINUES (one bad surface never
+    erases the others). The OUTER except (total-body throw) returns
+    ``{"grin_index_audit_failed": _GRIN_AUDIT_FAILED_MSG}`` (a STATIC message) — NEVER ``{}``
+    (a detect-side failure is DISCLOSED, never silently clean).
+    """
+    try:
+        system = session.system
+        entries, disc_faults = _gic.grin_surfaces(system)
+
+        buckets = {
+            "grin_index_nonphysical_warning": [],
+            "grin_index_box_violated_warning": [],
+            "grin_dn_exceeds_envelope_warning": [],
+            "grin_index_unread_warning": [],
+        }
+        note = _gic._GRIN_SAMPLED_COVERAGE_NOTE
+        tol = _gic._GRIN_BOX_AUDIT_TOL
+
+        # a discovery fault reads as an UNREAD surface (never a clean optimize on a
+        # skipped-at-discovery GRIN surface).
+        for fault in disc_faults:
+            s = fault.get("surface")
+            reason = fault.get("reason")
+            label = "an unknown surface" if s is None else f"S{s}"
+            buckets["grin_index_unread_warning"].append(
+                f"could not read/audit the GRIN index profile on {label} ({reason}) — the "
+                "Δn / nonphysical audit did not cover it; verify manually."
+            )
+
+        # The axial disclosure fires on EVERY axial-capable surface's EXISTENCE (identity,
+        # not a read — cannot throw), so a faulted / throwing per-surface audit still discloses.
+        axial_surfaces = [s for (s, _info, is_axial) in entries if is_axial]
+
+        for (surf, info, is_axial) in entries:
+            try:
+                summary = _gic.index_summary(system, surf, info, is_axial)
+                if not isinstance(summary, dict):
+                    raise ValueError("malformed index summary")
+
+                if summary.get("fault"):
+                    buckets["grin_index_unread_warning"].append(
+                        f"could not read/audit the GRIN index vector on S{surf} — the Δn / "
+                        "nonphysical audit did not cover it; verify manually."
+                    )
+                    continue
+
+                # (a) n<1 nonphysical — UNCONDITIONAL (independent of grin_dn_max + the floor).
+                # ``min_index`` is the PHYSICAL index (the I#VA reads verbatim),
+                # so the n<1 grade is correct for every GRIN type with no conversion.
+                mi = summary.get("min_index")
+                if (isinstance(mi, (int, float)) and not isinstance(mi, bool)
+                        and math.isfinite(mi) and mi < _gic._GRIN_NONPHYSICAL_FLOOR):
+                    buckets["grin_index_nonphysical_warning"].append(
+                        f"GRIN index nonphysical on S{surf}: min bulk index "
+                        f"{mi:.4f} < 1.0 — a passive medium cannot have n<1."
+                    )
+
+                # (b) the box audit — weight- AND param-independent. Reads the
+                # authored box off the live MFE and checks every live I#VA against the
+                # authored bound. BOTH are PHYSICAL INDEX — the comparison is
+                # space-consistent for every type with no conversion on either side.
+                rvec = summary.get("index_vector")
+                box_coverage = None     # §4.3 two-path detect: the (c) envelope defer gate.
+                box_faulted = False
+                if isinstance(rvec, list) and rvec:
+                    box = _gic.read_authored_box(system.MFE, surf)
+                    box_coverage = box.get("coverage")
+                    box_faulted = bool(box.get("fault"))
+                    if box_faulted:
+                        # A box-scan / per-row read fault means the drowned-floor
+                        # backstop could NOT run — DISCLOSE it, never a silent clean. Skip the
+                        # box-violation check (the authored box is unreliable).
+                        buckets["grin_index_unread_warning"].append(
+                            f"could not read/audit the authored GRIN index floor box on "
+                            f"S{surf} — the drowned-floor box audit did not run; verify "
+                            "manually."
+                        )
+                    else:
+                        audit_rows = box.get("audit_rows") or {}
+                        violations = []
+                        for point, bounds in audit_rows.items():
+                            if not (1 <= point <= len(rvec)):
+                                continue
+                            gt, lt = bounds
+                            va = rvec[point - 1]
+                            low = None if gt is None else (gt - tol)
+                            high = None if lt is None else (lt + tol)
+                            if ((low is not None and va < low)
+                                    or (high is not None and va > high)):
+                                violations.append((point, va, gt, lt))
+                        if violations:
+                            buckets["grin_index_box_violated_warning"].append(
+                                _grin_box_violation_message(surf, violations)
+                            )
+
+                # (c) the no-floor spread check — ONLY when grin_dn_max supplied, and
+                # ONLY when a COMPLETE authored floor is NOT present for this surface (§4.3
+                # two-path detect): a complete floor -> the box audit (leg b,
+                # grin_index_box_violated_warning) governs — weight-independent, tolerance-banded
+                # and it catches a drowned floor too — so the strict raw envelope-exceeds check
+                # would only FALSE-FIRE at the DLS restoring-force equilibrium (raw Δn settling
+                # just over the cap while HELD in the box). A box read fault already routed to
+                # unread above (never a silent skip) -> defer there, skip the envelope.
+                if (grin_dn_max is not None
+                        and not box_faulted
+                        and box_coverage != "complete"):
+                    dn = summary.get("dn")
+                    if (isinstance(dn, (int, float)) and not isinstance(dn, bool)
+                            and math.isfinite(dn) and dn > grin_dn_max):
+                        # The I#VA readings ARE the physical index for every
+                        # GRIN type, so the Δn is a physical index swing with no conversion.
+                        buckets["grin_dn_exceeds_envelope_warning"].append(
+                            f"GRIN Δn exceeds the declared envelope on S{surf}: sampled Δn "
+                            f"{dn:.4f} (source {summary.get('dn_source')}; I#VA is the "
+                            "physical index; a sampled LOWER bound) > cap "
+                            f"{grin_dn_max:.4f} — reload a checkpoint and re-optimize."
+                        )
+
+                # (d) the axial half unread — an axial surface whose DLTN faulted.
+                if is_axial and summary.get("dltn_fault"):
+                    buckets["grin_index_unread_warning"].append(
+                        f"could not read the axial DLTN half of S{surf} — its axial Δn was "
+                        "not audited; verify manually."
+                    )
+            except Exception:  # noqa: BLE001 — a per-surface throw -> unread, others survive
+                buckets["grin_index_unread_warning"].append(
+                    f"the GRIN index audit body threw on S{surf} — it was not audited; "
+                    "verify manually."
+                )
+                continue
+
+        out = {}
+        for key, msgs in buckets.items():
+            if msgs:
+                out[key] = " ".join(msgs) + " " + note
+        if axial_surfaces:
+            out["grin_axial_monotonicity_not_audited"] = (
+                _grin_axial_disclosure(axial_surfaces) + " " + note
+            )
+        return out
+    except Exception:  # noqa: BLE001 — a TOTAL malfunction is DISCLOSED, never {} (clean)
+        return {"grin_index_audit_failed": _GRIN_AUDIT_FAILED_MSG}
+
+
 DRY_RUN_SPEC = ToolSpec(
     name="dry_run",
     handler=dry_run,
@@ -1759,6 +2019,7 @@ OPTIMIZE_SPEC = ToolSpec(
         "add_bounds": "boolean",
         "free_gaps": "boolean",
         "recover_thin": "boolean",
+        "grin_dn_max": "number",
     },
     description=(
         "Run a bounded local optimization (the closed loop): preflight, run cycles, "
@@ -1784,6 +2045,11 @@ OPTIMIZE_SPEC = ToolSpec(
         "per-config floor (build_merit(span_configs=true)) + the THIC as an optimizer DOF "
         "(set_config_variable); otherwise the gap re-collapses. Default refuses (fail-closed, "
         "optimize_per_config_thin). "
+        "grin_dn_max (optional, > 0): a GRIN (gradient-index) design's post-run index audit "
+        "reports grin_dn_exceeds_envelope_warning when the sampled index Δn on a GRIN surface "
+        "exceeds this cap. The floored path (build_merit(grin_dn_max=Δ)) needs NO param here — "
+        "its per-point box is audited automatically (grin_index_box_violated_warning); pass "
+        "grin_dn_max at optimize only for the no-floor spread check. n<1 is always flagged. "
         "See dry_run, normalize_stop, build_merit, save_candidate."
     ),
 )

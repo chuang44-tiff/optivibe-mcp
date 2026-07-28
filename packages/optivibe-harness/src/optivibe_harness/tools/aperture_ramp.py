@@ -162,9 +162,10 @@ def _variable_key(item):
 
     The variable SET is identical across a ``LoadFile`` of the same checkpoint file, so the
     keys line up snapshot-vs-restore. Each source carries its own uniqueness discriminator:
-    LDE by ``(surface, cell-token)``, asphere by ``(surface, Par-column)``, MCE by
-    ``(row, config)``. An unknown source falls back to a maximally-specific tuple (fail
-    toward DISTINCTNESS — a colliding key fails the fingerprint closed).
+    LDE by ``(surface, cell-token)``, asphere by ``(surface, Par-column)``, GRIN by
+    ``(surface, Par-column)``, MCE by ``(row, config)``. An unknown source falls back to a
+    maximally-specific tuple (fail toward DISTINCTNESS — a colliding key fails the
+    fingerprint closed).
     """
     source = item.get("source")
     if source == "lde":
@@ -173,6 +174,8 @@ def _variable_key(item):
         return ("asphere", item.get("surface"), item.get("par"))
     if source == "mce":
         return ("mce", item.get("row"), item.get("config"))
+    if source == "grin":
+        return ("grin", item.get("surface"), item.get("par"))
     return (
         "?", source, item.get("surface"), item.get("row"), item.get("config"),
         item.get("cell"), item.get("par"), item.get("term"),

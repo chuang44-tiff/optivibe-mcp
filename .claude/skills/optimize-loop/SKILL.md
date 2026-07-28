@@ -9,8 +9,11 @@ description: Use when the user wants to optimize a lens design. Triggers on "opt
 
 Optimize a lens design through the OptiVibe `optimize` tool. You set up variables
 and a merit function, preflight with `dry_run`, then call `optimize` — which runs
-monitored optimization bursts with best-restore for you and returns a verdict
+monitored optimization bursts for you and returns a verdict
 (`improved` / `diverged` / …). You do not hand-run the burst loop; the tool owns it.
+A DLS or OD run commits its result in place — there is no automatic restore of the
+starting form, which is why Step 1 checkpoints it. A Hammer run is the exception: it
+checkpoints first and attempts a best-restore if it comes out worse.
 
 ## When to Use
 

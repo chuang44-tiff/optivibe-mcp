@@ -40,6 +40,7 @@ REAL engine text.
 import glob
 import math
 import os
+import re
 from contextlib import contextmanager
 
 from ..errors import ToolError
@@ -447,6 +448,78 @@ def _to_finite_float(token):
     return value, True
 
 
+# A report SELECTOR column (a Par#, a Surf, a range Surf2) is, in the mechanical v2
+# report, a BARE ASCII integer. A ``decimal.Decimal(text)`` lossless parse
+# silently OVER-ACCEPTS a whole class of MALFORMED selector text as clean integers in
+# this Python (VERIFIED live) — a digit-group underscore (``"3_0"`` -> 30, ``"3__0"`` ->
+# 30), a leading/trailing underscore (``"_3"`` / ``"3_"`` -> 3), scientific notation
+# (``"3e0"`` -> 3), a decimal render (``"3.0"`` -> 3) — each fabricating a FALSE keyed /
+# ``method:"keyed"`` per-Par proof. We enforce a STRICT optionally-signed
+# ASCII-integer grammar on the STRIPPED text BEFORE any numeric conversion; everything
+# else that is PRESENT is a PARSE ANOMALY (belt-INELIGIBLE), and a truly BLANK/absent
+# token stays the non-anomalous count-belt input.
+#
+# The grammar is ASCII-ONLY: ``\d`` matches Unicode decimal digits
+# (``"٣"`` -> 3), so a report carrying a non-ASCII decimal digit would alias to a
+# fabricated int. The engine emits ASCII, but ``[0-9]`` closes it for free — a Unicode
+# digit now reads as a PARSE ANOMALY, never a false key.
+_STRICT_INT_RE = re.compile(r"[+-]?[0-9]+")
+
+
+def _classify_selector(raw):
+    """Classify a report selector TEXT token into ``(integer, anomalous)`` in ONE parse.
+
+    - ``(int, False)``  — a clean optionally-signed ASCII integer (``"3"`` / ``"-3"`` /
+      ``"+3"`` / ``"007"``, whitespace-stripped). The KEYED input.
+    - ``(None, False)`` — a truly BLANK/absent token (``None`` / ``""``). The
+      non-anomalous COUNT-BELT input (a legitimately-blank Surf2 column); NEVER turned
+      into an anomaly (that would regress the range-op parse).
+    - ``(None, True)``  — a PRESENT but MALFORMED token (``"_3"``, ``"3_0"``, ``"3__0"``,
+      ``"3_"``, ``"3e0"``, ``"3.5"``, ``"3.0"``, a garble) — a PARSE ANOMALY,
+      belt-INELIGIBLE, never a truncated false key.
+
+    The strict grammar mirrors the writer's ``_tol_cells.is_integral_int`` EXACTLY (both
+    accept only a true integer; both reject the decimal/float render ``"3.0"`` the OLD
+    ``decimal.Decimal`` parse wrongly aliased to 3) — cross-pinned by a unit test.
+    """
+    if raw is None:
+        return None, False
+    text = str(raw).strip()
+    if text == "":
+        return None, False
+    if _STRICT_INT_RE.fullmatch(text):
+        return int(text), False
+    return None, True
+
+
+def _selector_int(raw):
+    """STRICT EXACT-INTEGRAL selector at the TEXT boundary.
+
+    Returns the integer for a clean optionally-signed ASCII integer, else ``None`` (a
+    blank OR a malformed/non-integral token). The parser-side counterpart of the writer's
+    ``_tol_cells.is_integral_int`` (which operates on Python VALUES; this operates on
+    report TEXT), cross-pinned by a unit test: every int this returns satisfies
+    is_integral_int, and the acceptance boundary mirrors the writer's — ``"3"`` accepts as
+    3; a decimal render (``"3.0"`` / ``"3.5"``), an underscore/scientific selector, or the
+    lossy ``"3.0000000000000001"`` alias REJECTS (never a blind int() truncation, never a
+    lossy ``float()``/``Decimal`` over-accept).
+    """
+    return _classify_selector(raw)[0]
+
+
+def _finite_non_integral(raw):
+    """True iff ``raw`` is a PRESENT but malformed/non-integral selector (a PARSE ANOMALY).
+
+    A present selector that is NOT a clean ASCII integer
+    (``"3.5"``, ``"3.0"``, the lossy ``"3.0000000000000001"`` alias, ``"3_0"``, ``"3e0"``)
+    is a PARSE ANOMALY — never truncated into a false keyed proof, never blank-None belt
+    input. Derived from the SAME classified parse as ``_selector_int`` (exact complements
+    over PRESENT tokens). A blank / absent (``None`` / ``""``) token -> False (the belt
+    input, not an anomaly); a clean integer -> False.
+    """
+    return _classify_selector(raw)[1]
+
+
 # A numeric token captured from the report. The capture class accepts the digit/dot/
 # sign/exponent characters, but the WHOLE token MUST be followed by a token boundary
 # (whitespace / EOL / end-of-string) — a trailing non-boundary char (a decimal COMMA, a
@@ -661,14 +734,36 @@ def _parse_sensitivity(text, out):
                 # the over-optimistic tolerancing_reconcile; the dropped-row WARNING is the
                 # honest signal instead).
                 dropped_rows += 1
-                out.setdefault("dropped_types", set()).add(cells[0])
+                # PARSE + RETAIN the row's Surf
+                # column so reconcile can key the dropped anomaly by (type, surface). A
+                # corrupt row at ONE surface must NOT disqualify a legit count-fallback for
+                # the SAME type at a DIFFERENT surface (a false type-wide escalation). Only
+                # when the Surf itself is UNREADABLE (blank/garbled/non-integral) does the
+                # anomaly carry no usable surface -> fall back to the type-wide
+                # ``dropped_types`` (fail-closed: disqualify every group of the type).
+                drop_surf = _selector_int(cells[1])
+                if drop_surf is None:
+                    out.setdefault("dropped_types", set()).add(cells[0])
+                else:
+                    out.setdefault("dropped_keys", set()).add((cells[0], drop_surf))
                 continue
-            surf_val, _ = _to_finite_float(cells[1])
-            surf2_val, surf2_ok = _to_finite_float(cells[2])
-            rows.append({
+            # (GRIN §1.2a) the col3 render is CATALOG-DRIVEN AND
+            # EXACT-INTEGRAL. ``parser_secondary_key`` decides whether col3 is a Par#
+            # (``param`` — TPAR/TPAI/... ) or a range/config selector (``surface2``);
+            # ``_selector_int`` rejects a blind int() truncation (a corrupt Surf=2.9 /
+            # Par#=3.5 reads None, never a fabricated 2/3).
+            sec_key = _cat.parser_secondary_key(cells[0])
+            surf_int = _selector_int(cells[1])
+            # (SYMMETRIC AUTHORITY) classify col3 ONCE for BOTH col3
+            # renders (the param branch AND the surface2 branch) — a present-but-MALFORMED
+            # col3 ("3.0"/"3_0"/"_3"/"3e0"/a Unicode digit) is a PARSE ANOMALY on EITHER
+            # family, never a truncated false key. ``_classify_selector`` is the SINGLE
+            # authority; no col3 render path may skip it.
+            sec_int, sec_anom = _classify_selector(cells[2])
+            row = {
                 "type": cells[0],
-                "surface": int(surf_val) if surf_val is not None else None,
-                "surface2": int(surf2_val) if surf2_ok else None,
+                "surface": surf_int,       # None on a non-integral Surf -> the EXISTING
+                                           # :1611 unreadable_surface anomaly arm fires
                 "min": {
                     "delta": _to_finite_float(cells[3])[0],
                     "criterion": min_crit,
@@ -679,7 +774,28 @@ def _parse_sensitivity(text, out):
                     "criterion": max_crit,
                     "change": _to_finite_float(cells[8])[0],
                 },
-            })
+            }
+            if sec_key == "param":
+                # A Par#-carrying op (TPAR/TPAI): col3 is the Par#. A present-but-malformed
+                # Par# (3.5/"3_0") is a PARSE ANOMALY (param=None + param_anomalous=True),
+                # NOT a truncated false key and NOT blank-None belt input.
+                row["param"] = sec_int
+                row["surface2"] = None
+                row["param_anomalous"] = sec_anom
+            else:
+                # A range / config / single op: col3 is the legacy surface2 slot. A blank
+                # col3 stays the non-anomalous single-surface/range belt input (surface2=None
+                # / a clean range Surf2) — byte-identical to the pre-fix render. A
+                # PRESENT-but-malformed col3 is the SYMMETRIC sibling of param_anomalous: it
+                # carries a ``surface2_anomalous`` bit (added ONLY when anomalous, so a blank/
+                # clean col3 stays byte-identical) and reconcile routes it to anomalous_rows
+                # exactly like a param anomaly — never a silent ``surface2=None`` that the
+                # single-surface arm consumes into a FALSE keyed proof (the
+                # Asymmetric sibling).
+                row["surface2"] = sec_int
+                if sec_anom:
+                    row["surface2_anomalous"] = True
+            rows.append(row)
     if not rows:
         # G5/G-PARSE-EMPTY (generalized): 0 rows is only a HARD parse failure when there
         # are ALSO 0 explanatory error lines. If the report carried only refused
@@ -1121,6 +1237,39 @@ def _validate_multi_config(i, token, meta, entry):
     return validated, None
 
 
+def _bare_grin_hint(system, surface, token):
+    """A token-correct GRIN hint suffix for the blank-material refusal, or "".
+
+    (GRIN §1.2b-2) When ``surface`` provably resolves a GRIN FAMILY
+    member (the 12-member RECOGNITION resolver ``grin_family_type_of_name`` — NOT the
+    authorable resolver: the hint should fire for ANY GRIN family member), append a
+    per-token hint. Any read throw / non-GRIN surface -> "" (never a false GRIN claim).
+    Import ``_grin_cells`` lazily (the TEZI-precedent circular-import posture).
+    """
+    try:
+        from . import _grin_cells as _grin  # lazy — circular-import avoidance
+        row = system.LDE.GetSurfaceAt(surface)
+        info = _grin.grin_family_type_of_name(str(row.Type))
+    except Exception:  # noqa: BLE001 — any read throw -> no hint (never a false claim)
+        return ""
+    if info is None:
+        return ""
+    if token == "TIND":
+        return (
+            " — this is a bare-cell GRIN surface: the base index n0 is Par#=2; author "
+            "TPAR(param=2) for the base-index fabrication tolerance (a material-bound "
+            "GRIN, whose index comes from a catalog entry rather than these cells, has no "
+            "tolerance path here)."
+        )
+    if token == "TABB":
+        return (
+            " — this is a bare-cell GRIN surface: it has no catalog-glass Abbe tolerance "
+            "path (its dispersion is not carried by a catalog entry), and TPAR is NOT an "
+            "Abbe substitute."
+        )
+    return ""
+
+
 def validate_tolerances(system, tolerances, *, strict=False):
     """Two-phase pre-flight (D14): operand-AGNOSTIC, fail-closed preconditions.
 
@@ -1347,6 +1496,29 @@ def validate_tolerances(system, tolerances, *, strict=False):
         if cell_err:
             continue
 
+        # (GRIN §1.2b-1) the REQUIRED-PARAM firewall, catalog-scoped. An
+        # ``is_param_perturbation_op`` op (the SHARED predicate — today exactly TPAR/TPAI)
+        # targets a surface Par# cell and REQUIRES an explicit ``param`` >= 1; an omitted
+        # ``param`` today defaults to Par#=0 — a phantom perturbation of a cell that does
+        # not exist, counted ``ran``. Refuse pre-mutation (zero engine touch). TEDV
+        # (control, has_minmax=False) and the compensator ops are structurally unaffected.
+        if _cat.is_param_perturbation_op(token):
+            if "param" not in entry:
+                errors.append(
+                    f"tolerances[{i}] {token} targets a surface Par# cell and REQUIRES "
+                    "'param' (the 1-based Par# — on a GRIN surface Par2=n0, "
+                    "Par3..Par8=the profile coefficients); omitting it would author a "
+                    "phantom Par#=0 perturbation"
+                )
+                continue
+            par_val = validated.get("param")
+            if par_val is None or par_val < 1:
+                errors.append(
+                    f"tolerances[{i}] {token} 'param' must be a Par# >= 1 (a Par#0 cell "
+                    f"does not exist), got {entry.get('param')!r}"
+                )
+                continue
+
         # (S2b TOL) Zernike-term range (TEZI/TEXI). If the operand exposes the term
         # cells (roles max_term/min_term), BOTH are REQUIRED (omitting them = the inert
         # 0/0 trap that runs + counts-as-ran while biting nothing, probe §B.1 Delta 0.0)
@@ -1472,6 +1644,7 @@ def validate_tolerances(system, tolerances, *, strict=False):
                 errors.append(
                     f"tolerances[{i}] {token} requires a glass surface, but surface "
                     f"{surface} is AIR (blank material)"
+                    + _bare_grin_hint(system, surface, token)
                 )
                 continue
         # G16: degenerate-TRAD soft-skip (a flat/inf radius -> warn + SKIP, not reject).
@@ -1566,10 +1739,13 @@ def reconcile_authored_vs_parsed(authored, parsed):
 
     PARSE ANOMALIES (never mark an op ran):
     - A parsed sensitivity row whose ``surface`` did not parse (blank/garbled Surf column ->
-      ``surface:None``), OR a DROPPED-corrupt row (``parsed['dropped_types']``), cannot be
-      keyed to a specific authored operand. It is surfaced as an ``anomalous_rows`` entry
-      (LOUD) and does NOT satisfy any authored op. The authored op it would have satisfied
-      then has no keyed match -> unaccounted -> escalate (fail-closed).
+      ``surface:None``), OR a DROPPED-corrupt row (``parsed['dropped_keys']`` when its Surf
+      was readable, else the type-wide ``parsed['dropped_types']``), cannot be keyed to a
+      specific authored operand. It is surfaced as an ``anomalous_rows`` entry (LOUD) and
+      does NOT satisfy any authored op. The authored op it would have satisfied then has no
+      keyed match -> unaccounted -> escalate (fail-closed). (FIX-B: a dropped row's Surf is
+      retained so a corrupt row at ONE surface disqualifies ONLY its (type, surface) group,
+      not a legit count-fallback for the SAME type at a DIFFERENT surface.)
     - A KEYED parsed row that matches NO authored ``(type, surface)`` is an engine/author
       desync — surfaced as an ``unexpected_parsed_rows`` entry (never silently dropped).
 
@@ -1583,11 +1759,16 @@ def reconcile_authored_vs_parsed(authored, parsed):
     unattributable (surfaceless / dropped / type-only) row.
 
     Returns ``{ran, refused, unaccounted, escalate, unattributed_errors, anomalous_rows,
-    unexpected_parsed_rows}`` where ``escalate`` is True iff any AUTHORABLE-tier op
+    unexpected_parsed_rows, reconciled_operand_keys, reconciliation_mode, par_unresolved,
+    matched_operand_errors}`` where ``escalate`` is True iff any AUTHORABLE-tier op
     (``supported`` OR ``structural_zero``) is unaccounted (the handler then returns
     ``ok:false`` / ``tolerancing_reconcile``). The ``ok:true ⇒ unaccounted_operands == []``
-    invariant is enforced by the handler reading ``escalate`` and holds for BOTH supported
-    and structural_zero.
+    invariant is unchanged and now PROVABLE per-Par# via ``reconciled_operand_keys`` (each
+    consumed op's truthful selector + ``method``:``"keyed"``/``"count_fallback"``);
+    ``reconciliation_mode`` is ``"count_fallback"`` iff any group used the belt (else
+    ``"keyed"``); ``par_unresolved`` carries the belt disclosure; ``matched_operand_errors``
+    (v2) surfaces a matched type's engine-error line that would otherwise be swallowed.
+    The invariant holds for BOTH supported and structural_zero.
 
     L26 self-check — does escalating structural_zero OVER-escalate (false
     positive)? NO on the tested lenses: the probe classified structural_zero as
@@ -1601,35 +1782,94 @@ def reconcile_authored_vs_parsed(authored, parsed):
     """
     rows = parsed.get("sensitivity") or []
     errors = parsed.get("operand_errors") or []
+    # ``dropped_types`` — a dropped-corrupt row whose Surf was UNREADABLE (type-wide
+    # disqualification, fail-closed). ``dropped_keys`` (FIX-B) — a dropped-corrupt row
+    # whose Surf WAS readable, keyed by (type, surface) so it disqualifies ONLY that
+    # group, not every surface of the type.
     dropped = parsed.get("dropped_types") or set()
+    dropped_keys = parsed.get("dropped_keys") or set()
 
     # Build a consumable pool of keyable ROW RECORDS (one per parsed sensitivity row). Each
     # row is consumed AT MOST ONCE so two authored ops cannot both claim the SAME single
     # parsed row (the BUG-1 collapse). A row whose surface did NOT parse (surface is None) is
     # a PARSE ANOMALY: it joins ``anomalous_rows`` and never marks an op ran.
-    keyed_records = []       # {type, surface, surface2|None, consumed} — keyed, consume-once
+    keyed_records = []       # {type, surface, surface2, param, consumed} — consume-once
     anomalous_rows = []      # rows that cannot be keyed to a specific authored operand
+    # count-belt anomaly membership keyed by (type, surface). The count
+    # fallback consumes BLANK-col3 records by cardinality; a group that ALSO produced a
+    # PARSE ANOMALY (a non-integral Par# row dropped from keyed_records, OR a dropped-corrupt
+    # row) is UNRELIABLE and MUST NOT count-fall-back (the locked rule "a non-integral
+    # selector disqualifies the whole group"). ``anomaly_group_keys`` holds the (type,
+    # surface) groups with a surface-readable anomaly (a param-anomalous row with a readable
+    # Surf, OR a dropped-corrupt row with a readable Surf — FIX-B); ``anomaly_group_types``
+    # holds types whose anomaly carries NO usable surface (a param-anomalous row whose Surf
+    # ALSO failed, or a dropped-corrupt row whose Surf was unreadable) — those disqualify
+    # EVERY group of that type, fail-closed.
+    anomaly_group_keys = set()   # {(type, surface)}
+    anomaly_group_types = set()  # {type} — surface unknown -> disqualify any surface
     for r in rows:
         rtype = r.get("type")
         rsurf = r.get("surface")
+        # (§1.2a, SYMMETRIC AUTHORITY) a present-but-MALFORMED col3 selector
+        # — a non-integral Par# (``param_anomalous``, param branch) OR a non-integral
+        # surface2/range marker (``surface2_anomalous``, surface2 branch) — is a PARSE
+        # ANOMALY: NOT a truncated false key, NOT belt-eligible; routed to anomalous_rows so
+        # the op it would have satisfied escalates fail-closed. BOTH anomaly bits route
+        # through this ONE arm (the single symmetric mechanism — no col3 family is exempt).
+        if r.get("param_anomalous") or r.get("surface2_anomalous"):
+            # disqualify this (type, surface) group from the count belt.
+            if rsurf is None:
+                anomaly_group_types.add(rtype)
+            else:
+                anomaly_group_keys.add((rtype, rsurf))
+            anomalous_rows.append({
+                "type": rtype,
+                "reason": "non_integral_selector",
+                "detail": (
+                    f"a sensitivity row of type {rtype!r} had a present-but-MALFORMED "
+                    "selector (col3) — a corrupt Par#/surface2 selector; it cannot be "
+                    "reconciled to a specific authored operand and is not eligible for "
+                    "the count fallback"
+                ),
+            })
+            continue
         if rsurf is None:
             anomalous_rows.append({
                 "type": rtype,
                 "reason": "unreadable_surface",
                 "detail": (
-                    f"a sensitivity row of type {rtype!r} had an unreadable/missing Surf "
-                    "column — it cannot be reconciled to a specific authored operand"
+                    f"a sensitivity row of type {rtype!r} had an unreadable/missing/"
+                    "non-integral Surf column — it cannot be reconciled to a specific "
+                    "authored operand"
                 ),
             })
             continue
         keyed_records.append({
             "type": rtype, "surface": rsurf,
-            "surface2": r.get("surface2"), "consumed": False,
+            "surface2": r.get("surface2"), "param": r.get("param"),
+            "consumed": False,
         })
-    # A type whose row was DROPPED (corrupt criterion) carries no usable surface, so it
-    # cannot be attributed to a specific authored op either. Fail-closed: it is a PARSE
-    # ANOMALY (surfaced loud), NOT a free pass that masks a same-type omission.
+    # A DROPPED-corrupt row (unparseable criterion) cannot be attributed to a specific
+    # authored op. fail-closed: it is a PARSE ANOMALY (surfaced loud), NOT a free pass
+    # that masks a same-type omission.
+    # (FIX-B) A dropped row whose Surf WAS readable disqualifies ONLY its (type, surface)
+    # group — a corrupt TPAR@2 must not block a legit count-fallback for TPAR@3.
+    for (t, s) in dropped_keys:
+        anomaly_group_keys.add((t, s))
+        anomalous_rows.append({
+            "type": t,
+            "surface": s,
+            "reason": "dropped_corrupt_row",
+            "detail": (
+                f"a sensitivity row of type {t!r} on surface {s} was dropped "
+                "(corrupt/unparseable criterion) — it cannot be reconciled to a "
+                "specific authored operand"
+            ),
+        })
+    # A dropped row whose Surf was ALSO unreadable carries NO usable surface -> disqualify
+    # EVERY group of that type (fail-closed; the report is unreliable for the type).
     for t in dropped:
+        anomaly_group_types.add(t)
         anomalous_rows.append({
             "type": t,
             "reason": "dropped_corrupt_row",
@@ -1681,48 +1921,176 @@ def reconcile_authored_vs_parsed(authored, parsed):
             return True
         return False
 
+    def _consume_param(token, surface, param):
+        """Consume the FIRST unconsumed record matching (token, surface, param) EXACTLY.
+
+        (GRIN §1.2c-2) A parameter op keys on its Par#; it NEVER matches a range
+        record (a param row renders surface2=None by construction) and NEVER falls back
+        to (type, surface). A record with param=None (unreadable col3) is NOT consumable
+        here — it is the count-belt's input only. (A param_anomalous row never reached
+        keyed_records, §1.2a.) True iff a record was consumed.
+        """
+        for rec in keyed_records:
+            if rec["consumed"]:
+                continue
+            if rec["type"] != token or rec["surface"] != surface:
+                continue
+            if _is_range_marker(rec["surface2"]):
+                continue
+            if rec.get("param") is None or rec["param"] != param:
+                continue
+            rec["consumed"] = True
+            return True
+        return False
+
+    def _consume_param_group_by_count(token, surface, n_authored):
+        """The fail-closed defense-in-depth COUNT belt (§1.2c-3).
+
+        Fires ONLY when, for the (token, surface) group: EVERY unconsumed non-range
+        record has param=None (wholly unreadable col3 — a MIXED readable/unreadable
+        group never qualifies), NO exact-key consume happened for the group (gated by
+        the caller), AND len(group records) == n_authored (exact cardinality). Consumes
+        one-for-one and returns the consumed count. Any short/extra count or mixed
+        readability -> returns 0 -> the group escalates fail-closed.
+        """
+        group = [
+            rec for rec in keyed_records
+            if not rec["consumed"]
+            and rec["type"] == token and rec["surface"] == surface
+            and not _is_range_marker(rec["surface2"])
+        ]
+        if not group:
+            return 0
+        if any(rec.get("param") is not None for rec in group):
+            return 0                      # MIXED / readable-wrong-Par# -> escalate
+        if len(group) != n_authored:
+            return 0                      # short / extra / dropped-anomaly -> escalate
+        for rec in group:
+            rec["consumed"] = True
+        return len(group)
+
     ran = []
     refused = []
     unaccounted = []
     escalate = False
+    reconciled_keys = []          # (§1.2c-5) one entry per CONSUMED op, truthful selector
+    par_unresolved = []           # (§1.2c-3) count-fallback disclosure strings
+    matched_operand_errors = []   # (v2) a matched type's un-consumed error lines
+    matched_op_types = set()      # types with >=1 keyed/belt consume (scope)
+    consumed_refusal_lines = set()  # error lines already surfaced via the refused arm
+    reconciliation_mode = "keyed"
+
+    def _resolve_unmatched(token, tier, surface, param=None):
+        """An unmatched op -> refused (error line) / expected-silent / unaccounted."""
+        nonlocal escalate
+        if token in err_by_type:
+            refused.append({"type": token, "reason_line": err_by_type[token][0]})
+            consumed_refusal_lines.add(err_by_type[token][0])
+        elif tier in _EXPECTED_SILENT_TIERS:
+            # control/compensator — expected-silent (no row, no error BY DESIGN, D18/D19).
+            ran.append(token)
+        else:
+            u = {"type": token, "surface": surface, "tier": tier}
+            if param is not None:
+                u["param"] = param       # (§1.2c-5) name the missing coefficient
+            unaccounted.append(u)
+            # Escalate for ANY authorable perturbation tier (supported OR
+            # structural_zero) — both are authored as a ±delta and expected to land a row.
+            if tier in _AUTHORABLE_TIERS:
+                escalate = True
+
+    # First pass: exact keyed consume. Param-op failures are DEFERRED per (token, surface)
+    # group for the count belt (the belt must not race the exact key, §1.2c-4 ordering).
+    param_group_meta = {}   # (token, surface) -> {"n", "exact", "deferred": [(token,tier,surf,param)]}
     for entry in authored:
         token = entry.get("type")
         tier = entry.get("tier")
         surface = entry.get("surface")
         surface2 = entry.get("surface2")
         # (§2.8 / D5) the multi_config (TMCO) family is NOT surface-keyed —
-        # it targets (mce_row, mce_config). The parser renders a TMCO report row with its
-        # FIRST data column (Row) in ``surface`` and its SECOND (Config#) in ``surface2``
-        # (the same tab columns a surf-range op uses), so reconcile keys a TMCO on
-        # (type, mce_row, mce_config). An authored TMCO that produced NEITHER a row NOR an
-        # engine error line is an over-optimistic OMISSION (supported tier -> escalate),
-        # exactly the no-blind-spot invariant. (A TMCO that read a SILENT ZERO because of
-        # the Config#-mismatch still RAN — it appears in the report at its (Row, Config#)
-        # — so it is keyed + counted ran, NOT an omission; the WARN explains the zero.)
+        # it targets (mce_row, mce_config). Checked FIRST; byte-untouched (sound under the
+        # §1.1 DISJOINTNESS invariant — no row is multi_config AND param-secondary-key).
         if entry.get("family") == "multi_config":
             surface = entry.get("mce_row")
             surface2 = entry.get("mce_config")
-        # FAIL-CLOSED: match ONLY on a confident keyed attribution. No surfaceless /
-        # type-only fallback — an unkeyable row never marks an op ran.
-        matched = False
-        if surface is not None:
-            matched = _consume(token, surface, surface2)
-        if matched:
-            ran.append(token)
-        elif token in err_by_type:
-            refused.append({"type": token, "reason_line": err_by_type[token][0]})
-        elif tier in _EXPECTED_SILENT_TIERS:
-            # control/compensator — expected-silent (no row, no error BY DESIGN, D18/D19).
-            ran.append(token)
+            matched = surface is not None and _consume(token, surface, surface2)
+            if matched:
+                ran.append(token)
+                matched_op_types.add(token)
+                reconciled_keys.append({
+                    "type": token, "mce_row": surface, "mce_config": surface2,
+                    "method": "keyed",
+                })
+            else:
+                _resolve_unmatched(token, tier, surface)
+        elif _cat.is_param_perturbation_op(token):
+            # (v2) the SHARED authorable-perturbation predicate (TPAR/TPAI) — NOT
+            # parser_secondary_key: a TEDV/CPAR/CEDV/CNPA (control/compensator; param-role
+            # render but has_minmax=False) routes to the else/_consume arm exactly as today.
+            param = entry.get("param")
+            gm = param_group_meta.setdefault(
+                (token, surface), {"n": 0, "exact": False, "deferred": []}
+            )
+            gm["n"] += 1
+            matched = surface is not None and _consume_param(token, surface, param)
+            if matched:
+                gm["exact"] = True
+                ran.append(token)
+                matched_op_types.add(token)
+                reconciled_keys.append({
+                    "type": token, "surface": surface, "param": param,
+                    "method": "keyed",
+                })
+            else:
+                gm["deferred"].append((token, tier, surface, param))
         else:
-            unaccounted.append({"type": token, "surface": surface, "tier": tier})
-            # Escalate for ANY authorable perturbation tier (supported OR
-            # structural_zero) — both are authored as a ±delta and expected to land a row, so
-            # a silent omission of either is the over-optimistic class. control/compensator
-            # (the _EXPECTED_SILENT_TIERS, consumed above) legitimately produce no row and
-            # are NEVER reached here, so they never escalate.
-            if tier in _AUTHORABLE_TIERS:
-                escalate = True
+            matched = surface is not None and _consume(token, surface, surface2)
+            if matched:
+                ran.append(token)
+                matched_op_types.add(token)
+                key = {"type": token, "surface": surface, "method": "keyed"}
+                if _is_range_marker(surface2):
+                    key["surface2"] = surface2
+                reconciled_keys.append(key)
+            else:
+                _resolve_unmatched(token, tier, surface)
+
+    # Second pass: the count-fallback belt for deferred param groups. No count consume
+    # while any same-group exact consume succeeded (gm["exact"]) — a MIXED group escalates.
+    count_fallback_used = False
+    for (token, surface), gm in param_group_meta.items():
+        deferred = gm["deferred"]
+        if not deferred:
+            continue
+        consumed = 0
+        # require ZERO group anomalies before the belt fires: a param-anomalous
+        # or dropped-corrupt row on this (type, surface) — or ANY dropped/surfaceless anomaly
+        # of this type — disqualifies the whole group (the report is unreliable), so the belt
+        # returns 0 and the group escalates fail-closed rather than count-consuming the blanks.
+        group_has_anomaly = (
+            (token, surface) in anomaly_group_keys or token in anomaly_group_types
+        )
+        if not gm["exact"] and surface is not None and not group_has_anomaly:
+            consumed = _consume_param_group_by_count(token, surface, gm["n"])
+        if consumed and consumed == len(deferred):
+            count_fallback_used = True
+            for (t, _tier, surf, param) in deferred:
+                ran.append(t)
+                matched_op_types.add(t)
+                reconciled_keys.append({
+                    "type": t, "surface": surf, "param": param,
+                    "method": "count_fallback",
+                })
+            par_unresolved.append(
+                f"the {gm['n']} {token} tolerance(s) on surface {surface} had an "
+                "unreadable Par# column in the report; reconciled by COUNT (exact "
+                "cardinality match), NOT per-Par# key — verify the raw report"
+            )
+        else:
+            for (t, tier, surf, param) in deferred:
+                _resolve_unmatched(t, tier, surf, param)
+    if count_fallback_used:
+        reconciliation_mode = "count_fallback"
 
     # BUG-2 (MED): an engine error line attributed to a KNOWN operand that was NOT in the
     # authored set is neither a refusal of an authored op nor a type=None unattributed line
@@ -1732,14 +2100,31 @@ def reconcile_authored_vs_parsed(authored, parsed):
         if etype not in authored_types:
             err_unattributed.extend(lines)
 
-    # A KEYED parsed row matching NO authored (type, surface) was consumed by
-    # nobody — an engine/author desync the verdict must not hide. Surface the residue.
+    # A matched type's captured engine-error line is neither a refusal (matched won)
+    # nor unattributed (in authored_types), so it used to be swallowed. Per-Par# TPAR
+    # reconcile puts TPAR on the matched path, so this surfaces the otherwise-swallowed
+    # line as ADVISORY (never
+    # flips ok; the raw line stays in the envelope's operand_errors list). The
+    # err_unattributed arm above is byte-unchanged.
+    for etype, lines in err_by_type.items():
+        if etype in authored_types and etype in matched_op_types:
+            for line in lines:
+                if line not in consumed_refusal_lines:
+                    matched_operand_errors.append(
+                        {"type": etype, "reason_line": line}
+                    )
+
+    # A KEYED parsed row matching NO authored key was consumed by nobody —
+    # an engine/author desync the verdict must not hide. Surface the residue TRUTHFULLY (a
+    # param leftover renders {type, surface, param}, never a fake surface2).
     unexpected_parsed_rows = []
     for rec in keyed_records:
         if rec["consumed"]:
             continue
         entry = {"type": rec["type"], "surface": rec["surface"]}
-        if _is_range_marker(rec["surface2"]):
+        if rec.get("param") is not None:
+            entry["param"] = rec["param"]
+        elif _is_range_marker(rec["surface2"]):
             entry["surface2"] = rec["surface2"]
         unexpected_parsed_rows.append(entry)
 
@@ -1751,6 +2136,10 @@ def reconcile_authored_vs_parsed(authored, parsed):
         "unattributed_errors": err_unattributed,
         "anomalous_rows": anomalous_rows,
         "unexpected_parsed_rows": unexpected_parsed_rows,
+        "reconciled_operand_keys": reconciled_keys,
+        "reconciliation_mode": reconciliation_mode,
+        "par_unresolved": par_unresolved,
+        "matched_operand_errors": matched_operand_errors,
     }
 
 

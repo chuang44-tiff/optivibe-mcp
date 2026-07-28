@@ -29,6 +29,7 @@ from ..enums import _resolve_enum
 from ..errors import SurfaceWriteError, ToolParamError
 from ..server import ToolSpec
 from . import _config_common as _ccfg
+from . import _grin_index_common as _gic
 from . import _lens_common as _lc
 from . import _merit_cells as _mc
 from . import _optimize_common as _oc
@@ -519,18 +520,27 @@ def _glass_floor_warning(system):
                 continue
             try:
                 row = lde.GetSurfaceAt(int(surf))
-                if _sc._material_is_air(row):  # air surface -> skip
-                    continue
+                # An AUTHORABLE GRIN primitive is a solid element with a REAL
+                # edge (it reads air-like AND _row_is_mirror_or_cb is True, so both shipped
+                # skips would drop it). Its variable radius/conic (free_shape) or thickness
+                # (free_thick) COUNTS toward the edge/center warning; its GRIN *coefficient*
+                # DOF is src=="grin" -> correctly NOT counted below (index != edge). Only when
+                # it is NOT a GRIN primitive do the shipped air/mirror skips apply.
+                from . import _grin_cells as _grin
+                if _grin.row_is_grin_primitive(row) is not True:
+                    if _sc._material_is_air(row):  # air surface -> skip
+                        continue
                 # A MIRROR / coordinate-break / powered-non-Standard surface
-                # is NOT glass — reuse the sibling inert-DOF predicate rather than re-derive
-                # a MIRROR test inline. `_material_is_air("MIRROR")` is False, so without this
-                # a free mirror radius (glass=False, no MNEG) would false-fire the glass-EDGE
-                # warning (MNEG is meaningless on a reflective surface). Only a positively-True
-                # classification skips (None = unprovable Type -> treat as plain glass, the
-                # material-confirmed direction); a predicate throw is caught by the except
-                # below -> skip (fail-closed-to-not-count, consistent with the air-read skip).
-                if _oc._row_is_mirror_or_cb(row) is True:
-                    continue
+                    # is NOT glass — reuse the sibling inert-DOF predicate rather than
+                    # re-derive a MIRROR test inline. `_material_is_air("MIRROR")` is False, so
+                    # without this a free mirror radius (glass=False, no MNEG) would false-fire
+                    # the glass-EDGE warning (MNEG is meaningless on a reflective surface). Only
+                    # a positively-True classification skips (None = unprovable Type -> treat as
+                    # plain glass, the material-confirmed direction); a predicate throw is caught
+                    # by the except below -> skip (fail-closed-to-not-count, consistent with the
+                    # air-read skip).
+                    if _oc._row_is_mirror_or_cb(row) is True:
+                        continue
             except Exception:  # noqa: BLE001 — cannot confirm glass -> skip
                 continue
             if src == "lde" and cell == "thickness":
@@ -583,7 +593,29 @@ def _is_glass_edge_surface(row):
     THROW propagates out of ``_material_is_air`` (it RAISES, never fabricates "not air");
     the caller catches it per-surface and SKIPS (a surface we cannot even read is not
     floored).
+
+    An AUTHORABLE GRIN primitive is a solid element with a REAL edge ->
+    author an ETGT edge floor. Placed FIRST because a GRIN reads air-like AND
+    ``_row_is_mirror_or_cb(grin) is True``, so BOTH shipped checks would exclude it. The
+    ``None``-Type case is fail-closed to INCOMPLETE, never silently to air.
     """
+    from . import _grin_cells as _grin
+    prim = _grin.row_is_grin_primitive(row)          # tri-state, NEVER raises
+    if prim is True:
+        return True                                   # authored GRIN primitive -> glass edge
+    if prim is None:
+        # The Type is unreadable. If Material is air-like (a GRIN reads air-like) OR
+        # the Material read ALSO throws, we cannot rule out a GRIN -> RAISE so the caller
+        # records ``incomplete`` (NEVER silently classify an unprovable surface as air). A
+        # readable NON-air Material means a real glass (not a mis-read GRIN) -> fall through.
+        if _sc._material_is_air(row) is not False:    # True, or a Material-read raise, routes here
+            raise SurfaceWriteError(
+                "GRIN-primitive recognition unprovable (surface Type unreadable) on an "
+                "air-like/unreadable-material surface; refusing to classify as air — "
+                "recorded not-audited (fail-closed)",
+                field="surface_type", intended=None, actual=None, surface=None,
+            )
+    # prim is False (readable non-primitive) OR prim None with a readable NON-air Material:
     if _sc._material_is_air(row) is True:        # confirmed AIR gap -> MNEA's job, not glass
         return False
     if _oc._row_is_mirror_or_cb(row) is True:    # confirmed MIRROR/CB/powered-nonstd -> no glass edge
@@ -591,10 +623,41 @@ def _is_glass_edge_surface(row):
     return True                                  # confirmed glass OR unprovable -> author (inert if healthy)
 
 
+def _scan_grin_family_non_authorable(system):
+    """Return the interior surface ids (1..N-2) holding a LOADED non-authorable GRIN family
+    member — ``row_is_grin_family(row) is True AND row_is_grin_primitive(row) is not True``
+    (the unconditional not-audited disclosure).
+
+    A loaded ``Gradium``/``GridGradient``/``Gradient1/4/…`` is NEVER authorable, so no
+    ETGT-authoring path (glass=True, min_glass>0, single-config) would ever see it — the
+    disclosure MUST be UNCONDITIONAL: this scan runs regardless of glass / min_glass /
+    n_configs so ``build_merit({})``, ``glass=False``, and a multi-config build all surface
+    it. NEVER raises -> ``[]`` on any fault. BYTE-IDENTICAL for a non-GRIN system (``[]``).
+    Iterates the SAME interior range ``_author_etgt_edge_floors`` does (1..N-2).
+    """
+    out = []
+    try:
+        from . import _grin_cells as _grincells
+        lde = system.LDE
+        n_surfaces = int(lde.NumberOfSurfaces)
+    except Exception:  # noqa: BLE001 — unreadable LDE -> nothing disclosed (never raise)
+        return out
+    for n in range(1, n_surfaces - 1):
+        try:
+            row = lde.GetSurfaceAt(n)
+            if (_grincells.row_is_grin_primitive(row) is not True
+                    and _grincells.row_is_grin_family(row) is True):
+                out.append(n)
+        except Exception:  # noqa: BLE001 — an unreadable row contributes nothing
+            continue
+    return out
+
+
 def _author_etgt_edge_floors(system, mfe, min_glass):
     """Author one ``ETGT(Surf=n, Target=min_glass*(1+margin), Weight=_ETGT_EDGE_WEIGHT)``
-    per glass-edge surface ``n`` (§5.2). Returns
-    ``(authored:int, glass_surfaces:int, incomplete:list[int], fault:bool)``. NEVER raises.
+    per glass-edge surface ``n`` (§5.2). Returns ``(authored:int, glass_surfaces:int,
+    incomplete:list[int], fault:bool, grin_edge_floors:list[int], grin_not_audited:list[int])``
+    (the last two are ADDITIVE; ``glass_surfaces`` stays a COUNT). NEVER raises.
 
     Per-row fail-safe: each row is authored in its own try; a ChangeType-False, a
     ``_merit_cells`` firewall raise (Surf/Target/Weight silent no-op), or a raw throw ->
@@ -608,7 +671,10 @@ def _author_etgt_edge_floors(system, mfe, min_glass):
     authored = 0
     glass_surfaces = 0
     incomplete = []
+    grin_edge_floors = []   # surface ids where an authored GRIN primitive got an ETGT
+    grin_not_audited = []   # loaded non-authorable GRIN family members present
     target = float(min_glass) * (1.0 + _ETGT_EDGE_SAFETY_MARGIN)
+    from . import _grin_cells as _grincells
 
     # Resolve the ETGT enum member + the surface count ONCE. A failure here (enum
     # unresolvable — impossible on a live engine — or an unreadable LDE) is a total fault.
@@ -617,14 +683,23 @@ def _author_etgt_edge_floors(system, mfe, min_glass):
         lde = system.LDE
         n_surfaces = int(lde.NumberOfSurfaces)
     except Exception:  # noqa: BLE001 — enum/LDE unresolvable -> total fault (no rows, no raise)
-        return (0, 0, [], True)
+        return (0, 0, [], True, [], [])
 
     # Iterate the INTERIOR surfaces 1..N-2 (object 0 + image excluded; n+1 must exist). A
     # cemented glass->glass interface surface is a glass-edge surface (its buried edge is
     # floored — buried-cement intent). One ETGT per glass-bounded gap.
     for n in range(1, n_surfaces - 1):
+        prim = False
         try:
             row = lde.GetSurfaceAt(n)
+            # classify the GRIN association FIRST (tri-state, never raises).
+            # A loaded NON-authorable GRIN family member present in the build is disclosed
+            # not-audited UNCONDITIONALLY (it is NOT floored — _is_glass_edge_surface returns
+            # False for it — but its presence is surfaced). Computed BEFORE
+            # _is_glass_edge_surface (which RAISES on a prim-None air-like surface).
+            prim = _grincells.row_is_grin_primitive(row)
+            if prim is not True and _grincells.row_is_grin_family(row) is True:
+                grin_not_audited.append(n)
             is_glass = _is_glass_edge_surface(row)
         except Exception:  # noqa: BLE001 — cannot classify (row/Material read throw)
             # A surface we cannot even read is NOT silently
@@ -659,6 +734,8 @@ def _author_etgt_edge_floors(system, mfe, min_glass):
                 incomplete.append(n)
                 continue
             authored += 1
+            if prim is True:  # an authored GRIN primitive edge floor
+                grin_edge_floors.append(n)
         except Exception:  # noqa: BLE001 — per-row fail-safe: reap the orphan + record + continue
             try:
                 if op is not None:
@@ -675,7 +752,7 @@ def _author_etgt_edge_floors(system, mfe, min_glass):
             continue
 
     fault = authored == 0
-    return (authored, glass_surfaces, incomplete, fault)
+    return (authored, glass_surfaces, incomplete, fault, grin_edge_floors, grin_not_audited)
 
 
 def _etgt_authored_note(authored, target, min_glass, incomplete):
@@ -707,26 +784,52 @@ def _etgt_authored_note(authored, target, min_glass, incomplete):
     return note
 
 
-def _etgt_edge_floor_key(glass, min_glass, n_configs, authored, glass_surfaces, incomplete):
+def _etgt_edge_floor_key(glass, min_glass, n_configs, authored, glass_surfaces, incomplete,
+                         grin_edge_floors=(), grin_not_audited=()):
     """The additive ``etgt_edge_floor`` disclosure dict, or ``None`` (§7). NEVER raises.
 
     - ``glass=False`` OR ``min_glass<=0`` -> ``None`` (gate off, byte-identical, §7.3).
     - ``n_configs>1`` -> the multi-config disclosure clause (§7.2 — authored:0, no rows).
     - single-config, ``authored>=1`` -> the authored/partial dict (§7.1).
-    - single-config, ``authored==0`` (total author failure) -> ``None`` (§7.1 — wizard MNEG intact).
+    - single-config, ``authored==0`` but a loaded non-authorable GRIN family member is present
+      (``grin_not_audited`` non-empty) -> a MINIMAL disclosure dict (the
+      not-audited disclosure is UNCONDITIONAL when such a surface is present).
+    - single-config, ``authored==0`` and no GRIN family member -> ``None`` (§7.1 — wizard
+      MNEG intact; a non-GRIN system is byte-identical).
+
+    ``grin_edge_floors`` (authored GRIN-primitive edge floors) and
+    ``grin_not_audited`` (loaded non-authorable family members) are ADDITIVE keys emitted
+    ONLY when non-empty; ``glass_surfaces`` stays a COUNT (never a list).
     """
+    grin_edge_floors = list(grin_edge_floors)
+    grin_not_audited = list(grin_not_audited)
     if not (glass and min_glass > 0):
+        # The not-audited disclosure is UNCONDITIONAL — even on the
+        # gate-off path (glass=False / min_glass=0 / build_merit({})), a loaded non-authorable
+        # GRIN family member present in the build must surface. BYTE-IDENTICAL for a non-GRIN
+        # system (grin_not_audited empty -> None, the shipped gate-off behavior).
+        if grin_not_audited:
+            return {"authored": 0, "grin_not_audited": grin_not_audited}
         return None
     if n_configs > 1:
-        return {
+        key = {
             "authored": 0,
             "scope": "single_config_only",
             "note": _ETGT_MULTICONFIG_NOTE,
         }
+        # Emit the unconditional not-audited disclosure on the
+        # multi-config branch too (it was silently DROPPED). Non-empty only -> byte-identical.
+        if grin_not_audited:
+            key["grin_not_audited"] = grin_not_audited
+        return key
     if authored < 1:
+        if grin_not_audited:
+            # Unconditional disclosure: even with no ETGT authored, a present loaded
+            # non-authorable GRIN family member is surfaced.
+            return {"authored": 0, "grin_not_audited": grin_not_audited}
         return None  # total author failure -> no key (silent-advisory; wizard MNEG floors)
     target = float(min_glass) * (1.0 + _ETGT_EDGE_SAFETY_MARGIN)
-    return {
+    key = {
         "authored": authored,
         "glass_surfaces": glass_surfaces,
         "target": target,
@@ -737,6 +840,11 @@ def _etgt_edge_floor_key(glass, min_glass, n_configs, authored, glass_surfaces, 
         "incomplete": list(incomplete),
         "note": _etgt_authored_note(authored, target, min_glass, incomplete),
     }
+    if grin_edge_floors:
+        key["grin_edge_floors"] = grin_edge_floors
+    if grin_not_audited:
+        key["grin_not_audited"] = grin_not_audited
+    return key
 
 
 # The per-config THIC-floor REWEIGHT constants (§2.1).
@@ -868,6 +976,494 @@ def _per_config_thic_floor_key(weight, n_reweighted, reweighted_surfaces,
     }
 
 
+# =========================================================================== #
+# GRIN — the index-range FLOOR (prevent side). §3.
+# =========================================================================== #
+# The weight is imported (NOT redefined) from _grin_index_common: the writer AND the
+# silencing coverage check read the SAME constant.
+_GRIN_INDEX_WEIGHT = _gic._GRIN_INDEX_WEIGHT
+
+# The multi-config disclosure clause (§3.4) — anti-silent-absence, NO authoring on a
+# multi-config build (per-config GRIN index floors are deferred).
+_GRIN_MULTICONFIG_NOTE = (
+    "GRIN index-range floors are single-config-only in this release; this multi-config "
+    "build authored NO per-point index box on its GRIN surface(s). Per-config GRIN index "
+    "floors are deferred in this release. Pass grin_dn_max to optimize (on a "
+    "single active config) for the sampled index-range spread check."
+)
+
+
+def _grin_dn_max_param_build(params):
+    """Pull the optional ``grin_dn_max`` (§3.1): finite, non-bool, ``> 0`` -> float; else
+    ``ToolParamError`` (the caller converts it to the ``optimize_param`` envelope, mutating
+    nothing). ``None`` when absent (the opt-in, NO safe default)."""
+    if "grin_dn_max" not in params:
+        return None
+    value = params["grin_dn_max"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ToolParamError(
+            f"'grin_dn_max' must be a number, got {type(value).__name__} {value!r}"
+        )
+    value = float(value)
+    if not math.isfinite(value) or value <= 0:
+        raise ToolParamError(f"'grin_dn_max' must be a finite number > 0, got {value!r}")
+    return value
+
+
+def _grin_min_index_param_build(params):
+    """Pull the optional ``grin_min_index`` (§3.1, default ``1.0``): finite, non-bool,
+    ``>= 1.0`` -> float; else ``ToolParamError``. Returns ``(value, supplied)`` — ``supplied``
+    lets the caller enforce the "``grin_min_index`` without ``grin_dn_max`` -> refusal" rule."""
+    if "grin_min_index" not in params:
+        return 1.0, False
+    value = params["grin_min_index"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ToolParamError(
+            f"'grin_min_index' must be a number, got {type(value).__name__} {value!r}"
+        )
+    value = float(value)
+    if not math.isfinite(value) or value < 1.0:
+        raise ToolParamError(
+            f"'grin_min_index' must be a finite number >= 1.0, got {value!r}"
+        )
+    return value, True
+
+
+def _grin_floor_row_view(op):
+    """Parse an authored GRIN floor op handle into a ``_row_floor_acceptance`` row_view.
+
+    ``{"token", "surf", "wave", "target", "weight"}`` (all guarded; ``None`` on a per-field
+    read fault) or ``None`` if the TypeName / param layout is unreadable. Surf/Wave come
+    through ``_mc.read_param_map`` (the slot map); Target/Weight off the op. NEVER reads
+    the operand display field (an ``I#GT``/``I#LT`` displays 0.0 satisfied). NEVER raises.
+    """
+    try:
+        token = str(op.TypeName)
+    except Exception:  # noqa: BLE001 — an unreadable TypeName -> not a floor row
+        return None
+    try:
+        params = _mc.read_param_map(op)
+    except Exception:  # noqa: BLE001 — an unreadable param layout -> not acceptable
+        return None
+
+    def _pint(header):
+        entry = params.get(header)
+        if not isinstance(entry, dict):
+            return None
+        value = entry.get("value")
+        try:
+            return None if isinstance(value, bool) else int(value)
+        except Exception:  # noqa: BLE001 — an uncoercible param -> None
+            return None
+
+    try:
+        t = float(op.Target)
+        target = t if math.isfinite(t) else None
+    except Exception:  # noqa: BLE001
+        target = None
+    try:
+        w = float(op.Weight)
+        weight = w if math.isfinite(w) else None
+    except Exception:  # noqa: BLE001
+        weight = None
+    return {"token": token, "surf": _pint("Surf"), "wave": _pint("Wave"),
+            "target": target, "weight": weight}
+
+
+def _reap_grin_surface_rows(mfe, count_before):
+    """Reap the CURRENT GRIN surface's floor rows back to ``count_before`` (bounded, guarded).
+
+    A per-surface transaction reaps up to 12 rows (6 ``I#GT`` + 6 ``I#LT``), so this bounds at
+    13 (vs ``_truncate_mfe_to``'s 4-row ETGT bound — a shared helper we must NOT widen). The
+    GRIN floor path is single-config (no CONF auto-seed), so every row above ``count_before``
+    is provably one WE just added -> top-down count-based removal is safe. NEVER raises;
+    ``count_before is None`` (the pre-add count read threw -> nothing appended) is a no-op.
+    """
+    if count_before is None:
+        return
+    guard = 0
+    try:
+        while int(mfe.NumberOfOperands) > count_before and guard < 13:
+            guard += 1
+            mfe.RemoveOperandAt(int(mfe.NumberOfOperands))
+    except Exception:  # noqa: BLE001 — best-effort baseline restore; never raise
+        pass
+
+
+def _author_one_grin_floor_row(mfe, member, surf, index_target, expected_token):
+    """Author ONE ``I#GT``/``I#LT`` row (Surf=n, Wave=1, Target=index_target, Weight=1e8).
+
+    ``index_target`` is a PHYSICAL INDEX: the ``I#VA`` operands the audit
+    compares against report the physical index for EVERY GRIN type, so the bound must be in
+    that same space — never a per-type "report space" transform.
+
+    Returns ``True`` on a read-back-PROVEN author, ``False`` on ANY hiccup (a ChangeType-False,
+    an ``apply_params`` firewall raise, a silent no-op, a raw throw). Uses the EXACT shared
+    machinery ``add_operand``/ETGT use (``AddOperand`` -> ``ChangeType`` -> ``_mc.apply_params``
+    -> ``op.Target``/``op.Weight``). READ-BACK-AS-PROOF consumes the SHARED acceptance predicate
+    ``_gic._row_floor_acceptance(..., require_weight=True, expected_token=...)`` (the writer
+    and the silencer prove the SAME set; the read-back proves IDENTITY, so a silent
+    ``ChangeType`` that reads back the WRONG in-set token, e.g. I6LT->I5LT, is REJECTED) PLUS
+    ``math.isclose`` on the exact Target (a silent no-op that leaves a stale but acceptable-family
+    Target passes acceptance yet fails isclose). NEVER reads ``op.Value``. NEVER raises. A failed
+    row's orphan is reaped by the caller's surface reap."""
+    try:
+        op = mfe.AddOperand()
+        if not bool(op.ChangeType(member)):
+            return False
+        _mc.apply_params(op, {"Surf": int(surf), "Wave": 1}, operand_token=str(member))
+        op.Target = float(index_target)
+        op.Weight = _GRIN_INDEX_WEIGHT
+        row_view = _grin_floor_row_view(op)
+        if row_view is None or not _gic._row_floor_acceptance(
+            row_view, surf, require_weight=True, expected_token=expected_token
+        ):
+            return False
+        if not math.isclose(
+            float(row_view["target"]), float(index_target), rel_tol=1e-9, abs_tol=1e-12
+        ):
+            return False
+        return True
+    except Exception:  # noqa: BLE001 — per-row fail-safe: the caller's surface reap cleans up
+        return False
+
+
+def _author_grin_index_floors(system, mfe, dn_max, min_index):
+    """Author the per-point index BOX ``[max(min_index, n0-dn_max), n0+dn_max]`` per GRIN
+    surface as 12 proven ``I#GT``/``I#LT`` rows (§3.2/§3.3). Clone of
+    ``_author_etgt_edge_floors``. Direct on the MFE (never the SEQ wizard). NEVER raises.
+
+    Returns ``(authored:list[dict], grin_surface_count:int, incomplete:list[dict],
+    fault:bool)``. ``fault`` is the ENUM-total-failure signal (per-surface failures land in
+    ``incomplete`` with a reason). Discovery faults from ``_gic.grin_surfaces`` are recorded in
+    ``incomplete`` (a fault NEVER reads as "no GRIN surface").
+    """
+    from . import _grin_cells as _grincells  # lazy (the _enumerate_grin_variables precedent)
+
+    authored = []
+    incomplete = []
+    grin_surface_count = 0
+
+    # discovery faults -> incomplete (never a silent skip).
+    entries, disc_faults = _gic.grin_surfaces(system)
+    for flt in disc_faults:
+        incomplete.append(
+            {"surface": flt.get("surface"), "reason": flt.get("reason")}
+        )
+
+    # Resolve the 12 enum members + the LDE ONCE. A failure here (enum unresolvable — a
+    # FakeEnum lacking the tokens / a broken engine — or an unreadable LDE) is a total fault.
+    try:
+        merit_enum = _oc._merit_operand_enum(system)
+        gt_members = [_resolve_enum(merit_enum, t) for t in _gic._GRIN_FLOOR_TOKENS]
+        lt_members = [_resolve_enum(merit_enum, t) for t in _gic._GRIN_CEILING_TOKENS]
+        lde = system.LDE
+    except Exception:  # noqa: BLE001 — enum/LDE unresolvable -> total fault (no rows, no raise)
+        return (authored, grin_surface_count, incomplete, True)
+
+    for (surf, info, _is_axial) in entries:
+        grin_surface_count += 1
+        grin_type = getattr(info, "type_token", None)
+
+        # The box is authored in PHYSICAL-INDEX space (that is what the I#VA
+        # operands report, for EVERY type). The per-type conversion applies to the n0 CELL,
+        # which holds n² on a Gradient2 — NOT to the target. An UNKNOWN/future CELL space
+        # fails CLOSED: author NOTHING for this surface rather than centre the box on a cell
+        # value we cannot interpret.
+        space = getattr(info, "cell_index_space", None)
+        if not _gic._valid_cell_index_space(space):
+            incomplete.append({"surface": surf, "reason": "unknown_cell_index_space"})
+            continue
+
+        lower_min = float(min_index)   # n0-independent nonphysical floor, physical index
+
+        # n0 reads BOTH box bounds. A wedged n0 -> GT-only nonphysical floor.
+        # ``n0`` here is the PHYSICAL base index (the cell converted through the ONE locus);
+        # an unreadable OR un-convertible cell (e.g. a negative n² cell) takes the same path.
+        n0 = None
+        try:
+            row = lde.GetSurfaceAt(surf)
+            n0_cell = _grincells.read_grin_cell(system, row, "n0", info)
+            if not (isinstance(n0_cell, (int, float)) and not isinstance(n0_cell, bool)
+                    and math.isfinite(n0_cell)):
+                n0 = None
+            else:
+                n0 = _gic.cell_value_to_index(n0_cell, space)
+                if not (isinstance(n0, float) and math.isfinite(n0)):
+                    n0 = None
+        except Exception:  # noqa: BLE001 — a wedged/unreadable/un-convertible n0 -> GT-only path
+            n0 = None
+
+        if n0 is None:
+            # author ONLY the 6× I#GT at min_index (partial protection, NO ceiling).
+            # The target is the PHYSICAL index: the I#VA operands this constrains
+            # report physical index for every GRIN type.
+            count_before = _safe_operand_count(mfe)
+            if count_before is None:
+                # No reap anchor (a transient NumberOfOperands throw) -> author NOTHING
+                # for this surface (never mutate without a rollback anchor).
+                incomplete.append({"surface": surf, "reason": "baseline_unreadable"})
+                continue
+            ok = True
+            for member, token in zip(gt_members, _gic._GRIN_FLOOR_TOKENS):
+                if not _author_one_grin_floor_row(mfe, member, surf, lower_min, token):
+                    ok = False
+                    break
+            if not ok:
+                _reap_grin_surface_rows(mfe, count_before)
+            # The surface has NO complete box either way (no ceiling) -> incomplete, warning
+            # stays loud (partial coverage). NEVER a fabricated ceiling.
+            incomplete.append({"surface": surf, "reason": "n0_unreadable"})
+            continue
+
+        raw_lower = max(float(min_index), n0 - dn_max)
+        raw_upper = n0 + dn_max
+        # IMPOSSIBLE-BOX GUARD: min_index > n0 + dn_max -> author NOTHING for this surface.
+        if raw_lower > raw_upper:
+            incomplete.append({
+                "surface": surf, "reason": "impossible_box",
+                "n0": n0, "min_index": float(min_index), "dn_max": float(dn_max),
+            })
+            continue
+
+        lower_target = raw_lower       # physical index — the space the I#VA audit reads
+        upper_target = raw_upper
+        # Per-surface ATTEMPTED-SET TRANSACTION: capture the baseline BEFORE the first add.
+        count_before = _safe_operand_count(mfe)
+        if count_before is None:
+            # No reap anchor (a transient NumberOfOperands throw) -> author NOTHING for
+            # this surface. Proceeding would strand rows a None-anchored reap cannot remove.
+            incomplete.append({"surface": surf, "reason": "baseline_unreadable"})
+            continue
+        # Each spec carries its INTENDED token so the read-back proves IDENTITY, not
+        # just membership (a silent ChangeType that reads back the wrong in-set token fails).
+        specs = [(m, t, lower_target)
+                 for m, t in zip(gt_members, _gic._GRIN_FLOOR_TOKENS)] + [
+            (m, t, upper_target)
+            for m, t in zip(lt_members, _gic._GRIN_CEILING_TOKENS)]
+        surface_ok = True
+        for member, token, index_target in specs:
+            if not _author_one_grin_floor_row(mfe, member, surf, index_target, token):
+                surface_ok = False
+                break
+        if not surface_ok:
+            # ANY row failure -> reap the WHOLE surface's rows (never advertise an 11-of-12
+            # partial box) + record + continue.
+            _reap_grin_surface_rows(mfe, count_before)
+            incomplete.append({"surface": surf, "reason": "author_failed"})
+            continue
+
+        # Defense in depth: RE-READ the coherent distinct-12-token coverage off the
+        # live MFE before advertising `authored`. A per-row read-back that slipped (a silent
+        # token misread) leaves a token ABSENT -> coverage != "complete" -> reap the surface
+        # (never advertise a partial/incoherent box the per-row proof missed).
+        if _grin_surface_floor_coverage(mfe, surf) != "complete":
+            _reap_grin_surface_rows(mfe, count_before)
+            incomplete.append({"surface": surf, "reason": "coverage_incomplete"})
+            continue
+
+        authored.append({
+            "surface": surf,
+            "grin_type": grin_type,
+            "wave": 1,
+            # the PHYSICAL base index (the n0 CELL converted per its type's cell convention
+            # — sqrt(cell) on
+            # a Gradient2 whose Par polynomial is n², the cell verbatim on a Gradient3).
+            "n0_at_build": n0,
+            "n0_cell_space": space,
+            "dn_max": float(dn_max),
+            "min_index": float(min_index),
+            "lower_index": raw_lower,
+            "upper_index": raw_upper,
+            # The authored operand Targets — PHYSICAL INDEX, identical to the box bounds
+            # (the I#VA readings the audit compares them against are physical index).
+            "lower_target": lower_target,
+            "upper_target": upper_target,
+            "operands": len(specs),
+        })
+
+    return (authored, grin_surface_count, incomplete, False)
+
+
+def _safe_operand_count(mfe):
+    """``int(mfe.NumberOfOperands)`` guarded -> ``None`` on a throw (the transaction baseline)."""
+    try:
+        return int(mfe.NumberOfOperands)
+    except Exception:  # noqa: BLE001 — a wedged count read -> no reliable baseline
+        return None
+
+
+def _grin_index_floor_note(dn_max, min_index):
+    """The LOAD-BEARING §3.4 anti-silent-wrong / honesty disclosure note."""
+    return (
+        f"GRIN index-range floor authored per GRIN surface as 12 I#GT/I#LT operands "
+        f"(6 min + 6 max) at weight {_GRIN_INDEX_WEIGHT:g}. Targets are PHYSICAL INDEX for "
+        "every GRIN type — the I#VA operands the floor constrains report the physical index, "
+        "so no per-type target transform is applied. The Gradient2 n0 CELL "
+        "holds the index SQUARED, so the box is centred on sqrt(n0 cell) (n0_at_build is the "
+        "physical base index; n0_cell_space discloses the cell convention). The box caps "
+        "each canonical point to "
+        f"[max(min_index, n0-Δ), n0+Δ] (Δ={dn_max}, min_index={min_index}) — a per-point "
+        "spread up to 2Δ is possible for a profile straddling n0, so a SATISFIED box is NOT a "
+        "Δn <= dn_max certificate; pass grin_dn_max to optimize for the spread check. Weight "
+        "1e8 is a one-sided restoring force calibrated against a raw-EFFL competitor; a "
+        "satisfied editor display (0.0) is NOT proof. The post-optimize per-point BOX AUDIT "
+        "is authoritative for the floored invariant. " + _gic._GRIN_SAMPLED_COVERAGE_NOTE
+        + " Wave-1 coverage is complete by the GRIN wavelength-blind invariant: the authored "
+        "index polynomial carries no dispersion term, so every wavelength reads the same "
+        "index. A satisfied floor does NOT certify manufacturability."
+    )
+
+
+def _grin_index_floor_key(dn_max, min_index, n_configs, authored, grin_surface_count,
+                          incomplete, fault):
+    """The additive ``grin_index_floor`` disclosure dict, or ``None`` (§3.4). NEVER raises.
+
+    ``None`` IFF ``grin_dn_max`` is absent (``dn_max is None`` — byte-identical off-path).
+    Present whenever supplied: multi-config (scope note, no authoring), no GRIN surface
+    (``authored: []``), discovery faults / impossible boxes (``incomplete`` reasons), and
+    total author failure (``fault: true``)."""
+    if dn_max is None:
+        return None
+    if n_configs > 1:
+        return {
+            "authored": [],
+            "surfaces_floored": 0,
+            "grin_surfaces": 0,
+            "scope": "single_config_only",
+            "note": _GRIN_MULTICONFIG_NOTE,
+        }
+    # Every authored target is PHYSICAL INDEX (the I#VA space), for every GRIN
+    # type — there is no per-surface target space to compute. ``None`` when nothing was
+    # authored (never claim a space for a build that authored no floor at all).
+    _top_space = "index" if authored else None
+    key = {
+        "authored": list(authored),
+        "surfaces_floored": len(authored),
+        "grin_surfaces": int(grin_surface_count),
+        "dn_max": float(dn_max),
+        "min_index": float(min_index),
+        "weight": _GRIN_INDEX_WEIGHT,
+        "target_space": _top_space,
+        "incomplete": list(incomplete),
+        "note": _grin_index_floor_note(dn_max, min_index),
+    }
+    if fault:
+        key["fault"] = True
+    return key
+
+
+def _grin_surface_floor_coverage(mfe, surface):
+    """``"complete" | "partial" | "none"`` for ``surface`` (§3.5). A THIN DELEGATE to
+    ``_gic.read_authored_box(mfe, surface)["coverage"]`` (the writer-acceptance set is
+    the ONE predicate: Wave==1, Weight >= 1e8, coherent GT<=LT, finite targets;
+    GRMN/GRMX/DLTN/LPTD NEVER count). Fail-safe: a scan fault -> "none" (doubt = warn).
+    NEVER raises."""
+    try:
+        return _gic.read_authored_box(mfe, surface).get("coverage", "none")
+    except Exception:  # noqa: BLE001 — doubt = warn (the read_authored_box net already holds)
+        return "none"
+
+
+def _grin_floor_warning(system):
+    """WARN str-or-None: a GRIN surface carries a variable index coefficient (or a GRIN
+    discovery/enumeration fault) while the LIVE MFE lacks the matching COMPLETE index floor.
+    Separate function + own ``grin_floor_warning`` key. NEVER raises (whole body
+    try -> None; advisory).
+
+    Detection via the ONE shared ``_oc._variable_inventory`` (``source=="grin"``) — NO
+    bolt-on enumerator. Fault semantics are SURFACE-LEVEL (the "anywhere" clause DELETED):
+    the ``_gic.grin_surfaces`` discovery channel is the SOURCE OF TRUTH for GRIN discovery
+    faults (it re-reads rows itself, so a ``GetSurfaceAt`` failure fires here even when the
+    shared inventory attributes it ``"asphere"``); a grin-scoped INVENTORY fault is
+    surface-UNATTRIBUTABLE -> the indeterminate form (unknown surfaces cannot be verified
+    covered — B HIGH-A). Negative control: an lde/mce cell fault with clean GRIN discovery ->
+    no grin warn.
+    """
+    try:
+        member = _oc._solve_type_variable_enum(system)
+        mfe = system.MFE
+        faults = []
+        inventory = _oc._variable_inventory(system, member, faults=faults)
+        grin_vars = [it for it in inventory if it.get("source") == "grin"]
+        inv_grin_faults = [f for f in faults if f.get("source") == "grin"]
+        entries, disc_faults = _gic.grin_surfaces(system)  # the source of truth
+
+        _coverage_cache = {}
+
+        def coverage(s):
+            if s not in _coverage_cache:
+                _coverage_cache[s] = _grin_surface_floor_coverage(mfe, s)
+            return _coverage_cache[s]
+
+        normal_surfaces = []   # variable GRIN coeff, coverage "none"
+        partial_surfaces = []  # variable GRIN coeff, coverage "partial"
+        indeterminate = False  # a fault fired the indeterminate form
+
+        # (1) variable GRIN coefficient surfaces (self-silence on a COMPLETE floor).
+        var_surfaces = set()
+        for it in grin_vars:
+            s = it.get("surface")
+            if s is None:
+                indeterminate = True  # a Variable GRIN with no surface -> unverifiable
+                continue
+            var_surfaces.add(int(s))
+        for s in sorted(var_surfaces):
+            cov = coverage(s)
+            if cov == "complete":
+                continue
+            if cov == "partial":
+                partial_surfaces.append(s)
+            else:
+                normal_surfaces.append(s)
+
+        # (2) surface-ATTRIBUTED discovery faults (surface-level, no "anywhere" clause).
+        for flt in disc_faults:
+            s = flt.get("surface")
+            if s is None:
+                indeterminate = True  # enumeration_failed -> unattributable
+                continue
+            if coverage(int(s)) != "complete":
+                indeterminate = True  # a fault on an uncovered surface fires
+
+        # (3) grin-scoped INVENTORY faults are surface-UNATTRIBUTABLE -> indeterminate
+        #     (B HIGH-A: a faulted enumeration NEVER reads as "no variable coeff").
+        if inv_grin_faults:
+            indeterminate = True
+
+        # Negative control: no GRIN variable + no grin fault -> None.
+        if not (normal_surfaces or partial_surfaces or indeterminate):
+            return None
+
+        clauses = []
+        if normal_surfaces:
+            clauses.append(
+                f"GRIN surface(s) {normal_surfaces} carry a variable index coefficient and "
+                "the merit has NO complete index floor (I#GT/I#LT box) — the index gradient "
+                "can optimize outside a physical/manufacturable range"
+            )
+        if partial_surfaces:
+            clauses.append(
+                f"GRIN surface(s) {partial_surfaces} carry a variable index coefficient and "
+                "the merit has only a PARTIAL index floor (incomplete I#GT/I#LT coverage) — "
+                "the un-floored points can optimize out of range"
+            )
+        if indeterminate:
+            clauses.append(
+                "a GRIN surface could not be fully read/enumerated and carries no complete "
+                "index floor — the index range on it is unverified"
+            )
+        return (
+            "exposed GRIN index DOF without a complete index floor: "
+            + "; ".join(clauses)
+            + ". Pass grin_dn_max to build_merit to author a per-point index box (single "
+            "config), or pass grin_dn_max to optimize to audit the range, or verify the GRIN "
+            "index profile manually."
+        )
+    except Exception:  # noqa: BLE001 — advisory; never break a successful build
+        return None
+
+
 def build_merit(session, params):
     """Build the default RMS-spot merit via the SEQ wizard (Apply + OK).
 
@@ -922,6 +1518,20 @@ def build_merit(session, params):
         # created) so a bad token mutates NOTHING (§3.1); the Data/Type indices are
         # RESOLVED against the live wizard below.
         criterion = _criterion_param(params)
+        # GRIN §3.1: the opt-in index-range floor params. Validated HERE
+        # (before the wizard is touched) so a bad value mutates NOTHING. grin_min_index
+        # supplied WITHOUT grin_dn_max is refused (it must not look as though a partial
+        # floor was authored). Per-surface impossible-box (min_index > n0+Δ) cannot
+        # be ruled out here (it needs each surface's n0); that guard is per-surface in
+        # _author_grin_index_floors.
+        grin_dn_max = _grin_dn_max_param_build(params)
+        grin_min_index, grin_min_index_supplied = _grin_min_index_param_build(params)
+        if grin_min_index_supplied and grin_dn_max is None:
+            raise ToolParamError(
+                "'grin_min_index' was supplied without 'grin_dn_max'; the index floor is "
+                "opt-in via grin_dn_max — pass grin_dn_max to author the floor, or drop "
+                "grin_min_index"
+            )
     except ToolParamError as exc:
         return _oc.error_envelope("build_merit", "optimize_param", str(exc))
 
@@ -1074,12 +1684,23 @@ def build_merit(session, params):
     # + merit when ETGT touched the MFE so the stored boundary includes the ETGT rows.
     etgt_authored = etgt_glass = 0
     etgt_incomplete = []
+    etgt_grin_edge_floors = []
+    # The not-audited disclosure of a loaded NON-authorable GRIN family
+    # member is UNCONDITIONAL — it must surface regardless of glass / min_glass / n_configs (a
+    # loaded Gradium is never authorable, so no ETGT-authoring path below would ever see it on
+    # build_merit({}), glass=False, or a multi-config build). Scan the family set HERE,
+    # independent of the ETGT-authoring gate. BYTE-IDENTICAL for a non-GRIN system (scan -> []).
+    etgt_grin_not_audited = _scan_grin_family_non_authorable(system)
     if glass and min_glass > 0 and n_configs == 1:
         # the helper's 4th return (``fault``) is unconsumed by design — authored==0
         # degrades to NO key on EITHER a structural fault OR an all-rows-failed pass
         # (enforced by a guard test),
         # so the distinguishing flag is dead here. Unpacked into a throwaway (no dead binding).
-        etgt_authored, etgt_glass, etgt_incomplete, _etgt_fault = (
+        # grin_edge_floors comes from the authoring loop; the loop's own
+        # grin_not_audited return is DISCARDED (the unconditional scan above is the authority —
+        # ONE source — and matches the loop's set on this single-config glass path).
+        (etgt_authored, etgt_glass, etgt_incomplete, _etgt_fault,
+         etgt_grin_edge_floors, _etgt_loop_grin_not_audited) = (
             _author_etgt_edge_floors(system, mfe, min_glass)
         )
         if etgt_authored or etgt_incomplete:
@@ -1123,6 +1744,30 @@ def build_merit(session, params):
             mce_thic_key = _per_config_thic_floor_key(
                 _MCE_THIC_FLOOR_WEIGHT, _n_rw, _rw_surfs, _unfloored, _rw_failed, _rw_fault
             )
+
+    # GRIN §3.4: author the per-point index-range floor per GRIN surface
+    # (single-config only), BEFORE the ``result`` assembly + the boundary store so ``B`` and
+    # ``sig_hash`` cover the GRIN rows -> a build_merit(preserve_custom=True) rebuild
+    # REGENERATES them (§7.3-5). NEVER raises. RE-READ the count + merit when the floor
+    # touched the MFE so the stored boundary + echo include the GRIN rows.
+    grin_authored = []
+    grin_surface_count = 0
+    grin_incomplete = []
+    grin_author_fault = False
+    if grin_dn_max is not None and n_configs == 1:
+        (grin_authored, grin_surface_count, grin_incomplete,
+         grin_author_fault) = _author_grin_index_floors(
+            system, mfe, grin_dn_max, grin_min_index
+        )
+        if grin_authored or grin_incomplete:
+            # THROW-GUARDED (the ETGT precedent): a count/merit re-read throw degrades to the
+            # best-known echo; it can NOT poison the boundary — _store_wizard_boundary re-reads
+            # the count itself.
+            try:
+                number_of_operands = int(mfe.NumberOfOperands)
+                merit = mfe.CalculateMeritFunction()
+            except Exception:  # noqa: BLE001 — §3.4 NEVER raises: keep the best-known echo
+                pass
 
     # Echo the APPLIED settings (read-back-as-proof). The resolved ring/arm COUNTS are
     # read back off the wizard index via GetRingAt/GetArmAt (proves the index landed).
@@ -1181,7 +1826,8 @@ def build_merit(session, params):
     # wizard MNEG still floors). Self-silences cleanly against ``glass_floor_warning`` (the
     # floored glass=true, min_glass>0 path silences the warning).
     etgt_key = _etgt_edge_floor_key(
-        glass, min_glass, n_configs, etgt_authored, etgt_glass, etgt_incomplete
+        glass, min_glass, n_configs, etgt_authored, etgt_glass, etgt_incomplete,
+        etgt_grin_edge_floors, etgt_grin_not_audited,
     )
     if etgt_key is not None:
         result["etgt_edge_floor"] = etgt_key
@@ -1218,6 +1864,24 @@ def build_merit(session, params):
             result["warning"] = (
                 f"{existing}; {failed_warn}" if existing else failed_warn
             )
+
+    # GRIN §3.4: the additive ``grin_index_floor`` disclosure. Present whenever
+    # grin_dn_max was supplied — the authored/partial/impossible/no-surface/multi-config path
+    # (ABSENT when grin_dn_max is None: byte-identical off-path).
+    grin_key = _grin_index_floor_key(
+        grin_dn_max, grin_min_index, n_configs, grin_authored, grin_surface_count,
+        grin_incomplete, grin_author_fault,
+    )
+    if grin_key is not None:
+        result["grin_index_floor"] = grin_key
+
+    # GRIN §3.5: the widened GRIN index-floor advisory (non-blocking, additive
+    # key, never flips ok). Called UNCONDITIONALLY — it reads the LIVE MFE, so the floored
+    # single-config path self-silences on a COMPLETE index box while an exposed variable GRIN
+    # index coefficient (or a GRIN discovery/enumeration fault) with no complete floor warns.
+    grin_warning = _grin_floor_warning(system)
+    if grin_warning:
+        result["grin_floor_warning"] = grin_warning
 
     # preserve_custom (§2.2): fingerprint the wizard-ONLY block on the session so a
     # LATER build_merit(preserve_custom=True) can find + preserve the hand-authored
@@ -2199,6 +2863,9 @@ BUILD_MERIT_SPEC = ToolSpec(
         "criterion": "string",
         # Preserve the hand-authored custom operand tail across the rebuild.
         "preserve_custom": "boolean",
+        # GRIN: the opt-in per-point index-range floor (single-config).
+        "grin_dn_max": "number",
+        "grin_min_index": "number",
     },
     description=(
         "Build a default RMS merit function via the optimization wizard — the "
@@ -2222,8 +2889,14 @@ BUILD_MERIT_SPEC = ToolSpec(
         "to trace), do NOT hide it with coarser rings/arms (a denser GQ sample lands on the "
         "clipped corner and flips a near-vignetting design uncomputable): "
         "set_vignetting(mode='from_rays') per config FIRST, then rebuild here so the GQ "
-        "operands launch the vignetted (traceable) pupil. See add_operand, "
-        "add_math_constraint, normalize_stop."
+        "operands launch the vignetted (traceable) pupil. "
+        "For a GRIN (gradient-index) design, pass grin_dn_max=<max index excursion> to "
+        "author a per-point index-range box (12 I#GT/I#LT operands per GRIN surface, "
+        "single-config) that keeps n(r,z) in [max(grin_min_index, n0-Δ), n0+Δ] — all in "
+        "PHYSICAL index (on a Gradient2, whose n0 CELL holds the index squared, the box is "
+        "centred on sqrt(n0 cell); n0_at_build reports that physical value); a satisfied "
+        "box caps PER-POINT excursion (not the full Δn spread — pass grin_dn_max to optimize "
+        "for the spread + n<1 audit). See add_operand, add_math_constraint, normalize_stop."
     ),
 )
 

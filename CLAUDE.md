@@ -76,8 +76,13 @@ that as "not built here", not a failure.
 The tools carry design judgment, not just API access — lean on it:
 
 - `build_merit` authors positive manufacturability floors by default
-  (`min_air` / `min_glass`); it won't hand you a knife-edge design.
-- `check_clearance` audits center/edge thickness and clearances after optimization.
+  (`min_air` / `min_glass`); it won't hand you a knife-edge design. For a
+  gradient-index surface, `grin_dn_max` authors a per-point restoring box on the
+  index profile: it pulls the profile back toward the envelope, it does not
+  certify it — a satisfied box still admits a spread of up to twice `grin_dn_max`.
+  The post-optimize index audit is the authority on what the profile actually is.
+- `check_clearance` audits center/edge thickness and clearances after optimization;
+  a gradient-index element is audited as a solid, at the glass floor.
 - `save_candidate` / `promote_best` gate a keeper on clearance — a manufacturably-thin
   design can't be promoted silently.
 
@@ -91,13 +96,15 @@ The harness spans a full sequential-design workflow:
 - **Lens data** — surfaces, apertures, fields, wavelengths, stop, glasses and catalogs,
   per-surface apertures / obstructions.
 - **Geometry** — coordinate breaks, fold mirrors, reflective surfaces, diffraction
-  gratings, even/odd/extended aspheres.
+  gratings, even/odd/extended aspheres, radial and axial gradient-index media.
+  `Gradient2` (radial) takes `n0` as the base index *squared* — pass `n0=2.25` for
+  a medium of physical index 1.5; on `Gradient3`, `n0` is the index itself.
 - **Multi-configuration** — zoom / focus / conjugate / array systems, config-spanning
   merit and optimization.
 - **Merit & optimization** — the wizard and hand-authored operands, derived/relational
   operand math, DLS and Hammer optimization.
 - **Analysis** — first-order, spot, MTF, wavefront, Strehl, distortion, relative
-  illumination, axial/lateral color, collimation.
+  illumination, axial/lateral color, collimation, gradient-index profile.
 - **Tolerancing** — sensitivity and Monte-Carlo manufacturability verdicts.
 - **Figures** — headless meridional layout rendering with per-field rays.
 

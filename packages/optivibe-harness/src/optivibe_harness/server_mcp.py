@@ -150,6 +150,7 @@ _CONFIG_ALL_TOOLS = frozenset({
     "analyze_distortion", "analyze_relative_illumination", "analyze_lateral_color",
     "get_operand", "check_clearance", "verify_collimation",
     "set_vignetting",
+    "analyze_grin_profile",            # GRIN — the 11th ACCEPTS member
 })
 
 # The 11 config-bearing tools that REFUSE config="all" (the fail-safe partition
@@ -468,6 +469,53 @@ HARNESS_INSTRUCTIONS = (
     "  REGENERATED (they are glass=true-only, exactly like MNEG/MNCG — a glass=false\n"
     "  rebuild drops them all).\n"
     "\n"
+    "GRIN (gradient-index) design workflow:\n"
+    "- Cell convention (READ BEFORE AUTHORING): a Gradient2's Par polynomial is the index\n"
+    "  SQUARED (n^2 = n0 + Nr2*r^2 + ...), exactly as Zemax's Gradient 2 defines it, so\n"
+    "  set_grin(n0=2.25) builds a medium of PHYSICAL index 1.5 — pass n^2 for a Gradient2.\n"
+    "  A Gradient3's polynomial is the index itself (n = n0 + ... + Nz1*z + ...). set_grin\n"
+    "  takes the cell value verbatim; analyze_grin_profile and the build_merit index box\n"
+    "  (grin_dn_max/grin_min_index) are in PHYSICAL index for both types.\n"
+    "- Choose a topology: Gradient2 (radial) and Gradient3 (radial+axial) are the\n"
+    "  authorable primitives (set_grin); pair an axial Nz coefficient DOF with a\n"
+    "  genuinely powered element — a flat axial window supplies piston/OPL, not\n"
+    "  focusing power. Gradium, Grid Gradient and the other GRIN family members are\n"
+    "  refuse-tier (set_grin refuses them loud, naming the reason).\n"
+    "- Author, then read back: verify the exact surface type + coefficient cells after\n"
+    "  set_grin; do NOT route GRIN authoring through LensSpec (it is REFUSE-FIRST).\n"
+    "- Interpret first-order (get_first_order): place the image surface near paraxial\n"
+    "  focus before treating readout heuristics as defects — a bare flat axial window\n"
+    "  may legitimately read afocal.\n"
+    "- Discover optimization state: inspect list_variables (the returned variables key)\n"
+    "  so the GRIN coefficient AND a real powered-element variable are BOTH active.\n"
+    "  Author a manufacturable index envelope (build_merit grin_dn_max=..., grin_min_index)\n"
+    "  BEFORE making a coefficient variable (set_grin_variable).\n"
+    "- Verify a flat axial GRIN: trace_rays(opd_mode='Current') -> abs(opd)*lambda_um*1e-3\n"
+    "  mm, differenced vs a homogeneous control; read the radial index field with\n"
+    "  analyze_grin_profile.\n"
+    "- Manufacturability: an AUTHORED Gradient2/Gradient3 element is a SOLID element —\n"
+    "  its edge AND center clearance IS audited by check_clearance at the glass floors\n"
+    "  (min_glass), and optimize/check_clearance carry that coverage via\n"
+    "  grin_geometric_audit — a POSITIVE record of which GRIN surfaces were audited as a\n"
+    "  solid element, NOT a per-surface violation flag (a real thin edge/center still\n"
+    "  surfaces in the normal clearance violation channel). build_merit(glass=true)\n"
+    "  authors an ETGT EDGE\n"
+    "  restoring floor for it (a build-time GRIN CENTER floor / MNCG is a documented\n"
+    "  gap in this release; run check_clearance after optimize for\n"
+    "  center safety). Tune with min_glass. The internal index profile is monochromatic\n"
+    "  (grin_wavelength_blind) and NOT drawn. A LOADED non-authorable GRIN family member\n"
+    "  (Gradium, Grid Gradient, ...) is NOT audited — check_clearance/build_merit/optimize\n"
+    "  disclose it under grin_not_audited. Tolerance the index-profile COEFFICIENT per\n"
+    "  Par# via tolerance (TPAR) — the edge-index change is a derived, profile-dependent\n"
+    "  consequence, not a direct edge-index tolerance.\n"
+    "- Close-out boundaries: GRIN authoring is single-configuration (a config=\"all\"\n"
+    "  readout does NOT imply multi-config authoring); Material/catalog is\n"
+    "  expected-negative; CheckGRINApertures stays engine-default (documented numerical\n"
+    "  caveat).\n"
+    "- Tool tokens (all shipped): set_grin, set_grin_variable, analyze_grin_profile,\n"
+    "  trace_rays, list_variables, build_merit, check_clearance, get_first_order,\n"
+    "  optimize, tolerance, save_candidate.\n"
+    "\n"
     "Standing order: probe-first — verify real backend behavior via a read-back\n"
     "before believing anything backend-dependent.\n"
 )
@@ -572,6 +620,16 @@ _BASE_INSTRUCTION_TOOL_NAMES = frozenset({
     # the serialize/append round-trip tools (build_merit + set_vignetting already above).
     "serialize_merit",
     "apply_merit_recipe",
+    # GRIN closeout — the "GRIN (gradient-index) design workflow" block names the
+    # now-shipped GRIN authoring/analysis tools; curated here so the runtime excision
+    # sweep RECOGNIZES them as tools and excises the naming line if a degraded manifest
+    # drops one. (list_variables/build_merit/check_clearance/get_first_order/optimize/
+    # save_candidate are already curated above; tolerance stays EXCLUDED — an English
+    # prose word that is always a served manifest tool.)
+    "set_grin",
+    "set_grin_variable",
+    "analyze_grin_profile",
+    "trace_rays",
 })
 
 

@@ -278,7 +278,8 @@ LIST_VARIABLES_SPEC = ToolSpec(
         "radius/thickness/conic, asphere coefficients, and per-config (MCE) cells — as an "
         "inventory ({source, surface|row, cell, value, solve}) with a per-source tally + "
         "the opt.Variables cross-check. Read-only. Use after load_design to SEE inherited "
-        "variables before you optimize."
+        "variables before you optimize. Returns active optimization DOFs under variables; "
+        "inspect that list before optimizing."
     ),
 )
 

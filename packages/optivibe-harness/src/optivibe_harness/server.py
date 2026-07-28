@@ -112,6 +112,8 @@ _MULTI_SPEC_MODULES = (
     "optivibe_harness.tools.aperture_surface",
     # Even-asphere authoring (set_asphere / set_asphere_variable).
     "optivibe_harness.tools.asphere_surface",
+    # GRIN authoring primitives (set_grin / set_grin_variable).
+    "optivibe_harness.tools.grin_surface",
     # Multi-configuration primitive (add_configuration / set_config_operand
     # / set_config_value / set_config_variable / set_current_configuration /
     # describe_configurations).

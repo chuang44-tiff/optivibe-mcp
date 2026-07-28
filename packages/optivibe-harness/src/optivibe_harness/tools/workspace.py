@@ -95,13 +95,29 @@ def _summary_single(env):
     # "clean" — surface it so the agent knows WHICH surface to re-check.
     _approx = env.get("asphere_sag_approximate")
     unaudited = list(_approx) if isinstance(_approx, list) else []
-    return {
+    # A loaded non-authorable GRIN family member (or a classified GRIN whose gap
+    # was skipped) is NOT covered by the geometric edge/center audit — surface it at the
+    # save/promote boundary so a GRIN keeper's not-audited status is visible. Non-blocking
+    # disclosure (never flips the gate verdict, §2.3.4 suppression); append its surface ids to
+    # ``unaudited_surfaces`` (ints, like the asphere disclosure) AND carry the full env entries
+    # in a dedicated ``grin_not_audited`` field. Both emitted ONLY when present -> a non-GRIN
+    # keeper is byte-identical (no new key, unaudited unchanged).
+    _grin_na = env.get("grin_not_audited")
+    grin_na = _grin_na if isinstance(_grin_na, list) else []
+    unaudited = unaudited + [
+        e.get("surface") for e in grin_na
+        if isinstance(e, dict) and e.get("surface") is not None
+    ]
+    summary = {
         "folded": bool(env.get("folded")),
         "n_violations": len(out),
         "violations": out,
         "unaudited_surfaces": unaudited,
         "config_evaluated": env.get("config_evaluated"),
     }
+    if grin_na:
+        summary["grin_not_audited"] = grin_na
+    return summary
 
 
 def _summary_all(env):
@@ -120,6 +136,7 @@ def _summary_all(env):
     folded = False
     flat = []
     unaudited = []
+    grin_na = []   # per-config GRIN not-audited disclosure (config-tagged)
     for pc in per:
         if not isinstance(pc, dict):
             continue
@@ -142,13 +159,25 @@ def _summary_all(env):
         _pc_approx = pc.get("asphere_sag_approximate")
         for s in (_pc_approx if isinstance(_pc_approx, list) else []):
             unaudited.append({"surface": s, "config": cfg})
-    return {
+        # Per-config: a loaded non-authorable GRIN family member (or a
+        # skipped-gap primitive) in THIS config — NOT covered by the geometric audit.
+        # Non-blocking disclosure; tag with config, mirror the asphere unaudited handling.
+        _pc_grin_na = pc.get("grin_not_audited")
+        for e in (_pc_grin_na if isinstance(_pc_grin_na, list) else []):
+            if isinstance(e, dict) and e.get("surface") is not None:
+                unaudited.append({"surface": e.get("surface"), "config": cfg})
+                grin_na.append({"surface": e.get("surface"), "config": cfg,
+                                "type": e.get("type"), "reason": e.get("reason")})
+    summary = {
         "folded": bool(folded),
         "n_violations": len(flat),
         "violations": flat,
         "unaudited_surfaces": unaudited,
         "config_evaluated": env.get("config_evaluated"),
     }
+    if grin_na:
+        summary["grin_not_audited"] = grin_na
+    return summary
 
 
 def _classify_clearance(env):
@@ -986,7 +1015,8 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "result.ok. Runs a save-time clearance/visual gate: WARNS (never blocks) when "
         "the current-config geometry is manufacturably thin (clearance_ok:false + "
         "clearance_warning, tunable via min_air/min_glass) or when no figure was "
-        "rendered (visual_check_warning) — review before promoting."
+        "rendered (visual_check_warning) — review before promoting. Returns the saved "
+        "Zemax file path under zmx_path; use that value for persistence/read-back."
     ),
 )
 

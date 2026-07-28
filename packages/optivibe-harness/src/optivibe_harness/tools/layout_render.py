@@ -1216,6 +1216,30 @@ def _render_layout_at(session, params, config_title=None):
             notes.append(f"surfaces {degraded} were unreadable and degraded")
         flags = list(ray_flags)  # additive machine-readable channel (rays + geometry)
 
+        # GRIN (§6.2) disclosure: a GRIN surface's INTERNAL index profile is not
+        # drawn — the drawn geometry is the Standard sphere/conic base (the index
+        # profile does NOT perturb the sag, residual 0.0, so the figure is faithful for the
+        # base geometry). NO ``_modelled``/``_approximate`` split (index profile ⊥ sag). A
+        # degraded/unreadable row routes to the EXISTING degraded channel — never claimed
+        # GRIN. Additive key + one flag, emitted ONLY when non-empty (a non-GRIN system is
+        # byte-for-byte unchanged). Fail-safe: a resolver throw -> no GRIN disclosure.
+        grin_index_profile_not_drawn = []
+        try:
+            from . import _grin_cells as _grin
+            for i in range(n):
+                if rows[i].get("unreadable", False):
+                    continue  # degraded -> the existing degraded channel, never claimed GRIN
+                if _grin.grin_type_of_name(str(rows[i].get("type_name", ""))) is not None:
+                    grin_index_profile_not_drawn.append(i)
+        except Exception:  # noqa: BLE001 — a GRIN resolver hiccup -> no GRIN disclosure
+            grin_index_profile_not_drawn = []
+        if grin_index_profile_not_drawn:
+            flags.append(
+                "GRIN: internal index profile not drawn (surfaces "
+                f"{grin_index_profile_not_drawn}); the drawn/audited geometry is the "
+                "Standard sphere/conic base — bulk-index manufacturability is not audited"
+            )
+
         # A folded figure where TRULY NOTHING drew is a blank (neutral-axis)
         # render — flag it so the ok:true result is honest about the empty figure.
         # The flag must NOT over-fire when ONLY the image-plane line
@@ -1249,7 +1273,7 @@ def _render_layout_at(session, params, config_title=None):
 
         note = " | ".join(notes) if notes else None
 
-        return {
+        _result = {
             "ok": True,
             "path": attempted,
             "size_bytes": size,
@@ -1286,6 +1310,11 @@ def _render_layout_at(session, params, config_title=None):
             "n_rays_drawn": n_rays_drawn,
             "flags": flags,
         }
+        # GRIN (§6.2): the additive index-not-drawn surface list — emitted ONLY when
+        # non-empty (a non-GRIN system stays byte-for-byte unchanged).
+        if grin_index_profile_not_drawn:
+            _result["grin_index_profile_not_drawn"] = grin_index_profile_not_drawn
+        return _result
     except BaseException as exc:  # noqa: BLE001 — render never raises into dispatch
         return _fail(
             "render_failed",
