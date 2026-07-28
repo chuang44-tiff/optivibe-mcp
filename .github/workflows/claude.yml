@@ -12,12 +12,31 @@ on:
 
 jobs:
   claude:
+    # PUBLIC-REPO SAFETY — DO NOT REMOVE THE author_association CHECKS.
+    # This Action runs on the repo owner's Claude subscription. Without a trust
+    # check, ANY GitHub user could spend that quota by writing '@claude' in an
+    # issue on this public repo. Each clause pairs the mention with the trust
+    # check for THAT event's own actor, so the association cannot be satisfied
+    # by a different event's context.
+    #
+    # NOTE: `/install-github-app` regenerates this file WITHOUT these checks (it
+    # did exactly that on 2026-07-28). Re-apply them after every run of it.
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      (github.event_name == 'issue_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'pull_request_review_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'pull_request_review' &&
+        contains(github.event.review.body, '@claude') &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)) ||
+      (github.event_name == 'issues' &&
+        (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
     runs-on: ubuntu-latest
+    # Bound a runaway session so a single invocation cannot drain the quota.
+    timeout-minutes: 20
     permissions:
       contents: read
       pull-requests: read
@@ -26,7 +45,7 @@ jobs:
       actions: read # Required for Claude to read CI results on PRs
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
@@ -35,6 +54,10 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # Pin the model — the regenerated template dropped this and would
+          # otherwise fall back to the action's default.
+          claude_args: "--model claude-fable-5"
 
           # This is an optional setting that allows Claude to read CI results on PRs
           additional_permissions: |
