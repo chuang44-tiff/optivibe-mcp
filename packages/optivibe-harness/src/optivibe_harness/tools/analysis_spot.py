@@ -36,10 +36,6 @@ S2 (#7 / #14) — the validity + per-wave rewire:
 
 Completion canary (UNCHANGED): ``SpotData is not None`` AND ``NumberOfFields > 0``
 AND ``NumberOfWavelengths > 0``; else ``analysis_empty``.
-
-Live ZOS-API integration: ``test_spot_validity_live.py`` (the make-it-bite per
-mode); unit-tested against the fixture-seeded fake SpotData + an independent
-``grid_failure_mode`` batch double.
 """
 import math
 

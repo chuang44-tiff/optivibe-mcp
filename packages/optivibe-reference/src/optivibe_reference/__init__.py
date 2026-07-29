@@ -11,4 +11,4 @@ grounds design intent onto a merit-function operand. The catalog is built from a
 committed normalized-LF JSON at runtime; the binary ``.db`` is never committed.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"

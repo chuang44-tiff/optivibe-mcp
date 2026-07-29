@@ -1,0 +1,37 @@
+name: tests
+on: [push, pull_request]
+permissions:
+  contents: read
+
+# A green run proves both packages install from a clean checkout of the public
+# files on a clean Windows box, that they resolve under that checkout, that every
+# module imports with the .NET bridge blocked and the walked set matches the tree.
+
+# It also proves the server boots over real stdio with a clean transcript and
+# serves a self-consistent manifest both composed and degraded, that the
+# advertised selector shapes are exact, and that the version literals agree.
+
+# It does not prove that any tool computes anything correct, that the .NET bridge
+# loads, that any typed handler behaves, or that no tool was swapped for another.
+# Green means the package stands up and tells the truth about itself.
+
+jobs:
+  engine-free:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: install (documented path)
+        working-directory: packages/optivibe-harness
+        run: |
+          pip install -e ../optivibe-reference
+          pip install -e ".[dev]"
+      - name: import contract
+        run: python -m pytest tests -q -k import
+      - name: boot and manifest
+        run: python -m pytest tests -q -k boot
+      - name: engine-free suite
+        run: python -m pytest tests -q
