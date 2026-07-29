@@ -14,7 +14,14 @@ dependencies:
       - pythonnet        # bridges Python <-> the typed .NET ZOS-API via `clr`
       - pytest           # test runner
       - psutil           # process introspection (server reaper, scoped to spawned PIDs)
-      - mcp              # the single OptiVibe MCP stdio server (python -m optivibe_harness)
+      - mcp>=1.28,<2     # the single OptiVibe MCP stdio server (python -m optivibe_harness)
+      # ^ BOUNDED pin, kept in lockstep with pyproject.toml (the same fact,
+      # declared twice).  mcp 2.0.0 removed the low-level `Server.list_tools()`
+      # / `.call_tool()` decorator surface this harness builds its stdio server
+      # on, so an unpinned `mcp` resolves to a release that cannot boot -- and
+      # it fails SILENTLY, because stdio is redirected to devnull before the
+      # failing import runs, so the child exits 1 with nothing on stdout or
+      # stderr.  The floor is the version the server loop is written against.
       # The single OptiVibe MCP composes the reference tool set in-process: after
       # building this env, also run (from packages/optivibe-harness/):
       #     pip install -e ../optivibe-reference

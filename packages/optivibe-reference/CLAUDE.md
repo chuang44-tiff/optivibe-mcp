@@ -42,7 +42,7 @@ raises; callers check the returned envelope, not the absence of an exception.
 ## Development
 
 ```bash
-PYTHONPATH=src python -m pytest tests/ -v   # if running the (unshipped) test suite
+python -m pytest tests -q   # the engine-free suite, from the repository root
 ```
 
 - **Python:** 3.11

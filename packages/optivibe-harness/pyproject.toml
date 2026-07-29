@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "optivibe-harness"
-version = "0.1.1"
+version = "0.1.2"
 description = "OptiVibe harness: ZOS-API automation, typed tools, and the single OptiVibe MCP"
 requires-python = ">=3.11"
 classifiers = [
@@ -28,7 +28,14 @@ classifiers = [
 ]
 dependencies = [
     "pythonnet",
-    "mcp",
+    # BOUNDED pin, kept in lockstep with environment.yml (the same fact, declared
+    # twice).  mcp 2.0.0 removed the low-level ``Server.list_tools()`` /
+    # ``.call_tool()`` decorator surface this package builds its stdio server on,
+    # so an unpinned ``mcp`` resolves to a release that cannot construct the
+    # server -- and it fails SILENTLY, because stdio is redirected to devnull
+    # before the failing import runs, so the child exits 1 with nothing on stdout
+    # or stderr.  The floor is the version the server loop is written against.
+    "mcp>=1.28,<2",
     "psutil",
     "matplotlib",
     "numpy",
