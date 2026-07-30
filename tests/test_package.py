@@ -10,12 +10,32 @@ import sys
 import tempfile
 import tomllib
 
-# The two distributions this repository publishes, as import name -> directory.
-# Pinned rather than globbed: a glob would take its universe from the tree it grades.
-PACKAGE_DIRS = {
-    "optivibe_harness": "optivibe-harness",
-    "optivibe_reference": "optivibe-reference",
+# The distributions this repository publishes: directory -> its top-level import packages,
+# VERSION-BEARING FIRST.  Pinned rather than globbed: a glob would take its universe from
+# the tree it grades.
+PACKAGES = {
+    "optivibe-harness": ("optivibe_harness", "optivibe_doctor"),
+    "optivibe-reference": ("optivibe_reference",),
 }
+
+# One distribution now ships two top-level packages, so "a distribution" and "a package"
+# are different sets and the walk needs both: the ROOT is a distribution's src/, the NAME
+# is a package the import system can be asked to walk.
+
+# Filing the first under the second is the defect this shape replaces -- every
+# `optivibe_doctor` module was recorded as a module of `optivibe_harness`, which
+# `pkgutil.walk_packages` correctly declined to find there.
+
+# Version-bearing import name -> directory, DERIVED so there is no second hand-written
+# copy to drift.  A version literal is a property of the DISTRIBUTION: its manifest and
+# its primary package's initialiser.
+PACKAGE_DIRS = {tops[0]: directory for directory, tops in PACKAGES.items()}
+
+# EVERY top-level package -> its directory.  The import-side map, and its DIFFERENCE from
+# PACKAGE_DIRS is the repair: same shape, different contents, and collapsing them back
+# into one reintroduces the defect.
+PACKAGE_ROOTS = {top: directory
+                 for directory, tops in PACKAGES.items() for top in tops}
 
 # The single acceptance set for every backend-import consumer in this suite.
 BLOCKED_ROOTS = frozenset({
@@ -66,16 +86,39 @@ with open(sys.argv[3], "w") as handle:
 '''
 
 
+def _anchor_absences(root):
+    """Which declared distributions have no packaging manifest under `root`."""
+    return [name for name in sorted(PACKAGES)
+            if not os.path.isfile(os.path.join(root, "packages", name, "pyproject.toml"))]
+
+
 def _repo_root():
-    """Return the checkout holding this file, verified by both packaging manifests."""
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    absent = [name for name in sorted(PACKAGE_DIRS.values())
-              if not os.path.isfile(os.path.join(root, "packages", name, "pyproject.toml"))]
-    if absent:
-        raise RuntimeError(
-            "the directory holding this file is not a checkout of this project: %s has "
-            "no packaging manifest under %r" % (", ".join(absent), root))
-    return root
+    """Return the nearest enclosing checkout of this project, verified by both manifests."""
+    # The proof is unchanged and is still the whole guarantee: a directory qualifies only
+    # when BOTH declared distributions carry a manifest under it.  What widened is the
+    # number of candidates it will accept that proof from: one, to the ancestor chain.
+
+    # One candidate assumed this file's parent IS the repository root -- true in a published
+    # checkout and nowhere else, so anywhere else every check here raised before asserting
+    # anything, and the suite was gradeable only in the layout already known to be correct.
+
+    # Still fails closed in the direction that matters: if NO ancestor carries both
+    # manifests this raises, naming the nearest candidate's absences and the chain searched.
+    # Nearest-wins, so a checkout nested inside another anchors on itself.
+    start = os.path.dirname(os.path.abspath(__file__))
+    searched, current = [], start
+    while True:
+        searched.append(current)
+        if not _anchor_absences(current):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    raise RuntimeError(
+        "no ancestor of this file is a checkout of this project: %s has no packaging "
+        "manifest under %r, and none of %r carries both"
+        % (", ".join(_anchor_absences(searched[0])), searched[0], searched))
 
 
 def _iter_source_files(base):
@@ -110,22 +153,48 @@ def _module_scope_dotnet_imports(source):
 
 
 def _src_modules():
-    """Map each package import name to its filesystem module set and its source-file count."""
+    """Map each top-level import name to its filesystem module set and source-file count."""
+    # Keyed on the top-level package and rooted at src/<top>/, so a distribution shipping
+    # two packages yields two entries whose module sets are exactly what the import system
+    # can walk.  Dotted names stay relative to src/, so they read `optivibe_doctor._model`.
+
+    # AND src/ IS STILL CLOSED OVER THE DECLARATION.  Narrowing each walk to src/<top>/
+    # would move anything under src/ outside a declared package out of every comparison
+    # here: previously mis-filed LOUDLY, afterwards invisible, which is strictly worse.
+
+    # So src/ is still walked, and every file it finds must be claimed by exactly one
+    # declared package.  An unclaimed one raises below instead of vanishing.
     root = _repo_root()
-    found = {}
-    for top, directory in sorted(PACKAGE_DIRS.items()):
+    found, claimed = {}, {}
+    for top, directory in sorted(PACKAGE_ROOTS.items()):
         base = os.path.join(root, "packages", directory, "src")
-        if not os.path.isdir(base):
-            raise RuntimeError("no source tree at %r" % base)
-        modules = set()
-        files = 0
-        for path in _iter_source_files(base):
+        top_dir = os.path.join(base, top)
+        if not os.path.isdir(top_dir):
+            raise RuntimeError("no source tree at %r" % top_dir)
+        modules, files = set(), 0
+        for path in _iter_source_files(top_dir):
             files += 1
+            claimed.setdefault(directory, set()).add(os.path.normcase(os.path.abspath(path)))
             parts = os.path.relpath(path, base).replace(os.sep, "/")[:-3].split("/")
             if parts[-1] == "__init__":
                 parts = parts[:-1]
             modules.add(".".join(parts))
+        if not modules:
+            raise RuntimeError("no module found under %r" % top_dir)
         found[top] = (modules, files)
+    for directory in sorted(PACKAGES):
+        base = os.path.join(root, "packages", directory, "src")
+        if not os.path.isdir(base):
+            raise RuntimeError("no source tree at %r" % base)
+        every = {os.path.normcase(os.path.abspath(p)) for p in _iter_source_files(base)}
+        stray = sorted(os.path.relpath(p, base) for p in every - claimed.get(directory, set()))
+        if stray:
+            raise RuntimeError(
+                "%s has source file(s) under src/ that no declared top-level package "
+                "claims: %r.  PACKAGES names %r for this distribution; a file outside "
+                "those trees is in no module set and therefore in no comparison in this "
+                "file.  Declare its package or move it."
+                % (directory, stray, list(PACKAGES[directory])))
     return found
 
 
@@ -197,7 +266,10 @@ def _declared_version(path):
 
 def test_installed_packages_resolve_under_this_repository():
     root = _repo_root()
-    for top, directory in sorted(PACKAGE_DIRS.items()):
+    # EVERY top-level package, not one per distribution: a secondary package resolving to
+    # some other copy on sys.path would make every assertion about it in this suite a
+    # statement about a tree nobody is releasing.
+    for top, directory in sorted(PACKAGE_ROOTS.items()):
         tree = os.path.normcase(os.path.abspath(
             os.path.join(root, "packages", directory, "src")))
         resolved = importlib.import_module(top).__file__
@@ -209,7 +281,10 @@ def test_installed_packages_resolve_under_this_repository():
 
 def test_no_module_execution_scope_dotnet_import():
     root = _repo_root()
-    for top, directory in sorted(PACKAGE_DIRS.items()):
+    # Keyed on the DISTRIBUTION and deliberately still a walk of the whole src/ tree: this
+    # check reads source text rather than importing, so the widest scope is the right one
+    # and a newly added top-level package is covered with no edit here.
+    for directory in sorted(PACKAGES):
         base = os.path.join(root, "packages", directory, "src")
         scanned = 0
         offenders = []
@@ -221,7 +296,8 @@ def test_no_module_execution_scope_dotnet_import():
                 offenders.append("%s line %d imports %s" % (path, line, imported))
         assert scanned > 0, "the scan read no source file under %r" % base
         assert offenders == [], (
-            "%s reaches a backend import while its modules execute: %s" % (top, offenders))
+            "%s reaches a backend import while its modules execute: %s"
+            % (directory, offenders))
 
 
 def test_every_module_imports_without_dotnet():
@@ -246,21 +322,36 @@ def test_every_module_imports_without_dotnet():
 
 
 def test_version_literals_agree():
+    # This walks PACKAGES (distributions) while the import checks walk PACKAGE_ROOTS
+    # (packages), because a version literal belongs to a distribution and those two counts
+    # are no longer equal.
+
+    # So the `2 *` below stays anchored on the number of DISTRIBUTIONS, where it keeps
+    # meaning "one manifest plus one initialiser each, all of them read".
     root = _repo_root()
     declared = {}
-    for top, directory in sorted(PACKAGE_DIRS.items()):
+    for directory, tops in sorted(PACKAGES.items()):
         package = os.path.join(root, "packages", directory)
         declared[directory + " manifest"] = _declared_version(
             os.path.join(package, "pyproject.toml"))
-        declared[top] = _declared_version(
-            os.path.join(package, "src", top, "__init__.py"))
-    assert len(declared) == 2 * len(PACKAGE_DIRS), "read %d literals" % len(declared)
+        declared[directory + " " + tops[0]] = _declared_version(
+            os.path.join(package, "src", tops[0], "__init__.py"))
+    assert len(declared) == 2 * len(PACKAGES), "read %d literals" % len(declared)
     distinct = sorted(set(declared.values()))
     assert len(distinct) == 1, "the declared versions disagree: %r" % (declared,)
     assert re.match(VERSION_PATTERN, distinct[0]), (
         "the declared version %r is not three dotted numbers" % (distinct[0],))
-    for top in sorted(PACKAGE_DIRS):
+    # A version-bearing package MUST report the release version.  A secondary one need not
+    # carry a literal at all -- it is versioned by the distribution shipping it -- but if it
+    # ever grows one it must agree.
+
+    # Otherwise a second, disagreeing literal in the same wheel would be exactly the
+    # partial-bump defect this test exists for, held one package over where nothing looks.
+    for top, directory in sorted(PACKAGE_ROOTS.items()):
+        required = top == PACKAGES[directory][0]
         imported = getattr(importlib.import_module(top), "__version__", None)
+        if imported is None and not required:
+            continue
         assert imported == distinct[0], (
             "%s reports version %r but the source tree declares %r"
             % (top, imported, distinct[0]))

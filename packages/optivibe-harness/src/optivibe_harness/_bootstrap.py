@@ -26,6 +26,22 @@ os.environ.setdefault("PYTHONNET_RUNTIME", "netfx")
 # Memo for idempotent load: once ZOSAPI is referenced + imported, reuse it.
 _ZOSAPI_MODULE = None
 
+# The (dir, how) recorded at the FIRST — and therefore only truthful — resolution.
+# WRITE-ONCE.  resolve_zemax_dir is SELF-MODIFYING: arm 3's Initialize(<dir>) teaches the
+# initializer the path, so every LATER call reports "registry-autodetect" whether or not
+# the registry has an entry.  Only the first answer is true, so only the first is recorded.
+_RESOLUTION = None
+
+
+def resolved_zemax_dir():
+    """Return the ``(dir, how)`` of the FIRST successful resolution, or ``None``.
+
+    PURE: no initializer, no clr, no side effect.  ``None`` means no resolution has
+    happened in this process yet — it is NOT a failure and must never be reported as one.
+    A caller must NEVER call ``resolve_zemax_dir`` to find out.
+    """
+    return _RESOLUTION
+
 
 def find_nethelper() -> str:
     """Resolve ``ZOSAPI_NetHelper.dll`` without hardcoding an install path.
@@ -98,7 +114,7 @@ def load_zosapi():
     ZOSAPI_Interfaces.dll -> ``import ZOSAPI``. Subsequent calls return the
     already-loaded module without re-referencing assemblies.
     """
-    global _ZOSAPI_MODULE
+    global _ZOSAPI_MODULE, _RESOLUTION
     if _ZOSAPI_MODULE is not None:
         return _ZOSAPI_MODULE
 
@@ -109,7 +125,9 @@ def load_zosapi():
     clr.AddReference(nethelper)
     import ZOSAPI_NetHelper  # noqa: E402
 
-    zemax_dir, _how = resolve_zemax_dir(ZOSAPI_NetHelper.ZOSAPI_Initializer)
+    zemax_dir, how = resolve_zemax_dir(ZOSAPI_NetHelper.ZOSAPI_Initializer)
+    if _RESOLUTION is None:  # write-once; success-only (the call raises on failure)
+        _RESOLUTION = (zemax_dir, how)
     clr.AddReference(os.path.join(zemax_dir, "ZOSAPI.dll"))
     clr.AddReference(os.path.join(zemax_dir, "ZOSAPI_Interfaces.dll"))
     import ZOSAPI  # noqa: E402
