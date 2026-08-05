@@ -140,7 +140,7 @@ def _gap_kind(row_i):
     surface's Thickness is the medium to the next surface: the GRIN at surf 2's
     body is gap 2->3). Its Material reads air-like "" -> classify glass so its edge/center
     is audited at min_glass. Keyed on the AUTHORABLE resolver (the probe-proven set), NOT
-    the family recognizer -> a loaded NON-authorable member (Gradium/GridGradient
+    the family recognizer -> a loaded NON-authorable member (Gradium/GridGradient/
     Gradient6...) is NOT classified here (un-probed representation) -> disclosed not-audited
     at the result level (§2.3.4). No try/except-to-material fall-through: a (near-impossible)
     resolver throw over a stored string must NOT silently classify a GRIN as air.
@@ -567,7 +567,41 @@ def _impl(session, min_air, min_glass):
                 "OpticStudio"
             )
 
-    # GRIN (§6.2) disclosure: a GRIN surface's INTERNAL index profile is not
+    # (clearance-provenance, DQ-6) SAG-MODEL APPLICABILITY disclosure. The per-gap
+    # edge audit computes every sag from the radius/conic/polynomial model; for a surface
+    # whose TYPE that model was never written for, the bounding gaps were computed from
+    # the base model instead of the real geometry. the probe measured this failing in
+    # BOTH directions on a Tilted surface (a real 0.926 mm violation erased to 2.600 AND a
+    # false 0.300 mm one invented), so the disclosure is CONSUMED by the save/promote
+    # classifier, not merely emitted. A degraded row is SKIPPED here — it is already in
+    # ``asphere_sag_approximate`` (the shipped channel); never double-reported.
+    sag_model_unfaithful = []
+    for i in range(n):
+        if not rows[i].get("ok", True):
+            continue        # already in asphere_sag_approximate — the shipped channel
+        if _geom.sag_model_is_faithful(rows[i].get("type_name")) is not True:
+            sag_model_unfaithful.append(i)
+    # The claim is CONDITIONAL ("where it bounds"). This scan runs
+    # over ALL surfaces (``range(n)``) while ``_audit_gaps`` walks only ``1 .. n-2``, so a
+    # named surface may bound NO audited gap — reproduced on surface 0 ``Tilted`` on a
+    # design with gaps 1->2 and 2->3 only, and the old unconditional "the gaps bounding it
+    # were computed" asserted a computation that never occurred. Scoping the EMISSION
+    # would empty this list on a fold (a fold never calls ``_audit_gaps``, so ``gaps ==
+    # []``) and destroy the paired assertion, so scoping is deferred with its
+    # measurement attached.
+    # This string and ``workspace._COVERAGE_TYPE`` are TWO COPIES OF ONE CLAIM — a
+    # hazard — and both were edited together; a test parametrised over both sites pins it.
+    for s in sag_model_unfaithful:
+        flags.append(
+            f"surface {s} is a {rows[s].get('type_name')}; its geometry is NOT one the "
+            "radius/conic/polynomial sag model this audit uses was written for, so where "
+            "it bounds an audited gap that gap's edge was computed from that base model "
+            "instead of its real geometry — a violation may be MISSED and a false one may "
+            "be REPORTED (measured for a Tilted surface: a real 0.926 mm violation erased, "
+            "a false 0.300 mm one invented). Verify in OpticStudio."
+        )
+
+    # GRIN disclosure: a GRIN surface's INTERNAL index profile is not
     # drawn/audited — the audited geometry here is the Standard sphere/conic base (live-
     # probed: the index profile does NOT perturb the sag, residual 0.0, so the clearance edge audit
     # is CORRECT on the base geometry; the flag is informational). NO ``_modelled``/
@@ -654,7 +688,7 @@ def _impl(session, min_air, min_glass):
             "clearance as UNKNOWN and check them in OpticStudio."
         )
 
-    # The per-config divergence headline: the SMALLEST finite
+    # (MCE, D3) The per-config divergence headline: the SMALLEST finite
     # gap clearance (min over each gap's center+edge). A zoom's gaps move per config,
     # so this differs across configs on a real sweep (a repeated value across configs
     # is the silent-wrong switch signature the driver's config_differs surfaces).
@@ -691,7 +725,12 @@ def _impl(session, min_air, min_glass):
         "asphere_sag_approximate": asphere_sag_approximate,
         "flags": flags,
     }
-    # GRIN (§6.2): the additive index-not-audited surface list — emitted ONLY when
+    # (clearance-provenance, DQ-6): the additive sag-model-applicability list — emitted
+    # ONLY when non-empty (the shipped ``grin_not_audited`` precedent), so a
+    # Standard/asphere system's envelope stays byte-identical.
+    if sag_model_unfaithful:
+        result["sag_model_unfaithful"] = sag_model_unfaithful
+    # GRIN: the additive index-not-audited surface list — emitted ONLY when
     # non-empty (a non-GRIN system stays byte-for-byte unchanged).
     if grin_index_profile_not_drawn:
         result["grin_index_profile_not_drawn"] = grin_index_profile_not_drawn

@@ -754,7 +754,7 @@ def _optimize_impl(session, params):
     # value is rejected -> optimize_param even with NO offender (zero mutation, engine unopened).
     # Default False PRESERVES the fail-closed optimize_per_config_thin hard-refuse.
     recover_thin = _bool_param(params, "recover_thin", False)
-    # GRIN §4.1: the opt-in no-floor spread-check envelope. Read EARLY (before the
+    # GRIN : the opt-in no-floor spread-check envelope. Read EARLY (before the
     # preflight) so a bad value refuses opening NOTHING (the recover_thin precedent). None
     # when absent -> the floored path's box audit still runs (weight-/param-independent).
     grin_dn_max = _grin_dn_max_param(params)
@@ -1079,7 +1079,10 @@ def _optimize_impl(session, params):
     # fully guarded, additive keys, never flips ok, never raises. Only the SUCCESS
     # return is hooked (a failed/refused/uncomputable run has no completed geometry).
     audit_floor = _resolve_audit_glass_floor(system)
-    edge_audit = _edge_audit_warnings(session, audit_floor, _DEFAULT_MIN_AIR)
+    # dogfood F-2: the AIR floor resolves from the design's OWN authored bound too,
+    # so geometry_audit.basis reports the floors ACTUALLY used on BOTH axes.
+    air_floor = _resolve_audit_air_floor(system)
+    edge_audit = _edge_audit_warnings(session, audit_floor, air_floor)
 
     result = {
         "ok": True,
@@ -1112,18 +1115,21 @@ def _optimize_impl(session, params):
         "artifacts": artifact_trail,
         "warning": warning,
     }
-    result.update(edge_audit)  # 0-3 additive keys; never overwrites a base key
+    result.update(edge_audit)  # 0-3 additive (d) keys; never overwrites a base key
     # GRIN §4.4: the post-optimize GRIN index audit — ONCE on the RESULT, after the
     # edge audit (the both-tails drift-pin). Additive keys, never flips ok,
     # never raises. The box audit runs regardless of grin_dn_max (weight-/param-independent).
     result.update(_grin_index_audit_warnings(session, grin_dn_max))
-    # the post-optimize merit<->reality (chromatic-blindness) audit — ONCE on
+    # The post-optimize merit<->reality (chromatic-blindness) audit — ONCE on
     # the RESULT, additive keys, never flips ok, never raises. merit_scalar = the in-hand
     # merit_after (human context; NO extra CalculateMeritFunction call).
     result.update(_merit_reality_divergence_warning(session, safe_float(merit_after)))
     # (§2.5): the opt-in-nudge success disclosure (per_config_thin_nudged +
     # the pairing/knife-edge warning). Absent (byte-identical) when nothing was nudged.
     result = _apply_nudge_disclosure(result, nudge_disclosure)
+    # optimize-verdict-qualification : qualify the merit verdict against the CONFIRMED
+    # geometry evidence, LAST (so the bounded headline folds into the finished `warning`).
+    result = _qualify_verdict(result)
     return result
 
 
@@ -1332,7 +1338,10 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
     # The post-optimize edge / negative-air-gap audit rides a Hammer
     # result too (drift-pin — the same leaf helper as the DLS tail).
     audit_floor = _resolve_audit_glass_floor(system)
-    edge_audit = _edge_audit_warnings(session, audit_floor, _DEFAULT_MIN_AIR)
+    # dogfood F-2: the AIR floor resolves from the design's OWN authored bound too,
+    # so geometry_audit.basis reports the floors ACTUALLY used on BOTH axes.
+    air_floor = _resolve_audit_air_floor(system)
+    edge_audit = _edge_audit_warnings(session, audit_floor, air_floor)
 
     result = {
         "ok": True,
@@ -1371,16 +1380,20 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
         "artifacts": artifact_trail,
         "warning": warning,
     }
-    result.update(edge_audit)  # 0-4 additive keys; never overwrites a base key
+    result.update(edge_audit)  # 0-4 additive (d)/(Item-1) keys; never overwrites a base key
     # GRIN §4.4: the post-optimize GRIN index audit rides a Hammer result too (the
     # both-tails drift-pin — the same leaf helper as the DLS tail).
     result.update(_grin_index_audit_warnings(session, grin_dn_max))
-    # the post-optimize merit<->reality (chromatic-blindness) audit rides a
+    # The post-optimize merit<->reality (chromatic-blindness) audit rides a
     # Hammer result too (the same leaf helper as the DLS tail). merit_after is in scope.
     result.update(_merit_reality_divergence_warning(session, safe_float(merit_after)))
     # (§2.5): the opt-in-nudge disclosure rides a Hammer result too (the nudge
     # ran BEFORE the algorithm fork), so a recover_thin nudge is never silently undisclosed.
     result = _apply_nudge_disclosure(result, nudge_disclosure)
+    # optimize-verdict-qualification : the SAME qualifier on the Hammer tail (the
+    # both-tails drift-pin — C1/C2). The Hammer `"stable"` forcing at :1302 rides it, so a
+    # best-restored run over nonphysical ENTRY geometry reads `stable_unphysical` (R9).
+    result = _qualify_verdict(result)
     return result
 
 
@@ -1450,15 +1463,186 @@ def _resolve_audit_glass_floor(system):
         return _DEFAULT_MIN_GLASS
 
 
+def _resolve_audit_air_floor(system):
+    """The (d) post-optimize audit's AIR floor — the design's OWN authored floor.
+
+    The exact sibling of `_resolve_audit_glass_floor`: the MIN positive ``MNEA`` (edge)
+    target, else the MIN positive ``MNCA`` (centre) target, with the standard 0.5 mm
+    fallback when none is authored. ``build_merit(min_air=Δ)`` authors those bounds
+    (``AirMin``/``AirEdge`` -> positive ``MNCA``/``MNEA``), so an authored air floor has a
+    live source to resolve from exactly as the glass floor does. NEVER raises.
+
+    **Why this exists (dogfood F-2).** The air floor was passed as the hardcoded
+    ``_DEFAULT_MIN_AIR`` while the glass floor was resolved, so a design authored at
+    ``min_air=0.8`` was audited at ``0.5`` — and this cycle then PUBLISHED that number in
+    ``geometry_audit.basis``, a field the spec describes as "the floors actually used".
+    Shipping a floor the design did not author, in the field added to stop exactly that
+    class of over-claim, is this cycle's own thesis violated in its own new field. Both
+    axes now resolve the same way, so ``basis`` reports what the audit really used.
+
+    Verdict-neutral by construction: nothing in `_edge_audit_warnings` reads an AIR gap's
+    ``threshold`` (the legacy strings are glass-only and the nonphysical air arm keys on
+    ``< 0``), so this changes the DISCLOSED floor and the ``violations`` the envelope
+    carries, never a verdict.
+    """
+    try:
+        mfe = system.MFE
+        return (
+            _oc._min_positive_target(mfe, "MNEA")
+            or _oc._min_positive_target(mfe, "MNCA")
+            or _DEFAULT_MIN_AIR
+        )
+    except Exception:  # noqa: BLE001 — advisory; fall back to the standard floor
+        return _DEFAULT_MIN_AIR
+
+
+# =========================================================================== #
+# optimize-verdict-qualification (final SPEC v3) — the ``geometry_audit`` envelope +
+# the verdict qualifier. ``ok`` NEVER flips (a completed run that made a bad design is a
+# RESULT, module docstring :14-:17); every uncertainty resolves toward DISCLOSURE, never
+# toward "no findings".
+# =========================================================================== #
+# — the SINGLE definition of the qualified set. (v2 carried two non-equivalent
+# forms — ``!= "diverged"`` vs ``in ("improved","stable")`` — that differed on ``None``
+# and on unknown tokens. ONE constant, used everywhere.)
+_QUALIFIED = ("improved", "stable")
+
+# — the three ``geometry_audit.status`` values. ``no_findings`` (NOT ``clean``) is
+# load-bearing: it means *the audit ran and returned no confirmed nonphysical
+# finding* — NOT *the geometry is sound* (LIMITATIONS).
+_STATUS_NO_FINDINGS = "no_findings"
+_STATUS_NONPHYSICAL = "nonphysical"
+_STATUS_NOT_AUDITED = "not_audited"
+
+# step 5 — the STATIC per-``reason`` ``geometry_not_audited`` message (the 
+# ``grin_not_audited`` precedent). Emitted IFF ``reason is not None``, INDEPENDENT of
+# ``status`` (invariant 4): a confirmed finding never erases the disclosure that
+# part of the geometry went unexamined.
+_NOT_AUDITED_MSG = {
+    "folded_system": (
+        "the per-gap clearance audit did NOT run over this design: the system is folded "
+        "(a coordinate-break or mirror is present) and the audit is unfolded-only. No "
+        "absence of a gap finding is meaningful here — inspect the layout and run "
+        "verify_beam_path / check_clearance by hand."
+    ),
+    "clearance_refused": (
+        "the per-gap clearance audit did NOT run over this design: check_clearance "
+        "refused or returned a degraded envelope. No absence of a gap finding is "
+        "meaningful here — run check_clearance by hand."
+    ),
+    "audit_failed": (
+        "the post-optimize geometry audit FAILED to run — no absence of a geometry "
+        "finding from this run is meaningful; run check_clearance by hand."
+    ),
+    "no_gaps_audited": (
+        "the per-gap clearance audit returned NO gaps for a system that has them, so it "
+        "did not examine this geometry. No absence of a gap finding is meaningful here — "
+        "run check_clearance by hand."
+    ),
+    "qualifier_failed": (
+        "the post-optimize verdict qualifier FAILED — the geometry audit result could "
+        "not be read, so no absence of a geometry finding is meaningful; run "
+        "check_clearance by hand."
+    ),
+}
+_NOT_AUDITED_FALLBACK = (
+    "the post-optimize geometry audit did NOT run over this design; no absence of a "
+    "geometry finding is meaningful — run check_clearance by hand."
+)
+
+# The SHORT obstruction clause used inside the bounded ``warning`` summary.
+_OBSTRUCTION_CLAUSE = {
+    "folded_system": "the system is folded; the audit is unfolded-only",
+    "clearance_refused": "the clearance audit refused / returned a degraded envelope",
+    "audit_failed": "the clearance audit threw",
+    "no_gaps_audited": (
+        "the clearance audit returned no gaps for a system that has them"
+    ),
+    "qualifier_failed": "the verdict qualifier itself failed",
+}
+_OBSTRUCTION_FALLBACK = "the geometry audit result is missing or unreadable"
+
+# — the STATIC constants the final fail-closed ``except`` returns. Their
+# construction cannot throw (no interpolation over the object that just threw), so the
+# ``except`` path can ALWAYS complete (A14 / the _GRIN_AUDIT_FAILED_MSG precedent).
+_QUALIFIER_FAILED_MSG = (
+    "the optimized design's geometry was NOT audited (the verdict qualifier itself "
+    "failed) — this is NOT a clean bill of health. Audit by hand: check_clearance."
+)
+_QUALIFIER_FAILED_NOT_AUDITED = _NOT_AUDITED_MSG["qualifier_failed"]
+
+# The wholly-static `_unverified` token the fail-closed `except` falls back to when the
+# verdict token itself cannot be read or rendered. It is a real token from the declared
+# vocabulary, so a consumer keyed on the suffix still behaves correctly, and it can never
+# be mistaken for `improved`.
+_STATIC_UNVERIFIED = "improved_unverified"
+
+# D4 — the summary bound. The appended clause NEVER carries a legacy warning body.
+#
+# TWO mechanisms with DIFFERENT jobs, each provable on its own:
+#
+#   SHAPING   `_SUMMARY_MAX_FINDINGS` caps the enumeration (with an explicit "+N more"
+#             so a shortened list never reads as complete), and `_mm` renders every
+#             measured value at a bounded width.
+#   ENFORCING `_SUMMARY_MAX_CHARS` is a real terminal truncation with an explicit
+#             `_SUMMARY_ELIDED` marker.
+#
+# History, because the shape of this is the point. v1 had a findings cap AND a defensive
+# truncation and both were individually INERT — either alone kept the string short, so
+# neither was load-bearing. Round 2 removed the truncation, leaving ONE mechanism that was
+# genuinely testable but was SHAPING pretending to be ENFORCEMENT: the re-verify then
+# produced a 637-char summary from a supported compound envelope (three findings + an
+# obstruction clause + the legacy-key pointer) at ordinary `-1.0` magnitudes, where `{:.3g}`
+# cannot help because the width comes from phrase COUNT, not value width.
+#
+# The answer is not one mechanism or two mutually-masking ones — it is one of EACH, proven
+# SEPARATELY on an input that exceeds the cap: remove the count cap and D4 reddens (the
+# enumeration runs long and the "+N more" disappears); remove the truncation and D4c
+# reddens (the declared cap is exceeded). Neither masks the other, because the compound
+# input overflows even WITH the count cap in place.
+_SUMMARY_MAX_FINDINGS = 3
+_SUMMARY_MAX_CHARS = 600
+_SUMMARY_MORE = "+{n} more"
+# Appended when the ENFORCED truncation fires, so a cut summary is never read as the whole
+# story. Counted inside the cap, never bolted on outside it.
+_SUMMARY_ELIDED = " …[truncated]"
+# The separator between enumerated finding phrases — also the PREFERRED truncation
+# boundary, so a cut summary ends on a WHOLE finding.
+_PHRASE_SEP = "; "
+# The terminal form when not even one whole phrase fits inside the budget. A fragment of a
+# finding is worse than no finding, so we emit nothing measured at all.
+_SUMMARY_UNAVAILABLE = (
+    "the optimized design is physically impossible, but the findings could not be "
+    "rendered within the disclosure limit — read geometry_audit.nonphysical directly and "
+    "run check_clearance." + _SUMMARY_ELIDED
+)
+
+# The legacy ``*_warning`` key a nonphysical KIND points at for full text. Derived from
+# the ``nonphysical`` entries (never from the legacy strings themselves) — R-4: a
+# ``glass_negative`` may have NO legacy string (a negative centre on a non-cemented glass
+# element), so it maps to nothing and the summary is its only carrier.
+_KIND_LEGACY_KEY = {
+    "air_gap_negative": "negative_air_gap_warning",
+    "bfl_negative": "negative_bfl_warning",
+}
+
+
 def _edge_audit_warnings(session, glass_floor, air_floor):
     """0-3 additive STRING keys from ONE ``check_clearance`` on the RESULT.
 
-    ``thin_edge_warning`` / ``buried_center_warning`` / ``negative_bfl_warning``, each
-    present only when firing. Numbers are READ from the returned envelope (agreement
-    with an independent ``check_clearance`` by construction — NOT ``MNEG.Value``, which
-    the SEQ wizard clamps at target and evaluates at Surf1's larger aperture, ~40%
+    0-4 additive legacy STRING keys (``thin_edge_warning`` / ``buried_center_warning`` /
+    ``negative_air_gap_warning`` / ``negative_bfl_warning``, BYTE-IDENTICAL text and
+    triggers, each present only when firing) PLUS — on EVERY exit — the ``geometry_audit``
+    block and, iff ``reason is not None``, ``geometry_not_audited``.
+
+    Numbers are READ from the returned envelope (agreement with an independent
+    ``check_clearance`` by construction — NOT ``MNEG.Value``, which the SEQ wizard clamps
+    at target and evaluates at Surf1's larger aperture, ~40% divergent from
     divergent from ``check_clearance``'s ``min(semi)`` convention). NEVER raises
-    -> ``{}`` on any throw / non-dict / ``ok:false`` / missing field. Runs ONCE.
+
+    NEVER raises, NEVER flips ``ok``, runs ONCE. It NO LONGER returns ``{}``: an absent
+    audit key never meant clean, so a refusal / vacuity / fold / throw is DISCLOSED
+    (``status: "not_audited"`` + a ``reason``), never silent.
     """
     # (§2.4 "NEVER raises -> {} on any throw / non-dict / missing field"): the
     # WHOLE body is guarded, not just the check_clearance CALL. A malformed-but-truthy
@@ -1472,10 +1656,16 @@ def _edge_audit_warnings(session, glass_floor, air_floor):
             session, {"min_glass": glass_floor, "min_air": air_floor}
         )
         if not isinstance(env, dict) or not env.get("ok"):
-            return {}  # degraded / malformed -> no key
+            # step 1 — REPLACES the old `return {}`. A refused / malformed envelope
+            # is an OBSTRUCTION, disclosed; it never reads as a clean bill of health.
+            return _not_audited_keys(
+                "clearance_refused",
+                _basis(env, glass_floor, air_floor),
+            )
 
         out = {}
         gaps = env.get("gaps") or []  # [] on a folded system
+        nonphysical = []
 
         # --- thin_edge_warning: any GLASS gap whose EDGE < that gap's own threshold ---
         thin = [
@@ -1551,6 +1741,74 @@ def _edge_audit_warnings(session, glass_floor, air_floor):
                 "floor authors at weight 1 and can lose to a heavy custom operand."
             )
 
+        # --- step 2: the CONFIRMED-nonphysical collection, from the SAME `gaps`
+        #     list the four legacy strings above were built from (so the structured
+        #     evidence and the legacy text can never disagree about what was measured).
+        #     Positive evidence of badness only: a measured value < 0. Per R-4 this is a
+        #     deliberate SUPERSET of the legacy strings in EXACTLY ONE place — a negative
+        #     CENTRE on a NON-cemented glass element fires no legacy string (buried_center
+        #     covers cemented glass->glass pairs only), so `nonphysical` + the bounded
+        #     `warning` summary are its only carriers. NO 1:1 correspondence test. ---
+        for g in gaps:
+            if not isinstance(g, dict):
+                continue
+            gkind = g.get("kind")
+            if gkind == "air":
+                # The is_back_airgap exclusion is preserved VERBATIM from the clause
+                # above: a negative BACK air gap is owned by negative_bfl_warning, so it
+                # is counted ONCE, as bfl_negative (B13).
+                if g.get("is_back_airgap"):
+                    continue
+                # CENTRE ONLY — and the asymmetry with the glass arm below is DELIBERATE.
+                #
+                # A amendment added a negative-air-EDGE disqualifier here and was
+                # REVERTED in round 3 after the external re-verify falsified it on current
+                # code. A computed negative air edge is NOT soundly a destroyed design:
+                #   * a ZERO-THICKNESS dummy stop — the kind `normalize_stop` itself
+                #     authors (`lens_normalize.py:1086`, thickness 0.0 / radius inf) —
+                #     ahead of a concave front lens computes
+                #     `center 0.0, edge -2.683, edge_approximate False`;
+                #   * a fixed curved all-air dummy computes `center 2.0, edge -0.683`;
+                #   * a conic-fallback row computes `edge -2.05` with
+                #     `edge_approximate True` — an explicitly APPROXIMATE number.
+                # A zero-thickness dummy is a REFERENCE PLANE, not a material boundary:
+                # there is nothing to interpenetrate. Distinguishing a real crossing from a
+                # dummy-plane artifact needs to know whether BOTH bounding surfaces are
+                # physical, and this layer has no sound way to ask. H-4 already ruled that
+                # we do not ship a predicate we cannot soundly establish — a spoofable
+                # oracle is worse than none because it certifies "we checked", and here it
+                # additionally BREAKS `ramp_aperture` on every normalized-stop system (a
+                # default-on path) by rejecting and restoring valid steps.
+                #
+                # The GLASS arm keeps edge AND centre because the objection does not apply
+                # to it: a `kind == "glass"` gap is bounded by real material on both sides
+                # BY CONSTRUCTION, so a negative edge there IS a confirmed interpenetration.
+                #
+                # The real gap is tracked separately; closing it needs a
+                # physical-boundary predicate, likely blocked on the same
+                # clearance-layer honesty work as the positive coverage oracle below.
+                if _finite_below(g.get("center_thickness"), 0.0):
+                    nonphysical.append({
+                        "kind": "air_gap_negative",
+                        "surface": g.get("surface"),
+                        "next_surface": g.get("next_surface"),
+                        "center_thickness": g.get("center_thickness"),
+                    })
+            elif gkind == "glass":
+                measured = {}
+                if _finite_below(g.get("edge_thickness"), 0.0):
+                    measured["edge_thickness"] = g.get("edge_thickness")
+                if _finite_below(g.get("center_thickness"), 0.0):
+                    measured["center_thickness"] = g.get("center_thickness")
+                if measured:
+                    entry = {
+                        "kind": "glass_negative",
+                        "surface": g.get("surface"),
+                        "next_surface": g.get("next_surface"),
+                    }
+                    entry.update(measured)
+                    nonphysical.append(entry)
+
         # --- negative_bfl_warning: image plane in FRONT of the last optical surface ---
         bfd = env.get("global_bfd")
         if not isinstance(bfd, dict):
@@ -1567,6 +1825,44 @@ def _edge_audit_warnings(session, glass_floor, air_floor):
                 "IN FRONT of the last optical surface (rear group / field-flattener may be "
                 "misplaced)."
             )
+            nonphysical.append(
+                {"kind": "bfl_negative", "behind_last_optic": blo}
+            )
+
+        # --- step 3: REASON — the soundly-determinable obstructions ONLY. First
+        #     match wins; the order is final. NOTHING ELSE: no contiguity test, no
+        #     is_back_airgap test, no edge-finiteness test, no asphere_sag_approximate
+        #     test, no BFD-readability test. All DELETED per H-4 (a spoofable coverage
+        #     oracle is worse than no oracle, because it certifies "we checked") — a
+        #     positive coverage oracle is tracked separately as a follow-up. ---
+        raw_gaps = env.get("gaps")
+        if env.get("folded"):
+            reason = "folded_system"                                       # (a), H-1
+        elif not (isinstance(raw_gaps, list) and raw_gaps) and not _too_small_for_gaps(bfd):
+            reason = "no_gaps_audited"                                     # (b), vacuity M-1
+        else:
+            reason = None                                                  # (c)
+
+        # --- step 4: STATUS. A CONFIRMED finding beats unknown at ANY reason (the
+        #     H-1 carve-out), and step 5 still discloses the obstruction. ---
+        if nonphysical:
+            status = _STATUS_NONPHYSICAL
+        elif reason is not None:
+            status = _STATUS_NOT_AUDITED
+        else:
+            status = _STATUS_NO_FINDINGS
+        out["geometry_audit"] = {
+            "status": status,
+            "reason": reason,
+            "nonphysical": nonphysical,
+            "basis": _basis(env, glass_floor, air_floor),
+        }
+        # --- step 5: geometry_not_audited IFF reason is not None — INDEPENDENT of
+        #     status (invariant 4). ---
+        if reason is not None:
+            out["geometry_not_audited"] = _NOT_AUDITED_MSG.get(
+                reason, _NOT_AUDITED_FALLBACK
+            )
 
         # thread the positive audit-coverage + not-audited evidence
         # through the optimize result tail, so a CLEAN-passing GRIN is distinguishable from a
@@ -1580,8 +1876,408 @@ def _edge_audit_warnings(session, glass_floor, air_floor):
         if isinstance(gna, list) and gna:
             out["grin_not_audited"] = gna
         return out
-    except Exception:  # noqa: BLE001 — §2.4: the advisory audit NEVER raises -> {} on any fault
-        return {}
+    except Exception:  # noqa: BLE001 — the audit NEVER raises past this boundary
+        # step * — REPLACES the old `except: return {}`. Built ENTIRELY from STATIC
+        # constants (nothing is interpolated over the object that just threw), so this
+        # path can always complete. A faulted audit is DISCLOSED, never silent.
+        return {
+            "geometry_audit": {
+                "status": _STATUS_NOT_AUDITED,
+                "reason": "audit_failed",
+                "nonphysical": [],
+                "basis": None,
+            },
+            "geometry_not_audited": _NOT_AUDITED_MSG["audit_failed"],
+        }
+
+
+def _basis(env, glass_floor, air_floor):
+    """The ``basis`` block — the floors ACTUALLY used + the config evaluated.
+
+    ``config_evaluated`` is read off the ``check_clearance`` envelope (``None`` when the
+    envelope is unreadable). Pure; never raises.
+    """
+    config_evaluated = env.get("config_evaluated") if isinstance(env, dict) else None
+    return {
+        "min_glass": glass_floor,
+        "min_air": air_floor,
+        "config_evaluated": config_evaluated,
+    }
+
+
+def _too_small_for_gaps(bfd):
+    """The clause-(b) POSITIVE exemption: can we PROVE the system has no gaps?
+
+    ``global_bfd["image_surface"]`` is ``n - 1`` assigned directly from ``n`` in
+    ``clearance._global_bfd`` — it is never derived from a per-surface frame read, so it
+    is the one envelope field a geometry read failure cannot degrade. An image surface
+    below 2 means OBJECT + IMAGE only: there is genuinely no optical gap to audit, so an
+    empty ``gaps`` list is expected, not an obstruction.
+
+    FAIL-CLOSED: missing / non-dict / unreadable / non-integer (bool included) -> False,
+    i.e. we do NOT take the exemption and the empty gap list reads as an obstruction.
+    """
+    if not isinstance(bfd, dict):
+        return False
+    image_surface = bfd.get("image_surface")
+    if isinstance(image_surface, bool) or not isinstance(image_surface, int):
+        return False
+    return image_surface < 2
+
+
+def _not_audited_keys(reason, basis):
+    """The envelope for an obstruction detected with NO confirmed finding."""
+    return {
+        "geometry_audit": {
+            "status": _STATUS_NOT_AUDITED,
+            "reason": reason,
+            "nonphysical": [],
+            "basis": basis,
+        },
+        "geometry_not_audited": _NOT_AUDITED_MSG.get(reason, _NOT_AUDITED_FALLBACK),
+    }
+
+
+def _safe_get(mapping, key):
+    """``mapping.get(key)`` that CANNOT raise — ``None`` on a non-dict or a wedged read.
+
+    "Never raises" is a load-bearing contract in this codebase, and an ``isinstance(...,
+    dict)`` guard does NOT deliver it: a ``dict`` SUBCLASS whose ``.get`` throws passes
+    the isinstance check and escapes. Both audits converged on that gap, so every read of
+    a caller-supplied mapping in the summary helpers goes through here. Fail-closed: an
+    unreadable field reads as absent, never as a value.
+    """
+    if not isinstance(mapping, dict):
+        return None
+    try:
+        return mapping.get(key)
+    except Exception:  # noqa: BLE001 — a wedged mapping read is an ABSENT field
+        return None
+
+
+def _is_qualified(token):
+    """``token in _QUALIFIED`` that can neither raise NOR HANG. Fail-CLOSED.
+
+    ``type(token) is str``, not ``isinstance`` and not a bare ``in``. A guarded ``in`` is
+    not enough: ``in`` invokes ``token.__eq__``, and a caller-supplied ``__eq__`` that
+    returns a non-bool whose ``__bool__`` never returns makes this **HANG** — and no
+    ``except`` can act on a call that does not terminate. Exact-type gating means no
+    caller-controlled dunder ever runs, which removes the entire class (raise AND hang) in
+    one line rather than defending each dunder. DELIBERATE — do not "improve" it back to
+    ``isinstance``, which admits ``str`` subclasses and re-opens exactly this.
+
+    A token that is not exactly ``str`` is NOT qualified, so it gets no constructed suffix
+    and `improved` derives False — the same direction every other uncertainty resolves.
+    """
+    if type(token) is not str:
+        return False
+    return token in _QUALIFIED
+
+
+# The `_unverified` token for each qualified verdict, resolved from a STATIC table.
+_UNVERIFIED_TOKEN = {token: f"{token}_unverified" for token in _QUALIFIED}
+
+
+def _unverified_token(token):
+    """The `<verdict>_unverified` token, built WITHOUT interpolating ``token``.
+
+    The "build `except`-path messages from static constants" rule, applied one level out:
+    the TOKEN is also constructed inside the fail-closed `except`, so an
+    f-string over a caller-supplied object re-raises straight out of the handler. Measured
+    sibling: a verdict object that compares EQUAL to ``"improved"`` (so `_is_qualified`
+    passes) but raises from ``__format__``.
+
+    So the suffix is RESOLVED from a STATIC per-token map rather than interpolated —
+    nothing derived from ``token`` ever reaches the output string.
+
+    ``type(token) is str`` gates the lookup, for the same reason `_is_qualified` does: an
+    earlier cut compared the token against the known literals, which invokes a
+    caller-supplied ``__eq__`` and can **HANG** (a non-bool return whose ``__bool__``
+    never terminates) where no ``except`` can help. Exact-type gating means the only
+    objects that reach ``==`` or ``__hash__`` are real ``str``s. DELIBERATE — not
+    ``isinstance``, which admits subclasses and re-opens the class.
+
+    The terminal fallback exists only so this function is total; it is a DECLARED token
+    from the 7-value vocabulary, so a consumer keyed on the `_unverified` suffix still
+    behaves correctly and nothing can read as `improved`.
+    """
+    if type(token) is not str:
+        return _STATIC_UNVERIFIED
+    return _UNVERIFIED_TOKEN.get(token, _STATIC_UNVERIFIED)
+
+
+def _summary_for(status, ga):
+    """The BOUNDED one-sentence ``warning`` headline for a non-``no_findings`` status.
+
+    Built from ``geometry_audit.nonphysical`` — NEVER from the legacy ``*_warning``
+    strings, so the R-4 superset case (a negative centre on a non-cemented glass element,
+    which fires no legacy string) is ALWAYS disclosed. The full legacy body is never
+    inlined; the summary only POINTS at the key that carries it (D4), and the whole
+    appended clause is capped at ``_SUMMARY_MAX_CHARS``.
+
+    Per / D6, a CONFIRMED finding and an OBSTRUCTION are BOTH carried when both are
+    present. Pure; NEVER raises — every read of the caller-supplied mapping goes through
+    `_safe_get`, so a malformed entry (including a dict subclass whose `.get` throws)
+    degrades to a generic phrase rather than escaping.
+    """
+    reason = _safe_get(ga, "reason")
+    entries = _safe_get(ga, "nonphysical")
+    if not isinstance(entries, list):
+        entries = []
+
+    if status == _STATUS_NONPHYSICAL and entries:
+        parts = []
+        for entry in entries[:_SUMMARY_MAX_FINDINGS]:
+            parts.append(_finding_phrase(entry))
+        if len(entries) > _SUMMARY_MAX_FINDINGS:
+            parts.append(
+                _SUMMARY_MORE.format(n=len(entries) - _SUMMARY_MAX_FINDINGS))
+        summary = (
+            "the optimized design is physically impossible: "
+            + "; ".join(parts)
+            + ". The optimizer's result is still LOADED — reload a checkpoint."
+        )
+        if reason is not None:
+            summary += (
+                " ALSO: the per-gap clearance audit did NOT run ("
+                + _OBSTRUCTION_CLAUSE.get(reason, _OBSTRUCTION_FALLBACK)
+                + "), so no absence of a gap finding is meaningful."
+            )
+        keys = []
+        for entry in entries:
+            key = _KIND_LEGACY_KEY.get(_safe_get(entry, "kind"))
+            if key and key not in keys:
+                keys.append(key)
+        if keys:
+            summary += " Full text in " + ", ".join(keys) + "."
+        return _enforce_cap(summary)
+
+    # not_audited / an unknown or missing status: the audit did NOT establish anything.
+    return _enforce_cap(
+        "the optimized design's geometry was NOT audited ("
+        + _OBSTRUCTION_CLAUSE.get(reason, _OBSTRUCTION_FALLBACK)
+        + ") — this is NOT a clean bill of health. Audit by hand: check_clearance."
+    )
+
+
+def _enforce_cap(summary):
+    """The ENFORCING half of the D4 bound: a SAFE-BOUNDARY terminal truncation.
+
+    `_SUMMARY_MAX_FINDINGS` and `_mm` SHAPE the summary; they do not enforce anything —
+    measured, a supported compound envelope (three findings + an obstruction clause + the
+    legacy-key pointer) reached 637 characters at ordinary magnitudes. This is the
+    backstop that makes `_SUMMARY_MAX_CHARS` a guarantee rather than a hope.
+
+    **It cuts at a BOUNDARY, never at an arbitrary character index.** The first cut did
+    slice by index, and that was a silent-wrong introduced by a cosmetic fix: three
+    findings whose last carried ``center_thickness = -1e308`` rendered
+
+        ... -> (centre -1e+3 …[truncated]
+
+    ``_mm`` produced ``-1e+308``; the slice cut it to ``-1e+3`` — **305 orders of
+    magnitude** — and the marker, which only says "something was elided", said nothing
+    about the NUMERIC TOKEN being incomplete. Inside a warning whose entire job is to
+    report physically impossible MEASUREMENTS, a truncation that can change a magnitude
+    (or sever a minus sign and flip an apparent sign) is worse than a long string.
+
+    So the cut point is searched BACKWARDS from the budget:
+      1. the last ``_PHRASE_SEP`` — the summary then ends on a WHOLE finding;
+      2. failing that, the last WHITESPACE — a rendered number never contains a space, so
+         this still cannot sever a numeric token;
+      3. failing that, `_SUMMARY_UNAVAILABLE` — a fragment of a finding is worse than no
+         finding, so nothing measured is emitted at all.
+
+    A truncated summary is always MARKED (`_SUMMARY_ELIDED`), and the marker is counted
+    INSIDE the cap rather than bolted on outside it.
+
+    ``type(summary) is str``, not ``isinstance``: a ``str`` SUBCLASS can override
+    ``__len__`` (raising straight out of this function), ``__getitem__`` or ``__add__``
+    (silently discarding the marker — measured: a 700-char subclass returned an
+    untruncated string with no marker). Exact-type gating removes the whole class in one
+    line instead of defending each dunder. DELIBERATE — do not "improve" it back to
+    ``isinstance``. Never raises.
+    """
+    if type(summary) is not str:
+        return _SUMMARY_UNAVAILABLE
+    if len(summary) <= _SUMMARY_MAX_CHARS:
+        return summary
+    budget = _SUMMARY_MAX_CHARS - len(_SUMMARY_ELIDED)
+    window = summary[:budget]
+    cut = window.rfind(_PHRASE_SEP)          # (1) end on a whole finding
+    if cut <= 0:
+        cut = window.rfind(" ")              # (2) never mid-token
+    if cut <= 0:
+        return _SUMMARY_UNAVAILABLE          # (3) nothing whole fits
+    return summary[:cut] + _SUMMARY_ELIDED
+
+
+def _mm(value):
+    """A WIDTH-BOUNDED mm rendering — the per-phrase half of the D4 bound.
+
+    A raw float repr can run to 20 characters (``-0.10900000000000001``), so a fixed
+    ``{:.3f}`` render is what makes an ordinary phrase's length a constant.
+
+    ``{:.3f}`` ALONE is not a bound, though: it is POSITIONAL, so a large-magnitude but
+    perfectly FINITE value expands without limit — ``f"{-1e308:.3f}"`` is 313 characters,
+    and `_finite_below` admits any finite negative, so three gaps plus a BFD at that
+    magnitude produced a 1285-character warning against a 600-char declared cap. That is
+    not hypothetical: `behind_last_optic` is derived from a global vertex Z, and the
+    DOCUMENTED infinite-conjugate vertex sentinel is 1e10 (gotcha) — which already
+    leaves only ~20 characters of headroom.
+
+    So the render switches to EXPONENTIAL at ``|v| >= 1e6``, which caps the rendered
+    width at ~10 characters for ANY finite magnitude while leaving every ordinary
+    millimetre-scale value byte-identical to the ``{:.3f}`` form. ONE mechanism per axis:
+    ``_SUMMARY_MAX_FINDINGS`` bounds the COUNT, this bounds the WIDTH. Never raises.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            if abs(value) >= 1e6:
+                return f"{value:.3g}"
+            return f"{value:.3f}"
+        except Exception:  # noqa: BLE001 — a pathological numeric -> a bounded fallback
+            return "?"
+    return "?"
+
+
+def _finding_phrase(entry):
+    """One bounded phrase for ONE ``nonphysical`` entry. NEVER raises.
+
+    Every field read goes through `_safe_get`, so an entry whose `.get` itself throws (a
+    dict subclass) degrades to the generic phrase instead of escaping the summary builder.
+    """
+    if not isinstance(entry, dict):
+        return "an unreadable nonphysical finding"
+    kind = _safe_get(entry, "kind")
+    surface = _safe_get(entry, "surface")
+    next_surface = _safe_get(entry, "next_surface")
+    if kind == "air_gap_negative":
+        return (
+            f"interpenetrating interior AIR gap S{surface}->S{next_surface} "
+            f"(centre {_mm(_safe_get(entry, 'center_thickness'))} mm)"
+        )
+    if kind == "glass_negative":
+        measured = _safe_get(entry, "edge_thickness")
+        label = "edge"
+        if measured is None:
+            measured = _safe_get(entry, "center_thickness")
+            label = "centre"
+        return (
+            f"negative interior glass S{surface}->S{next_surface} "
+            f"({label} {_mm(measured)} mm)"
+        )
+    if kind == "bfl_negative":
+        return (
+            "negative back focal distance "
+            f"({_mm(_safe_get(entry, 'behind_last_optic'))} mm)"
+        )
+    return f"a nonphysical finding ({kind})"
+
+
+def _qualify_verdict(result):
+    """ — qualify the merit verdict against the CONFIRMED geometry evidence.
+
+    TWO DELIBERATELY INDEPENDENT rules:
+
+    1. **the VERDICT token**, applied ONLY to ``_QUALIFIED`` (``improved`` / ``stable``).
+       ``diverged`` already says reject, so it needs no suffix.
+    2. **the WARNING**, applied to EVERY merit verdict (including ``diverged`` and
+       unknown tokens). Disclosure is about whether the envelope is SILENT about loaded
+       wreckage — and it never should be, on any verdict.
+
+    ``ok`` NEVER flips. ``merit_verdict`` always carries the raw ``classify_verdict``
+    answer, so no caller loses the old fact. ``improved`` stays the SAME derived
+    expression as ``:1087`` / ``:1340``. NEVER raises: the final fail-closed ``except``
+    resolves toward ``_unverified`` + disclosure, never toward ``improved``.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    # places this read OUTSIDE the fail-closed try DELIBERATELY: the `except` arm
+    # needs `merit_verdict` to build its own token, so it cannot be swallowed by it. It
+    # still must not ESCAPE (a dict subclass whose `.get` throws), so it gets its own
+    # guard — fail-closed to None, which is not in _QUALIFIED, so the verdict is left
+    # untouched and `improved` derives False. Semantics of preserved exactly.
+    merit_verdict = _safe_get(result, "verdict")     # plain-dict read, OUTSIDE the try
+
+    try:
+        ga = result.get("geometry_audit")
+        status = ga.get("status") if isinstance(ga, dict) else None
+
+        # --- rule 1: the VERDICT token. Applies only to the qualified set. ---
+        # `_is_qualified(...)`, not a bare `in`: `in` invokes the token's own `__eq__`,
+        # and these three tests sit INSIDE the try — which catches a raise but cannot
+        # catch a HANG (an `__eq__` returning a non-bool whose `__bool__` never returns).
+        # The helper gates on exact type first, so no caller-controlled dunder runs at
+        # all. Semantically identical for every real `str` token.
+        if _is_qualified(merit_verdict) and status == _STATUS_NONPHYSICAL:
+            verdict = f"{merit_verdict}_unphysical"
+        elif _is_qualified(merit_verdict) and status == _STATUS_NO_FINDINGS:
+            verdict = merit_verdict
+        elif _is_qualified(merit_verdict):
+            # not_audited, None, an unknown status, a non-dict geometry_audit: we cannot
+            # assert the design is fine, so we do not.
+            verdict = f"{merit_verdict}_unverified"
+        else:
+            verdict = merit_verdict           # diverged / None / unknown: UNTOUCHED
+
+        # --- rule 2: the WARNING. Applies to EVERY merit verdict (Target-2 HIGH). ---
+        summary = (
+            None if status == _STATUS_NO_FINDINGS else _summary_for(status, ga)
+        )
+    except Exception:  # noqa: BLE001 — final FAIL-CLOSED (never toward "improved")
+        # `_is_qualified`, not a bare `in`: a token whose `__eq__` throws (or HANGS)
+        # would otherwise re-raise out of the except and defeat the never-raise contract.
+        #
+        # `_unverified_token`, not an f-string: this was fix for a token that
+        # PASSED `_is_qualified` but raised from `__format__`. Round 4's exact-type gate
+        # in `_is_qualified` SUBSUMES it — only an exact `str` now reaches here, and a
+        # `str` always formats — so the no-interpolation property is DEFENSE IN DEPTH,
+        # measured inert at this call site. It is kept because `_unverified_token`'s own
+        # TOTAL contract is load-bearing and separately proven (it is called with junk in
+        # its own tests, and removing its guards reddens them); dropping the helper to
+        # re-inline an f-string would trade a proven total function for a bare one.
+        # Fail-closed either way: never a constructed suffix that claims more than we read.
+        verdict = (
+            _unverified_token(merit_verdict)
+            if _is_qualified(merit_verdict) else merit_verdict
+        )
+        summary = _QUALIFIER_FAILED_MSG                       # STATIC constant
+        result["geometry_audit"] = {                          # STATIC literal
+            "status": _STATUS_NOT_AUDITED,
+            "reason": "qualifier_failed",
+            "nonphysical": [],
+            "basis": None,
+        }
+        result["geometry_not_audited"] = _QUALIFIER_FAILED_NOT_AUDITED
+
+    result["merit_verdict"] = merit_verdict
+    result["verdict"] = verdict
+    # A token that is not exactly `str` cannot be trusted to answer `== "improved"`
+    # HONESTLY — an object can simply RETURN True — so it never reaches the derivation.
+    #
+    # MEASURED, and the reason this gate exists: once `_is_qualified` became exact-type
+    # gated, a verdict object whose `__eq__` returns `other == "improved"` was no longer
+    # qualified, so the verdict was (correctly) left untouched — and then sailed through
+    # the fail-closed `except` arm to produce `improved: True` on a `qualifier_failed`
+    # envelope. Hardening one helper opened a hole one line down; both halves are needed.
+    #
+    # The envelope stays HONEST: `result["verdict"]` keeps the caller's object verbatim
+    # ('s "unknown token untouched" rule). Only the DERIVATION is fail-closed. This
+    # also supersedes the previous try/except here — after the gate, `verdict` is always
+    # exactly `str`, so the comparison can no longer raise and a guard would be dead code.
+    if type(verdict) is not str:
+        verdict = _STATIC_UNVERIFIED
+    result["improved"] = (verdict == "improved")   # the SAME expression as :1087/:1340
+    if summary is not None:
+        try:
+            result["warning"] = _merge_warning(result.get("warning"), summary)
+        except Exception:  # noqa: BLE001 — a MALFORMED pre-existing warning (a non-str,
+            # or one whose `__bool__` throws) must never cost the DISCLOSURE. The summary
+            # is the load-bearing half; the unusable prior value is dropped, not the
+            # finding.
+            result["warning"] = summary
+    return result
 
 
 def _mrd_classify_config(poly_env, pw_env, config):
@@ -1753,7 +2449,7 @@ def _merit_reality_divergence_warning(session, merit_scalar):
 
 
 # =========================================================================== #
-# GRIN — the post-run index audit (detect side, §4). Additive STRING keys,
+# GRIN — the post-run index audit (detect side). Additive STRING keys,
 # never flips ``ok``, never overwrites a base key, runs ONCE per success on BOTH tails.
 # =========================================================================== #
 # §4.2 — the STATIC audit-failed constant (its construction cannot throw, so the outer
@@ -2025,6 +2721,30 @@ OPTIMIZE_SPEC = ToolSpec(
         "Run a bounded local optimization (the closed loop): preflight, run cycles, "
         "and classify the merit verdict (improved/stable/diverged) from the "
         "optimizer's own initial-vs-current pair, so a no-op never reads as improved. "
+        "verdict has 7 values: improved, stable, diverged, improved_unphysical, "
+        "improved_unverified, stable_unphysical, stable_unverified. improved means the "
+        "merit FELL; stable means it did NOT move outside tolerance (an exact no-op or a "
+        "sub-tolerance drift) — and BOTH now additionally mean the geometry audit "
+        "returned NO confirmed nonphysical finding. A *_unphysical suffix means a "
+        "confirmed physically-impossible measurement — exactly three: a negative interior "
+        "air-gap CENTRE, a negative glass edge or centre, and a negative back focal "
+        "distance. A negative interior air-gap EDGE is deliberately NOT among them (it "
+        "cannot be told from a zero-thickness dummy/reference plane at this layer; see "
+        "), so a *_unphysical verdict is not "
+        "a complete physicality check. A *_unverified "
+        "suffix means the audit did not establish anything — either it provably did not "
+        "run (folded system / refused / threw / returned no gaps) or its result could not "
+        "be READ (reason 'qualifier_failed'); read geometry_audit.reason to tell which. "
+        "merit_verdict "
+        "always carries the RAW merit answer, and geometry_audit carries the evidence "
+        "(status no_findings|nonphysical|not_audited + reason + nonphysical + basis). "
+        "LIMITATION: geometry_audit.status=='no_findings' means the audit RAN and "
+        "returned no confirmed nonphysical finding — it does NOT mean the geometry is "
+        "sound. optimize cannot currently establish that the clearance audit ran over "
+        "readable inputs, so absence of a finding is not proof of clean geometry; for a "
+        "design you are about to keep, still run check_clearance and inspect the layout. "
+        "Merit values are only comparable across runs that used the SAME merit function "
+        "— rebuild the merit and improvement_pct is not comparable to the prior run. "
         "algorithm defaults to DLS (damped least squares); OD is orthogonal descent; "
         "algorithm='Hammer' runs a wall-time-bounded global search (run_time_m minutes, "
         "default 1.0, cap 10.0) that escapes a shallow local minimum and best-restores if "

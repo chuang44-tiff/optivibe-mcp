@@ -100,7 +100,7 @@ from .mc_stats import (
     wilson_interval,
 )
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 __all__ = [
     "__version__",

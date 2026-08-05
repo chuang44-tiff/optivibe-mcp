@@ -19,8 +19,10 @@ Ceiling recovery leaves the design at the LAST traceable, fully-optimized apertu
 (``last_good``) via a TWO-TIER revert: a ZERO-mutation optimize failure
 (``optimize_merit_uncomputable`` ceiling / a preflight refusal — the DLS never ran)
 reverts only the aperture; but a CYCLES-RUN failure (error_family ``optimize_run_failed``
-OR verdict ``diverged`` — the DLS iterated + MUTATED the LDE geometry before aborting,
-optimize_run.py:763-773) additionally RESTORES the geometry from a per-trial
+OR verdict ``diverged`` OR a COMPLETED-but-not-certified step, ``reason
+design_not_certified`` — the DLS iterated + MUTATED the LDE geometry, then either aborted
+(optimize_run.py:763-773) or produced a design the geometry audit did not certify
+physical) additionally RESTORES the geometry from a per-trial
 SaveAs->LoadFile checkpoint (read-back proven), so ``final_value``/``final_merit`` never
 silently misreport a live geometry that is the failed iterate. A restore that itself
 fails is disclosed LOUDLY (``geometry_uncertain``), never a clean last_good. The
@@ -31,8 +33,9 @@ Precondition (like ``optimize``): variables + a merit are already set. The handl
 NEVER raises past its boundary (a module-local body ``try/except -> error_envelope``,
 carrying the partial ``ramp_trace`` + ``last_good`` so nothing is lost).
 
-Live ZOS-API integration: exercised by a MODEST EPD ramp to a real ceiling; unit-tested
-against the shared-state FLAT-envelope fakes (the mock-must-match-live guard).
+Live ZOS-API integration: exercised by the live friction-cycle suite (a MODEST
+EPD ramp to a real ceiling); unit-tested against the shared-state FLAT-envelope fakes
+in the adversarial ramp-aperture suite (the mock-must-match-live guard).
 """
 import glob
 import math
@@ -202,7 +205,8 @@ def _variable_fingerprint(system):
     """
     # COVERAGE NOTE: the restore proof is exactly as COMPLETE as ``_variable_inventory``,
     # which does NOT yet enumerate CB coordinate-break Par-cell variables (``set_cb_variable``
-    # decenter/tilt) — a pre-existing enumerator limitation. The ramp inherits the CB fix for free the
+    # decenter/tilt) — a pre-existing enumerator limitation tracked in the housekeeping
+    # backlog. The ramp inherits the CB fix for free the
     # moment that lands (no change here). Until then this is not a live hazard: a CB-Par-ONLY
     # design is already refused ``no_variables`` at the ramp precondition/preflight, and a
     # MIXED design's covered DOFs (LDE/asphere/MCE) co-move with the CB DOFs under a single
@@ -456,7 +460,8 @@ def _ramp_impl(session, params, ctx):
     def _restore_geometry(value):
         """Restore last-good geometry+aperture after a CYCLES-RUN optimize failure.
 
-        A ``diverged`` / ``optimize_run_failed`` step means the DLS iterated + MUTATED
+        A ``diverged`` / ``optimize_run_failed`` / ``design_not_certified`` step means the
+        DLS iterated + MUTATED
         the LDE before aborting, so an aperture-only revert would leave the live geometry
         as the failed iterate while the tool reports ``final_value``/``final_merit`` =
         last_good (a silent misreport). This LoadFile-restores the checkpoint, read-back
@@ -538,9 +543,21 @@ def _ramp_impl(session, params, ctx):
                 (not r.get("ok"))
                 and r.get("error_family") == "optimize_merit_uncomputable"
             )
-            diverged = bool(r.get("ok")) and r.get("verdict") == "diverged"
+            # Key the accept gate on the
+            # EVIDENCE, not on the verdict token alone. TWO clauses reading DIFFERENT
+            # sources, both fail-closed, so BOTH disagreement directions REJECT — the ramp
+            # must not depend on the qualifier being correct.
+            #   merit_ok    — an ALLOW-list: an unknown/future token is not accepted.
+            #   geometry_ok — a POSITIVE test: an absent / unknown geometry_audit is not
+            #                 accepted (a denylist `!= "nonphysical"` would fail OPEN).
+            verdict = r.get("verdict")
+            ga = r.get("geometry_audit")
+            ga_status = ga.get("status") if isinstance(ga, dict) else None
+            merit_ok = verdict in ("improved", "stable")
+            geometry_ok = (ga_status == "no_findings")
+            accept = bool(r.get("ok")) and merit_ok and geometry_ok
 
-            if r.get("ok") and not diverged:
+            if accept:
                 # accept: this aperture optimized cleanly -> advance last_good, re-grow step.
                 cur = last_good = trial
                 ctx["last_good"] = last_good
@@ -563,7 +580,11 @@ def _ramp_impl(session, params, ctx):
             else:
                 reason = (
                     "merit_uncomputable" if uncomputable
-                    else "diverged" if diverged
+                    else "diverged" if verdict == "diverged"
+                    # a COMPLETED run whose design is not certified physical: the step
+                    # ran cycles and mutated the LDE, so it takes the geometry-restore
+                    # arm below — never the aperture-only revert.
+                    else "design_not_certified" if (r.get("ok") and not accept)
                     else "run_threw" if r.get("_threw")
                     else "run_failed"
                 )
@@ -574,10 +595,22 @@ def _ramp_impl(session, params, ctx):
                 # cycles -> the geometry is untouched -> an aperture-only revert suffices
                 # (a needless LoadFile churns the seat).
                 cycles_run_failure = (
-                    diverged or r.get("error_family") == "optimize_run_failed"
+                    verdict == "diverged"
+                    or (r.get("ok") and not accept)
+                    or r.get("error_family") == "optimize_run_failed"
                 )
                 trace.append({
                     "value": trial, "set_ok": True, "opt_ok": False,
+                    "verdict": verdict,
+                    # WHY the geometry gate rejected: `no_findings` vs `nonphysical` vs
+                    # `not_audited` + the audit's own `reason`. Without it a folded system
+                    # (the per-gap clearance audit does not yet run on a folded system, so
+                    # every step reads `not_audited`) reads as "the design was bad", which
+                    # it is not.
+                    "geometry_status": ga_status,
+                    "geometry_reason": (
+                        ga.get("reason") if isinstance(ga, dict) else None
+                    ),
                     "reason": reason, "error_family": r.get("error_family"),
                     "cycles_run_failure": cycles_run_failure,
                 })
@@ -654,7 +687,15 @@ RAMP_APERTURE_SPEC = ToolSpec(
         "from_value, step, min_step, max_steps, design_name (checkpoint each accepted "
         "step), require_free_stop/auto_normalize (forwarded to optimize). Returns the "
         "ramp trace + reached_target/ceiling; leaves the design at the last optimized "
-        "aperture. Gotcha: variables + a merit must be set first (like optimize)."
+        "aperture. A step is accepted only when optimize's verdict is improved/stable AND "
+        "geometry_audit.status is no_findings — a step that produced a nonphysical design, "
+        "or one the audit could not run over, is REJECTED with reason "
+        "design_not_certified and the geometry restored (the trace carries "
+        "geometry_status/geometry_reason so you can tell 'bad design' from 'not audited'). "
+        "Gotcha: variables + a merit must be set first (like optimize). Gotcha: on a FOLDED "
+        "(mirror / coordinate-break) system the per-gap clearance audit does not run, so "
+        "every step reads not_audited and never passes the no_findings accept gate — a "
+        "folded design cannot ramp until that audit is extended to folded geometry."
     ),
 )
 
