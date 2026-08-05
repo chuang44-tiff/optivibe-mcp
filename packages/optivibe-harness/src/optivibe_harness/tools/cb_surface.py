@@ -44,6 +44,61 @@ _CB_PROOF = "cb_proof"            # the global-frame gate family
 _CB_PARAM = "cb_param"            # a bad param value family
 _CB_VARIABLE_INT = "cb_variable_integer_cell"  # §3 refusal family
 
+# The recovery text for a PART-WAY ``add_coordinate_break``.
+#
+# It must NOT assert that the surface IS now a CoordinateBreak: on the
+# R0 path — a ``ChangeType`` that threw — that outcome is UNKNOWN, and this cycle
+# exists to stop a surface certifying more than it measured. The certainty is carried
+# by the FIELD (``committed`` = read-back-confirmed, ``attempted`` = outcome unknown),
+# never by the prose, and the prose sends the caller to ``read_surface`` to find out.
+#
+# It must also NAME THE COST of each recovery route: the re-drive fixes
+# the coordinate break but does NOT restore the surface's pre-call optical role, the
+# reload discards every edit made since the last save, and a design that was never
+# saved has NEITHER route. The draft offered the reload as if it were free.
+#
+# The LEAD-IN is PER-PATH (/ C2-3). "authored PART-WAY" is a CLAIM
+# that something landed; on the path where ``committed`` is EMPTY nothing has read back
+# and the only thing observed is that a call threw. Serving the PART-WAY lead-in there
+# is the prose over-claiming exactly what the two-ledger split was built to stop. The
+# TAIL (read-back-first, the two routes, their costs, the never-saved case) is IDENTICAL
+# on both paths — this is a per-path lead-in, NOT a deletion of the phrase.
+_CB_RECOVERY_PARTWAY = (
+    "the coordinate break was authored PART-WAY: `committed` lists the sub-steps that "
+    "READ BACK as done; `attempted` (present only when it applies) lists a sub-step "
+    "whose outcome is UNKNOWN because the call threw during it. "
+)
+_CB_RECOVERY_UNCONFIRMED = (
+    "NO sub-step of this coordinate break read back as done (`committed` is empty) and "
+    "one sub-step's outcome is UNKNOWN because the call threw during it (`attempted`), "
+    "so whether the surface was mutated AT ALL is not established. "
+)
+_CB_RECOVERY_TAIL = (
+    "Read the surface back "
+    "with read_surface(surface) before deciding — if it reads CoordinateBreak the "
+    "system will also read FOLDED (check_clearance / get_first_order). To recover, "
+    "EITHER re-drive add_coordinate_break on the same surface with corrected values "
+    "(this fixes the coordinate break; it does NOT restore the surface's pre-call "
+    "optical role), OR load_design your saved baseline, which DISCARDS every edit made "
+    "since that save. If this design was never saved, neither route restores the "
+    "pre-call state — save_snapshot before authoring coordinate breaks."
+)
+_CB_RECOVERY = _CB_RECOVERY_PARTWAY + _CB_RECOVERY_TAIL
+
+
+def _cb_recovery(committed, attempted):
+    """The CB recovery text whose LEAD-IN matches what the ledgers establish (C2-3).
+
+    ``committed`` empty AND ``attempted`` non-empty is the one path where NOTHING read
+    back — claiming the coordinate break "was authored PART-WAY" there asserts a
+    mutation the code never observed. Everywhere else at least one sub-step DID read
+    back, so "authored PART-WAY" is TRUE and keeps being served (``test_x4c`` pins that
+    complement: this is a per-path lead-in, not a blanket strip).
+    """
+    if attempted and not committed:
+        return _CB_RECOVERY_UNCONFIRMED + _CB_RECOVERY_TAIL
+    return _CB_RECOVERY
+
 
 # --------------------------------------------------------------------------- #
 # Shared validation helpers.
@@ -135,30 +190,74 @@ def add_coordinate_break(session, params):
     the boundary.
     """
     params = _require_dict(params)
+    # TWO ledgers, threaded exactly as ``add_return_cb`` threads one. There
+    # is NO rollback (DQ-4: a SaveAs checkpoint un-blesses the loaded design and a
+    # targeted value-restore silently drops a Fixed solve) — what ships instead is an
+    # HONEST disclosure of what was left behind, with the CERTAINTY split across the
+    # two ledgers: ``committed`` holds only read-back-CONFIRMED sub-steps, ``attempted``
+    # holds a sub-step whose outcome is unknown because the call threw during it.
+    committed, attempted = [], []
     try:
-        return _add_coordinate_break_impl(session, params)
+        return _add_coordinate_break_impl(session, params, committed, attempted)
     except ToolParamError as exc:
-        return error_envelope("add_coordinate_break", _CB_PARAM, str(exc))
+        return error_envelope(
+            "add_coordinate_break", _CB_PARAM, str(exc),
+            **_partial_state_fields(
+                committed, _cb_recovery(committed, attempted), attempted),
+        )
     except SurfaceWriteError as exc:
         return error_envelope(
             "add_coordinate_break", getattr(exc, "error_family", "surface_write"),
             str(exc), field=getattr(exc, "field", None),
             surface=getattr(exc, "surface", None),
+            **_partial_state_fields(
+                committed, _cb_recovery(committed, attempted), attempted),
         )
     except Exception as exc:  # noqa: BLE001 — a raw engine throw -> surface_write (L26)
         return error_envelope(
             "add_coordinate_break", "surface_write",
             f"unexpected engine fault authoring the coordinate break ({exc!r}); "
             "refusing rather than shipping an unverified surface",
+            **_partial_state_fields(
+                committed, _cb_recovery(committed, attempted), attempted),
         )
 
 
-def _add_coordinate_break_impl(session, params):
+def _add_coordinate_break_impl(session, params, committed, attempted):
     system = session.system
     lde = system.LDE
 
     surface = _lc._require_int_index(params, "surface")
     _surface_in_geometry_range(lde, surface)
+
+    n = int(lde.NumberOfSurfaces)
+    # The geometry firewall (_surface_in_geometry_range -> _lens_common._require_geometry_index)
+    # allows N-1, which is correct for set_surface/substitute_glass and WRONG here: a CB at
+    # the IMAGE surface has no downstream frame to verify, so _verify_global_frame refuses
+    # AFTER the retype and all six cell writes have already landed. Both sibling tools
+    # already carry this refusal (set_mirror, set_diffraction_grating) and fold_beam refuses
+    # > n-2 outright; add_coordinate_break was the only member of its family missing it.
+    # Refuse HERE — zero mutation.
+    #
+    # The "do NOT use N-2" clause is NOT padding: the probe measured
+    # add_coordinate_break(surface=7) SUCCEEDING while destroying the design (EFFL
+    # 50.04 -> 119.88, field-1 RMS 5.47 -> 2763.66 um). This tool RETYPES in place, it
+    # does not insert, so the obvious remedial advice trades a loud failure for a silent
+    # one. The message names insert_surface instead; OF-11 measured the capability cost
+    # of that route at ZERO (a byte-identical optical system, proof_ok true).
+    if surface == n - 1:
+        raise ToolParamError(
+            f"surface {surface} is the IMAGE surface; a coordinate break there has no "
+            "downstream surface, so its global frame cannot be verified — refusing "
+            "BEFORE any mutation. add_coordinate_break RETYPES a surface in place, it "
+            f"does NOT insert, so authoring at surface {n - 2} instead MAY silently "
+            "destroy a live optic — this tool never READ that surface, so its optical "
+            "role is unmeasured; what IS measured (the probe 4.2) is that the retype "
+            "succeeds while destroying a design: add_coordinate_break(surface=7) on a "
+            "real Cooke triplet returned ok:true with EFFL 50.04 -> 119.88 and field-1 "
+            f"RMS 5.47 -> 2763.66 um. Use insert_surface(at={n - 1}) to make room, then "
+            f"add_coordinate_break on the NEW surface {n - 1}."
+        )
 
     written = {
         "decenter_x": _finite_number(params.get("decenter_x", 0.0), "decenter_x"),
@@ -172,8 +271,31 @@ def _add_coordinate_break_impl(session, params):
     # ChangeType -> CoordinateBreak (THROW-guarded -> surface_write) + read-back proof.
     cb_member = _cb._surface_type_coordinate_break(system)
     row = lde.GetSurfaceAt(surface)
+    # The settings READ and the retype MUTATION are different
+    # operations and get different ledger treatment. ``GetSurfaceTypeSettings`` is a
+    # read: if it throws, ``ChangeType`` was NEVER attempted, so filing the retype as
+    # "outcome UNKNOWN" there tells the user its outcome is unknown when it provably
+    # never ran. The read is guarded WITHOUT a ledger entry -> ``partial_state: False``,
+    # which is true and matches the refusal message served below.
     try:
         settings = row.GetSurfaceTypeSettings(cb_member)
+    except Exception as exc:  # noqa: BLE001 — a settings READ throw, zero mutation
+        raise SurfaceWriteError(
+            f"could not read the CoordinateBreak surface-type settings for surface "
+            f"{surface} ({exc!r}); the retype was NEVER attempted — refusing rather "
+            "than authoring on an un-retyped surface",
+            field="surface_type_settings", intended="CoordinateBreak", actual=None,
+            surface=surface,
+        ) from exc
+    # LOAD-BEARING: file the retype as ATTEMPTED **before** the
+    # call that can mutate. R0 is the one path where the retype's outcome is genuinely
+    # unknown — a ChangeType that threw may or may not have mutated the row — and a bare
+    # ``partial_state: False`` there would be a fresh false-clean. It is filed under
+    # ``attempted``, NEVER ``committed``: nothing has read back yet.
+    attempted.append(
+        f"changetype(surface={surface}) — outcome UNKNOWN if this call threw"
+    )
+    try:
         row.ChangeType(settings)
     except Exception as exc:  # noqa: BLE001 — a ChangeType THROW -> surface_write
         raise SurfaceWriteError(
@@ -194,10 +316,32 @@ def _add_coordinate_break_impl(session, params):
             field="surface_type", intended="CoordinateBreak", actual=None,
             surface=surface,
         )
+    # The retype READ BACK as a CoordinateBreak, so its outcome is no longer unknown:
+    # promote it to ``committed`` and CLEAR ``attempted``. Without the clear, every
+    # later failure envelope (a cell write, the frame gate) would carry a permanent
+    # false "outcome unknown" for a retype that provably took (T37b).
+    committed.append(f"changetype(surface={surface}) CONFIRMED")
+    attempted.clear()
 
     # (a) write the six Par cells type-aware, each read-back-proven (write_cb_cell).
+    #
+    # The SAME two-ledger discipline the
+    # retype uses, applied uniformly. ``write_cb_cell`` WRITES FIRST and reads back
+    # AFTER (``_cb_cells.write_cb_cell``), so a setter that mutates and then throws, a
+    # read-back that throws after a landed write, and an engine that clamps to a wrong
+    # value ALL leave the cell mutated while the call raises. Appending only on return
+    # filed those in NEITHER ledger — the envelope told the caller the cell was
+    # untouched when it may have been written, and the printed recovery contract
+    # (``attempted`` "lists a sub-step") was false on exactly those paths. The entry is
+    # filed as ATTEMPTED before the call and PROMOTED to ``committed`` on return; the
+    # in-flight entry is removed rather than the list cleared, so a stale entry from an
+    # earlier sub-step could never be silently swallowed here.
     for param, value in written.items():
+        entry = f"cell {param}={value!r}"
+        attempted.append(entry)
         _cb.write_cb_cell(system, row, param, value)
+        committed.append(entry)
+        attempted.remove(entry)
 
     # (b) THE DECISIVE global-frame gate (§2): the POST-CB surface's measured rotation
     # block must equal the authored tilt+order matrix PRODUCT within 1e-9 (element-wise).
@@ -234,11 +378,17 @@ def _verify_global_frame(system, lde, surface, written):
     by the cell read-back, never here. Returns the global-frame dict for the envelope
     (the single-axis angle READOUT is informational display only, NOT the oracle).
 
-    The post-CB surface is ``surface + 1``. The post-CB surface always exists in a
-    well-formed system (a CB is never the IMAGE surface — the geometry firewall
-    allowed surface <= N-1, and a CB authored at IMAGE would be degenerate, but the
-    gate read is THROW-guarded so an absent downstream surface resolves to a
-    structured refusal rather than a crash).
+    The post-CB surface is ``surface + 1``. The CALLER-FACING firewall in
+    ``_add_coordinate_break_impl`` now refuses ``surface == N-1`` (the IMAGE surface)
+    BEFORE any mutation, so a well-formed call cannot reach this branch. It is RETAINED
+    as defence-in-depth for a surface count that changed under the tool (an engine-side
+    truncation between the pre-condition read and this read), and because
+    ``_verify_global_frame`` is a shared proof helper that must not assume its caller
+    pre-checked. (The prior docstring here asserted "a CB is never the IMAGE surface —
+    the geometry firewall allowed surface <= N-1", which states the conclusion and then
+    cites the premise that defeats it: N-1 IS the IMAGE surface. Fixed.
+    ``_surface_in_geometry_range``'s own docstring is ACCURATE and must not be touched —
+    N-1 is legitimate for the ``set_surface``/``substitute_glass`` range it states.)
     """
     n = int(lde.NumberOfSurfaces)
     post = surface + 1
@@ -310,14 +460,33 @@ def _verify_global_frame(system, lde, surface, written):
             field="global_frame", intended=0.0, actual=residual, surface=surface,
         )
 
-    # Informational single-axis READOUT for the envelope (display only — NOT the
-    # oracle, which is the matrix compare above). The readout is THROW-guarded.
-    tilt_x, tilt_y, tilt_z, _x, _y, _z = _cb.global_rotation_angles(system, lde, post)
-    return {
+    # Informational single-axis READOUT for the envelope (DISPLAY ONLY — NOT the oracle,
+    # which is the matrix compare above). R7 (spec): the decisive gate at the
+    # residual compare has ALREADY passed by this point, so a fault in this read must
+    # DEGRADE THE READOUT, not discard a CB that was just proven correct — the probe 
+    # measured the discarded CB byte-identical to a success control, with the frame
+    # re-reading identically to the last digit.
+    #
+    # This does NOT weaken _verify_global_frame: the residual compare above is untouched
+    # and still raises (T41 is the mutate-fails guard for exactly that).
+    readout_unavailable = False
+    try:
+        tilt_x, tilt_y, tilt_z, _x, _y, _z = _cb.global_rotation_angles(
+            system, lde, post
+        )
+    except Exception:  # noqa: BLE001 — a display-only read fault degrades the readout
+        tilt_x = tilt_y = tilt_z = None
+        readout_unavailable = True
+    frame = {
         "tilt_x": _cb_safe(tilt_x), "tilt_y": _cb_safe(tilt_y),
         "tilt_z": _cb_safe(tilt_z), "x": _cb_safe(x), "y": _cb_safe(y),
         "z": _cb_safe(z), "rotation_residual": _cb_safe(residual),
     }
+    # Emitted ONLY when it fires (L-6): the healthy block stays BYTE-IDENTICAL, which
+    # matters because place_element and fold_beam read ``global_frame``.
+    if readout_unavailable:
+        frame["readout_unavailable"] = True
+    return frame
 
 
 def _cb_safe(value):
@@ -613,29 +782,41 @@ def add_return_cb(session, params):
         )
 
 
-def _partial_state_fields(committed):
-    """Build the honest partial-state disclosure for a return-CB failure envelope (LOW).
+def _partial_state_fields(committed, recovery=None, attempted=None):
+    """Build the honest partial-state disclosure for a CB failure envelope.
 
-    If NOTHING was committed (the failure fired before any mutation — a param/validation
-    refusal, or the pre-mutation guards), returns ``{"partial_state": False}`` so the
-    envelope is unambiguous. If sub-steps DID land (a mid-authoring throw after the
-    ChangeType / some pickups / the Order write), returns ``partial_state:True`` + the
-    ordered ``committed`` ledger + a recovery hint — the editor retains those mutations
-    and the caller must re-drive or undo them. This mirrors the apply_lens_spec
-    ``partial_state`` honesty without the heavier SaveAs/LoadFile checkpoint.
+    If NOTHING landed and nothing was attempted (the failure fired before any mutation —
+    a param/validation refusal, or the pre-mutation guards), returns
+    ``{"partial_state": False}`` so the envelope is unambiguous. If sub-steps DID land (a
+    mid-authoring throw after the ChangeType / some pickups / the Order write), returns
+    ``partial_state:True`` + the ordered ``committed`` ledger + a recovery hint — the
+    editor retains those mutations and the caller must re-drive or undo them. This
+    mirrors the apply_lens_spec ``partial_state`` honesty without the heavier
+    SaveAs/LoadFile checkpoint (DQ-4: the checkpoint un-blesses the loaded design and a
+    targeted value-restore silently drops a ``Fixed`` solve).
+
+    **The certainty split.** ``committed`` carries ONLY sub-steps that READ
+    BACK as done. A sub-step whose outcome is UNKNOWN — because the call throwing is the
+    only thing we observed — goes in ``attempted``, which is emitted only when it is
+    non-empty. Filing an attempt under ``committed`` would be the tool certifying more
+    than it measured, which is the whole defect class this fix exists to close.
+
+    ``add_return_cb`` passes NEITHER new argument, so its envelope keeps the same keys in
+    the same order with the same text — byte-identical (pinned by the shipped adversarial
+    test assertions).
     """
-    if not committed:
+    if not committed and not attempted:
         return {"partial_state": False}
-    return {
-        "partial_state": True,
-        "committed": list(committed),
-        "recovery": (
-            "the return CB authoring failed PART-WAY — the editor retains the committed "
-            "sub-steps above (a ChangeType and/or some Par-cell pickups/the Order "
-            "literal). Re-author the return CB after correcting the fault, or reload "
-            "your design .zmx to discard the partial state."
-        ),
-    }
+    out = {"partial_state": True, "committed": list(committed)}
+    if attempted:                      # emitted ONLY when the uncertainty is real
+        out["attempted"] = list(attempted)
+    out["recovery"] = recovery or (
+        "the return CB authoring failed PART-WAY — the editor retains the committed "
+        "sub-steps above (a ChangeType and/or some Par-cell pickups/the Order "
+        "literal). Re-author the return CB after correcting the fault, or reload "
+        "your design .zmx to discard the partial state."
+    )
+    return out
 
 
 def _add_return_cb_impl(session, params, committed):

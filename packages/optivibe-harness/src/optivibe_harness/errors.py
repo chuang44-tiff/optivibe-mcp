@@ -265,6 +265,20 @@ class PromoteClearanceIndeterminateError(ToolError):
     error_family = "promote_clearance_indeterminate"
 
 
+class PromoteCandidateOwnerMismatchError(ToolError):
+    """``promote_best`` REFUSED: the seq'd candidate belongs to another design_name.
+
+    Parity class for the ``promote_candidate_owner_mismatch`` family. DISJOINT from
+    ``promote_clearance_violation`` / ``promote_clearance_indeterminate``: those are
+    verdicts about the GEOMETRY; this is a verdict about WHICH ARTIFACT — the tool
+    refuses before any audit, because auditing the live session and then publishing
+    another design's file is exactly the silent-wrong being closed. NOT overridable by
+    ``force`` (which asserts "I accept this geometry", never "I accept these bytes").
+    """
+
+    error_family = "promote_candidate_owner_mismatch"
+
+
 class AnalysisResultError(ToolError):
     """A results-extraction failure carrying a structured ``family``.
 
@@ -283,7 +297,7 @@ class AnalysisResultError(ToolError):
     The class-level ``error_family`` is the fallback family used if dispatch ever
     envelopes a raised instance; ``family`` (per-instance) is what the analysis tools
     surface in their own ``{ok:false}`` envelope (they construct the envelope and
-    do NOT raise past their boundary for expected failures — §a).
+    do NOT raise past their boundary for expected failures).
     """
 
     error_family = "analysis"
@@ -371,7 +385,7 @@ class OptimizeError(ToolError):
     The class-level ``error_family`` is the fallback family used if dispatch ever
     envelopes a raised instance; ``family`` (per-instance) is what the optimize tools
     surface in their own ``{ok:false}`` envelope (they construct the envelope and do
-    NOT raise past their boundary for expected failures — §a).
+    NOT raise past their boundary for expected failures).
     """
 
     error_family = "optimize"

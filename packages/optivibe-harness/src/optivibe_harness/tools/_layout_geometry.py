@@ -16,8 +16,9 @@ Grounding facts honored here (§0):
 
 The role classifier is FIRST-MATCH-WINS in the fixed order — the CB check runs
 BEFORE the material check because a coordinate break's material reads ``"-"``,
-which a naive air/glass walk misclassifies as air (the ``"-"`` trap). That
-ordering is a load-bearing contract (the L25 guard).
+which a naive air/glass walk misclassifies as air (the ``"-"`` trap, probe
+Headline 1). That ordering is a load-bearing contract (guard
+``test_l25_cb_before_material``).
 
 NOT dispatchable: no ``TOOL_SPEC``/``TOOL_SPECS``; the server never registers it.
 """
@@ -42,6 +43,78 @@ def _is_air_material(material: str) -> bool:
     """True if the material reads as air: ``""`` or the CB placeholder ``"-"``."""
     stripped = material.strip()
     return stripped == "" or stripped == "-"
+
+
+# --------------------------------------------------------------------------- #
+# Sag-model applicability (clearance-provenance, DQ-6).
+# --------------------------------------------------------------------------- #
+def _sag_faithful_types():
+    """The types the radius/conic/polynomial sag model was WRITTEN for — DERIVED.
+
+    NOT a hand-copied literal (one source of truth). Verified read-path:
+      - ``Standard``: the base sphere/conic the model IS.
+      - ``_asph.ASPHERE_TYPE_NAMES`` — the SAME registry ``_read_rows`` keys on to populate
+        ``aspheric_coefficients``/``asphere_norm_radius``/``asphere_power``
+        (_layout_geometry.py:219-260) and that ``_audit_gaps`` feeds into
+        ``edge_thickness`` (clearance.py:203-211). Registering a type and executing it are
+        the same act, so the set cannot drift from the executor by construction.
+      - ``_grin.GRIN_TYPE_INFO`` — the authorable GRIN primitives, whose SAG is the standard
+        sphere/conic base (GRIN: the index profile does not perturb the sag,
+        residual 0.0). The 12-member ``GRIN_FAMILY_TYPE_TOKENS`` recognition set is
+        deliberately NOT used: a loaded Gradium/GridGradient is un-probed.
+    """
+    from . import _asphere_cells as _asph
+    from . import _grin_cells as _grin
+    return frozenset({"Standard"}) | frozenset(_asph.ASPHERE_TYPE_NAMES) | frozenset(
+        _grin.GRIN_TYPE_INFO)
+
+
+SAG_FAITHFUL_TYPES = _sag_faithful_types()
+
+
+def sag_model_is_faithful(type_name):
+    """Tri-state: True iff the radius/conic/polynomial sag model was WRITTEN FOR this
+    surface type; False for a readable type OUTSIDE the set; None when the type is
+    unreadable.
+
+    POSITIVE membership, resolved through the EXECUTOR'S OWN acceptance predicate —
+    ``_grin_cells._exact_token_match``, the shared resolver behind
+    ``_asphere_cells.asphere_type_of_name`` and ``_grin_cells.grin_type_of_name``. EXACT
+    full-token, NEVER a substring — the ``Gradient1`` subset-of ``Gradient10`` hazard
+    (_grin_cells.py:227-232). Fail-CLOSED on an unreadable type (the lens_spec.py
+    precedent) so a new engine surface type cannot silently rejoin the faithful set.
+    NEVER raises.
+
+    This used to be ``type_name.strip() in SAG_FAITHFUL_TYPES``
+    — a guard RE-DERIVING an acceptance test its executor does not share. The SET could
+    not drift from the executor by construction; the MATCHING RULE already had, in BOTH
+    directions:
+
+    - ``" EvenAspheric "`` -> guard said FAITHFUL (``.strip()`` hit) while
+      ``asphere_type_of`` returned ``None``, so the coefficients were never read and the
+      base conic model ran: asphere permission for a surface modelled as a bare conic,
+      verdict ``clean``. FAIL-OPEN, and reproduced it.
+    - ``"SurfaceType.EvenAspheric"`` -> guard said UNFAITHFUL (no ``.`` fallback) while
+      the executor resolved it and DID read the coefficients: a noisy over-refusal.
+
+    Consuming the resolver closes both at once, and it closes them for every token — not
+    just the one an auditor happened to find. The free ``.strip()`` is GONE from the
+    membership test; the emptiness test keeps it (an all-whitespace type is unreadable,
+    which is the ``None`` arm, not the ``False`` arm — the shipped T28 contract).
+
+    NEVER key on ``Radius == inf``: the probe caution 1 measured 3 of the 9 Cooke
+    surfaces reading Radius = inf LEGITIMATELY (a plane). ``inf`` is the encoding of BOTH
+    "inapplicable" and "flat"; only the TYPE discriminates.
+
+    THE CLAIM IS APPLICABILITY, AND NOTHING MORE. ``True`` means "this type
+    is one the sag executor has a code path for", NOT "the executor computes it correctly".
+    A faithful type can still carry a degraded cell read (gotcha), and no measurement
+    in this cycle validates the executor per-type; a follow-up would.
+    """
+    from ._grin_cells import _exact_token_match
+    if not isinstance(type_name, str) or not type_name.strip():
+        return None
+    return _exact_token_match(type_name, SAG_FAITHFUL_TYPES) is not None
 
 
 # --------------------------------------------------------------------------- #
