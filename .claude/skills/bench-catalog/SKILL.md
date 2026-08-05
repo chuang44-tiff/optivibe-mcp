@@ -1,5 +1,5 @@
 ---
-name:
+name: bench-catalog
 description: Use when the user wants to benchmark / rank a FOLDER of lens designs (or patents) against
   a target spec or each other. Triggers on "benchmark these lenses", "rank this folder of designs",
   "compare these patents/zmx against a 50mm f/1.4", "which of these is best for <spec>".
@@ -15,7 +15,7 @@ and a labeled layout montage), and a reproducible ranking against a target spec 
 folder's own median. **You (the model) recommend; the user is the judge.**
 
 Distinct from `design-compare` (2–4 designs the user hand-lists, live MCP, a table only):
-Is a **folder → CSV + manifest + plots + ranking**, batch, patent-capable,
+bench-catalog is a **folder → CSV + manifest + plots + ranking**, batch, patent-capable,
 and **single-seat-clean via a thin CLI** — you never hold the OpticStudio seat during a
 bench cycle.
 

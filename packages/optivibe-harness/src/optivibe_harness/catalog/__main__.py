@@ -1,6 +1,6 @@
 """catalog/__main__.py — the thin batch CLI for benching a folder of lens designs.
 
-The ONE ``src/`` addition the skill ships (no MCP tool, no
+The ONE ``src/`` addition the bench-catalog skill ships (no MCP tool, no
 ``server.py`` edit, no tool-count change). Two subcommands:
 
 - ``bench`` — the SOLE seat-holder for the whole engine phase. Inside ONE
@@ -893,6 +893,25 @@ def _bench_impl(args):
     # ``bench_folder``, ``_build_specs`` AND ``_render_layouts`` all glob absolute paths ->
     # ``load_design`` loads.
     staging = os.path.abspath(args.staging)
+
+    # ...and the SAME hole one step further out: a --staging that is merely WRONG.
+    # The empty-string guard above closes the unset-variable case, but a typo'd or
+    # moved directory survived it -- glob returns [], and the run prints
+    # ``{"ok": true, "n_designs": 0}`` at rc 0. That is the identical
+    # "authoritatively benchmarks the WRONG dataset and reports success" failure the
+    # guard above exists to close, and it also contradicts this CLI's own promise
+    # that a run in which no design loaded is a FAILURE (the rc-3
+    # ``all_designs_failed_load`` discriminator) -- a run with no design to load at
+    # all cannot be the one success in that family. Checked AFTER abspath so the
+    # reported path is the one actually globbed, and still BEFORE the engine
+    # preflight: pure argument validation opens no session and creates nothing.
+    if not os.path.isdir(staging):
+        print(json.dumps({"ok": False, "reason": "input_unreadable",
+                          "staging": staging}))
+        print(": --staging %r is not an existing directory; refusing to "
+              "report a zero-design run as success." % (staging,), file=sys.stderr)
+        return 1
+
     out_dir = args.out
 
     # --- preflight: SOFT-DECLINE if an engine is already running. ---

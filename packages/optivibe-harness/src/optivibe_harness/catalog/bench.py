@@ -3,7 +3,7 @@
 The folder loop + the per-design decision tree (load -> classify -> normalize ->
 profile) + the 3-tier ``row_status`` predicate + the template/basis resolution + the
 CSV/manifest writers. Imports ``metrics`` (the shared firewall) + ``registry`` (the
-metric adapters). Adds NO MCP tool — the skill drives ``bench_folder``
+metric adapters). Adds NO MCP tool — the bench-catalog skill drives ``bench_folder``
 in-process.
 
 Normalization order (D6, fixed): ``load_design -> scale_lens(to_efl) -> set_aperture

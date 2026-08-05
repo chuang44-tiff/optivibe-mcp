@@ -1,6 +1,6 @@
 """optivibe_harness.catalog — the core.
 
-An INTERNAL library (NOT an MCP tool): the skill drives it
+An INTERNAL library (NOT an MCP tool): the bench-catalog skill drives it
 in-process by building a ``server.Dispatcher(ZemaxSession())`` and calling
 ``bench.bench_folder``.
 

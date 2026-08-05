@@ -211,6 +211,21 @@ def _mtf_extract(result):
         if not isinstance(s, dict):
             continue
         idx = s.get("index")
+        # SERIES 0 IS THE DIFFRACTION LIMIT, NOT A FIELD -- get_mtf's own contract
+        # ("idx0 = the diffraction-limit series, idx1..N = the fields in order").
+        # It is the theoretical UPPER bound, so letting it into a worst-FIELD
+        # collapse can only ever report a number no real field achieved.  Two ways
+        # it bites, both silent: if every real field interpolates to null past the
+        # grid while the always-computable limit survives, `mtf_worst` reports the
+        # BEST PHYSICALLY POSSIBLE value with status ok -- a null resolving to the
+        # BEST answer, the exact inversion the null-is-never-scored rule forbids;
+        # and on a tie `mtf_worst_field` reports field 0, which does not exist.
+        # A missing/non-integer index is skipped for the same reason: we cannot
+        # prove it is NOT the limit, and this collapse must never score a series it
+        # cannot identify.  If that leaves nothing, the null path below reports no
+        # data -- the honest answer, and the one that keeps the row out of the rank.
+        if not isinstance(idx, int) or isinstance(idx, bool) or idx <= 0:
+            continue
         ats = s.get("at") if isinstance(s.get("at"), list) else []
         for entry in ats:
             if not isinstance(entry, dict):

@@ -1825,9 +1825,32 @@ def _edge_audit_warnings(session, glass_floor, air_floor):
                 "IN FRONT of the last optical surface (rear group / field-flattener may be "
                 "misplaced)."
             )
-            nonphysical.append(
-                {"kind": "bfl_negative", "behind_last_optic": blo}
-            )
+            # ON AN UNFOLDED SYSTEM ONLY is this a CONFIRMED nonphysical measurement.
+            #
+            # `behind_last_optic` is a SIGNED GLOBAL-Z DIFFERENCE (image_global_z minus the
+            # last optical surface's global z -- see clearance._global_bfd). On an unfolded
+            # system, global +z IS the propagation direction, so a negative value means the
+            # image really does sit in front of the last surface: impossible, and confirmed.
+            # After a fold that turns the final leg back toward -z (a 180-degree fold, a
+            # retro/cat's-eye leg, a periscope down-leg), the beam advances while the global
+            # z coordinate DECREASES -- so the sign flips for a healthy design, and the
+            # quantity stops measuring "is the image in front of the optic" at all.
+            #
+            # Left unguarded, a legitimate folded design read `improved_unphysical` and was
+            # told to reload a checkpoint, and aperture_ramp rejected every step against it
+            # as `design_not_certified`. That inverts this cycle's own rule: a value we
+            # cannot soundly interpret must resolve to UNVERIFIED, never be promoted to a
+            # confirmed defect. The fold already produces the `folded_system` reason, so the
+            # verdict degrades to `*_unverified` -- which is the honest answer, and the
+            # warning STRING is still emitted either way, so nothing is hidden from a reader.
+            #
+            # This reverses an earlier decision that a negative BFL on a fold was still a
+            # confirmed finding. That decision rested on the reading being confirmable on a
+            # folded system; it is not, for the reason above.
+            if not env.get("folded"):
+                nonphysical.append(
+                    {"kind": "bfl_negative", "behind_last_optic": blo}
+                )
 
         # --- step 3: REASON — the soundly-determinable obstructions ONLY. First
         #     match wins; the order is final. NOTHING ELSE: no contiguity test, no

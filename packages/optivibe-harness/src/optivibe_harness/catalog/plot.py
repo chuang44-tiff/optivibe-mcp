@@ -5,7 +5,7 @@ bench core:
 
 - ``catalog_bars.png`` — one bar-per-KPI panel per numeric metric column.
 - ``catalog_montage.png`` — one layout-thumbnail tile per design.
-- ``plot_warnings.txt`` — a plain-text warnings sidecar for the skill.
+- ``plot_warnings.txt`` — a plain-text warnings sidecar for the bench-catalog skill.
 
 Scope boundary (load-bearing): pure Python + matplotlib/Agg. Touches NO engine,
 NO ZOS-API tool, NO ``Dispatcher``, NO ``render_layout``. The ONLY inputs are the CSV
