@@ -72,3 +72,27 @@ packages/optivibe-reference/scripts/captures/
 
 # Per-design intermediate candidate outputs (the BEST_* design is kept; candidates regenerate)
 **/candidates/
+
+# ------------------------------------------------------------------------------
+# Design-session leftovers — NEVER publish
+# ------------------------------------------------------------------------------
+# Running an optical design from inside this checkout drops artifacts here. They are
+# fine locally and wrong in a public repository: `optivibe_interactions.jsonl` is a
+# durable log of real tool calls, arguments and file paths, and a `.zmx` is a lens
+# prescription — publishing one not deliberately chosen discloses design work by
+# accident.
+#
+# This is safe-by-construction rather than safe-by-operator: the 0.1.4 publish staged
+# its 22 payload paths explicitly BY NAME, so nothing leaked, but that came from the
+# operator being careful on the day. Four permanent `??` entries also train the eye to
+# skim the one `git status` section a publish decision depends on.
+#
+# Verified before adding: this repo tracks ZERO .png, .zmx or BEST_* files, so none of
+# these rules can hide a real deliverable. NOTE the `**/candidates/` comment above says
+# "the BEST_* design is kept" — that is a PRIVATE-repo convention that came across with
+# the file. Here no design artifact is ever kept.
+BEST_*.zmx
+BEST_*.png
+*_layout.png
+optivibe_interactions.jsonl
+optivibe_stdio.log
