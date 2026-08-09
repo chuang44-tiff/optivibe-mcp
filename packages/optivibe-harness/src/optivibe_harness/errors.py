@@ -65,6 +65,23 @@ class SessionConnectTimeoutError(SessionConnectError):
     error_family = "engine_connect_timeout"
 
 
+class SessionChannelDeadError(SessionClosedError):
+    """The engine's remoting channel was OBSERVED dead; this session is TERMINAL.
+
+    Raised by ``Dispatcher.dispatch``'s channel gate (before any handler runs) and
+    by ``ZemaxSession._open_locked`` (at the create), so once a fault has been
+    observed neither a served call nor a re-open is reachable.
+
+    Subclasses ``SessionClosedError`` so every existing ``except SessionClosedError``
+    still catches it (behavioural compat); its own ``error_family`` overrides the
+    parent's ``"session_closed"`` on the wire. OptiVibe does NOT re-open after an
+    observed channel fault (``DECISION-recovery-semantics.md``, OPTION 1) — the
+    remedy is a restart of the MCP process, which the message names.
+    """
+
+    error_family = "engine_channel_dead"
+
+
 class SessionMisuseError(SessionError):
     """A session method was called in a way the contract forbids.
 
@@ -488,11 +505,18 @@ def _safe_str(exc) -> str:
     A surfaced .NET exception (or a hostile Python one) can have a throwing
     ``__str__``/``ToString()``. Fall back to a guarded ``repr``, then to a bare
     placeholder, so building a mapped error's message can never itself raise.
+
+    The guards catch ``BaseException`` and deliberately do NOT re-raise (
+    P-2). This renders a string for an exception that has ALREADY been
+    caught upstream — it is envelope construction, not work on an abort's travel
+    path — so the ``_safe_error_text`` rule applies rather than the travel-path
+    re-raise rule. Narrow, this falsified ``Dispatcher.dispatch``'s "NEVER
+    raises": a ``__str__`` raising ``KeyboardInterrupt`` escaped the classifier.
     """
     try:
         return str(exc)
-    except Exception:  # noqa: BLE001 — __str__ raised; try a guarded repr
+    except BaseException:  # noqa: BLE001 — __str__ raised; try a guarded repr
         try:
             return repr(exc)
-        except Exception:  # noqa: BLE001 — repr raised too; bare placeholder
+        except BaseException:  # noqa: BLE001 — repr raised too; bare placeholder
             return "<unprintable exception message>"

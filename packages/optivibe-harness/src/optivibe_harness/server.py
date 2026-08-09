@@ -30,10 +30,240 @@ from typing import Callable, Dict, Tuple
 from . import _io
 from .errors import (
     HarnessError,
+    SessionChannelDeadError,
     ToolParamError,
     UnknownToolError,
     map_dotnet_exception,
 )
+from .session import CHANNEL_DEAD, CHANNEL_DEAD_CANNOT_NAME_MESSAGE
+
+
+def _channel_dead_refusal_text(session):
+    """Best-effort refusal prose. NEVER raises; ALWAYS returns a non-empty str.
+
+    Building the message is the gate's SECOND fallible callable,
+    and it runs AFTER the observation. It must therefore NOT be able to turn an
+    observed DEAD into a served call. Any failure — a missing attribute, a
+    throwing descriptor, a throwing call, or a non-str / blank return — falls back
+    to the module-level ``CHANNEL_DEAD_CANNOT_NAME_MESSAGE`` constant, which
+    names the same remedy and touches ``session`` not at all.
+
+    That constant is the honest text for this path: its "(it was not set, or could
+    not be read)" clause is exactly the situation — the folder could not be read.
+    Reusing it also keeps ALL refusal prose in one module behind one builder, so
+    the wording review stays a single-site read.
+    """
+    try:
+        text = session.channel_dead_message()
+        if isinstance(text, str) and text.strip():
+            return text
+    except BaseException as exc:  # noqa: BLE001 — a failed build must never serve
+        # ... but an ABORT still keeps travelling. Widening this catch without
+        # this re-raise silently cancelled the house convention: the abort was
+        # absorbed here, before ``_channel_gate``'s own handler ever saw it
+        # (two correct fixes from one round cancelling
+        # each other).
+        if not isinstance(exc, Exception):
+            raise
+    return CHANNEL_DEAD_CANNOT_NAME_MESSAGE
+
+
+def _dead_recorded(session):
+    """True iff a DEAD observation is ON RECORD for this session. NEVER raises.
+
+    The arbiter for BOTH of the gate's exits. It must answer "is a DEAD
+    observation on record?" — NOT "can I read the public property, and is it
+    True?". Those become different questions the moment the property is
+    unreadable, and the whole design rests on this one being the durable answer,
+    so it consults the RECORDED FIELD as well as the property.
+
+    ===================================================================
+    ABSENT IS NOT THE SAME AS UNREADABLE. This is the principle; check
+    future edits against it rather than against a list of cases:
+
+        ABSENT      -> "not applicable"  -> False (PROCEED)
+        UNREADABLE  -> "unknown"         -> True  (REFUSE)
+
+    ===================================================================
+
+    A bare session double has no channel surface at all: nothing was ever
+    observed, so nothing is on record, and it must dispatch exactly as before —
+    that is the 208-site guarantee and it is preserved by the ABSENT arm.
+
+    A member that is PRESENT but whose read THREW is a different situation: we
+    cannot rule out that an observation WAS recorded, and serving a call on a
+    possibly-dead channel is the failure this whole gate exists to prevent. So
+    that arm fails CLOSED. An earlier revision collapsed both into ``False``,
+    which — as one review put it — "converts failure into permission to serve".
+    """
+    unreadable = False
+
+    # Both catches below RE-RAISE a non-``Exception``: this function is on an
+    # abort's TRAVEL PATH (it reads live session state), so it obeys the same rule
+    # as the four other widened catches. Without it the "PROPAGATES —
+    # UNCONDITIONALLY" rule three paragraphs down in ``_channel_gate`` was false:
+    # a property raising ``KeyboardInterrupt`` on the arbiter re-read produced a
+    # refusal instead. Contrast ``_safe_error_text``, which
+    # renders a string for an ALREADY-caught exception and therefore must not.
+    def _abort_or_unknown(exc):
+        if not isinstance(exc, Exception):
+            raise exc
+        return True  # PRESENT but threw -> unknown
+
+    # 1. The public property, if it is readable and affirmative.
+    try:
+        if session.channel_dead is True:
+            return True
+    except AttributeError:
+        pass  # ABSENT -> not applicable; the field below decides
+    except BaseException as exc:  # noqa: BLE001
+        unreadable = _abort_or_unknown(exc)
+
+    # 2. The RECORDED FIELD — durable even when the property was shadowed,
+    #    deleted or made unreadable after the latch landed.
+    try:
+        if getattr(session, "_channel_dead", False) is True:
+            return True
+    except BaseException as exc:  # noqa: BLE001
+        unreadable = _abort_or_unknown(exc)
+
+    return unreadable
+
+
+def _channel_gate(session):
+    """Return a ``SessionChannelDeadError`` to RAISE, or ``None`` to proceed.
+
+    Never raises an ordinary ``Exception``. A non-``Exception`` abort
+    (``KeyboardInterrupt``, ``SystemExit``, ``GeneratorExit``, a bare
+    ``BaseException``) PROPAGATES — UNCONDITIONALLY, exactly as the table below
+    says, with no qualifier. An earlier revision of this sentence added "when
+    nothing has been established", contradicting the table 45 lines down on the
+    one cell three separate fixes had already got wrong; a reader who stopped at
+    the summary got the opposite rule.
+
+    Two reads, in order:
+
+      1. ``session.channel_dead is True``                   -> refuse (free flag read)
+      2. ``session.is_open`` and ``observe_channel()`` DEAD -> refuse
+
+    Step 2 does NOT run when the session is not open: a never-opened session must
+    reach the handler and raise ``SessionClosedError`` exactly as today, and must
+    not pay a probe it cannot answer. Step 2 also does not run once step 1 is True
+    — a latched session refuses on a free flag read, engine untouched.
+
+    ===================================================================
+    THE INVARIANT, AS A PROPERTY. Check every future edit against THIS
+    sentence, not against the control flow that currently implements it:
+
+        A CALL IS SERVED ONLY IF NO DEAD OBSERVATION HAS BEEN RECORDED AT
+        ANY POINT DURING THIS GATE INVOCATION.
+
+    ===================================================================
+
+    This is written as a property because the same defect was introduced **FIVE
+    times by five different well-intentioned fixes**, each one patching the branch
+    the latest finding named:
+
+      1. the first spec fold            -> a consistency review finding
+      2. the second spec fold           -> the sibling check's amendment
+      3. that amendment's own fix       -> an external review finding
+      4. round 2's ``_dead_recorded``   -> a later external review (the EXCEPTION
+                                           arm's ``except BaseException: return
+                                           False`` fails OPEN)
+      5. the same round's normal arm    -> the internal review (that arm
+                                           was never routed through the arbiter at
+                                           all)
+
+    (Counted in review, which found the earlier "THREE times" in this
+    docstring undercounted by 40%. A warning about a dangerous locus that
+    understates the danger is the exact defect class this cycle exists to close,
+    so the number is stated with its instances rather than asserted.)
+
+    Every one of them reasoned about WHEN an exception happened. That reasoning
+    cannot work: **deciding "before or after" from control flow is impossible
+    precisely because a throw is what destroys control flow.** Worse, the gate was
+    deciding from TWO facts — what ``observe_channel`` returned, and whether DEAD
+    was recorded — that ONE call both produces and records; any throw between the
+    latch and the return splits them, and no ``except`` clause can know which side
+    of that split it is on. ``except Exception:  # PRE-observation`` is a claim
+    about causality made by a construct that cannot observe causality.
+
+    A ``ZemaxSession`` subclass can call ``super().observe_channel()``, latch DEAD,
+    and then raise — and any scheme that infers phase from "did the call return
+    normally" will label that post-observation event PRE-observation and serve the
+    call. So can one that latches and then returns ``ALIVE`` (instance 5), which is
+    why BOTH arms consult the arbiter and neither trusts the returned verdict alone.
+
+    So the FLAG arbitrates, not the control flow. On the exception path we do not
+    ask when the throw happened; we ask the durable question ``_dead_recorded()``:
+    *is a DEAD observation on record?* If yes, refuse — whatever threw, and
+    whenever. If no, nothing is established, so proceed (or, for a deliberate
+    abort, propagate).
+
+    THE TABLE, stated exhaustively so no cell is left to inference:
+
+    | throw class          | DEAD recorded | outcome                            |
+    |----------------------|---------------|------------------------------------|
+    | ``Exception``        | no            | PROCEED  (the 208-site guarantee)  |
+    | ``Exception``        | YES           | REFUSE   (closed)                  |
+    | KI / ``SystemExit``  | EITHER        | PROPAGATE                          |
+
+    **THIS GATE NEVER TURNS AN ABORT INTO A REFUSAL.** That is a project-wide
+    convention, asserted in these same files ("``except Exception`` (not
+    ``BaseException``) so KI/SystemExit propagate — a deliberate abort is never
+    swallowed into a misroute"), and it wins over any local reasoning here. An
+    earlier revision made the recorded-DEAD cell REFUSE, because the outcome would
+    have been a refusal anyway and it kept the error family. That was overruled,
+    and rightly: a table with ONE cell contradicting the house rule is precisely
+    the subtlety a later reader gets wrong.
+
+    WHAT HAPPENS TO THE ABORT AFTERWARDS, stated accurately because an earlier
+    version of this paragraph overclaimed it. It said a
+    Ctrl-C here "must get their abort honoured" — but at the only production
+    consumer it is NOT: ``Dispatcher.dispatch``'s ``except BaseException`` (which
+    is pre-existing and not introduced by this cycle) catches the propagated abort
+    and returns an ``ok:false`` envelope, so the interrupt does not reach the
+    caller. What this gate guarantees is narrower and is all it can guarantee:
+    **the abort is not converted into a REFUSAL here**, and it keeps travelling
+    for whatever is above to decide.
+
+    THE COST at that boundary, stated because it is real and must not be silent:
+    the ``engine_channel_dead`` family and its remedy text are FORFEITED for that
+    one call — dispatch envelopes it as ``internal`` instead. The handler still
+    never runs, the session stays latched, and the very next call reports the
+    proper family on a free flag read.
+
+    The other half of the invariant lives inside ``observe_channel``: a failed
+    LATCH WRITE likewise does not change the verdict.
+    """
+    try:
+        dead = bool(
+            session.channel_dead is True
+            or (session.is_open and session.observe_channel() == CHANNEL_DEAD)
+        )
+        # The truth test lives INSIDE the guard: a verdict whose ``__bool__``
+        # raises is a PRE-observation fault that must PROCEED, and evaluating it
+        # outside made the gate itself raise.
+        #
+        # BOTH EXITS CONSULT THE ARBITER. Deciding on the RETURNED VERDICT alone
+        # was the fourth occurrence of this defect: an observation can complete,
+        # RECORD the latch, and then return something that is not DEAD (a wrapper
+        # that normalises or re-labels the verdict). The property says "at any
+        # point during this gate invocation", so the durable question is asked
+        # here too — not only on the throwing path.
+        if not dead and not _dead_recorded(session):
+            return None
+    except BaseException as exc:  # noqa: BLE001 — the table above decides
+        # ORDER IS LOAD-BEARING: the abort test comes FIRST, so a deliberate abort
+        # propagates whether or not a DEAD observation is on record. Swapping these
+        # two blocks converts a Ctrl-C into a return value on a latched session.
+        if not isinstance(exc, Exception):
+            raise
+        if _dead_recorded(session):
+            return SessionChannelDeadError(_channel_dead_refusal_text(session))
+        return None
+    # A DEAD observation completed and returned normally.
+    return SessionChannelDeadError(_channel_dead_refusal_text(session))
 
 
 def _safe_error_text(exc) -> str:
@@ -45,24 +275,47 @@ def _safe_error_text(exc) -> str:
     construction raise INSIDE the ``except`` and escape ``dispatch()``. Here the
     type name is read defensively and the message is extracted via a guarded
     ``str(exc)`` -> ``safe_repr`` -> bare-type-name fallback chain.
+
+    THE GUARDS CATCH ``BaseException``, not ``Exception``.
+    ``dispatch`` catches ``BaseException``, so widening its net was pointless while
+    the FORMATTER it calls inside that net caught only ``Exception``: a custom
+    ``BaseException`` whose ``__str__`` raises ``KeyboardInterrupt`` escaped
+    ``dispatch`` entirely — measured, and it defeats the never-raise envelope that
+    every consumer relies on. This function does no work anyone would want to
+    interrupt; it renders a string for an exception that has ALREADY been caught.
     """
     try:
         type_name = type(exc).__name__
-    except Exception:  # noqa: BLE001 — even type(exc).__name__ must not escape
+    except BaseException:  # noqa: BLE001 — even type(exc).__name__ must not escape
         type_name = "?"
 
     message = None
     try:
         message = str(exc)
-    except Exception:  # noqa: BLE001 — exc.__str__ raised; try a guarded repr
+    except BaseException:  # noqa: BLE001 — exc.__str__ raised; try a guarded repr
         try:
             message = _io.safe_repr(exc)
-        except Exception:  # noqa: BLE001 — give up on the message, keep the type
+        except BaseException:  # noqa: BLE001 — give up on the message, keep the type
             message = None
 
-    if message is None:
-        return f"{type_name}: <unprintable exception message>"
-    return f"{type_name}: {message}"
+    # GUARD THE CONSUMPTION, NOT ONLY THE PRODUCTION — the exact sibling of the
+    # earlier fix above. The
+    # reads were widened to BaseException, but the f-string that CONSUMES their
+    # output was not: a ``type(exc).__name__`` supplied by a hostile metaclass
+    # READS fine and then raises when FORMATTED, which escaped ``dispatch`` and
+    # defeated the never-raise envelope every consumer depends on.
+    try:
+        if message is None:
+            return f"{type_name}: <unprintable exception message>"
+        return f"{type_name}: {message}"
+    except BaseException:  # noqa: BLE001 — deliberately NOT re-raised; see below
+        # This function is the LAST step of an envelope for an exception that has
+        # ALREADY been caught by ``dispatch``. It is not on an abort's travel path
+        # — the abort was absorbed by dispatch's own ``except BaseException``
+        # before this ran — so re-raising here would defeat the never-raise
+        # envelope without honouring anything. That is why this one catch does not
+        # carry the re-raise the others do.
+        return "?: <unprintable exception>"
 
 
 @dataclass(frozen=True)
@@ -114,7 +367,7 @@ _MULTI_SPEC_MODULES = (
     "optivibe_harness.tools.asphere_surface",
     # GRIN authoring primitives (set_grin / set_grin_variable).
     "optivibe_harness.tools.grin_surface",
-    # Multi-configuration primitive (add_configuration / set_config_operand
+    # MCE multi-configuration primitive (add_configuration / set_config_operand
     # / set_config_value / set_config_variable / set_current_configuration /
     # describe_configurations).
     "optivibe_harness.tools.mce_config",
@@ -252,6 +505,16 @@ class Dispatcher:
                         f"missing required param(s) for {tool_name!r}: {missing}"
                     )
 
+                # GATE A: refuse an OBSERVED-dead channel BEFORE any
+                # handler runs. Placed AFTER the unknown-tool / missing-param
+                # raises so their behaviour is untouched, and inside the lock
+                # dispatch already holds. The returned typed error is raised into
+                # the existing ``except`` arm, which envelopes it with the right
+                # family and message — zero envelope-building code here.
+                gate = _channel_gate(self._session)
+                if gate is not None:
+                    raise gate
+
                 result = self._invoke(spec, params)
                 return {
                     "ok": True,
@@ -266,7 +529,15 @@ class Dispatcher:
                 # __str__/ToString() or a pathological type must still envelope.
                 try:
                     error_family = self._classify(exc)
-                except Exception:  # noqa: BLE001 — classification must not escape
+                except BaseException:  # noqa: BLE001 — see below; NOT re-raised
+                    # ``BaseException``, and deliberately WITHOUT the re-raise the
+                    # travel-path catches carry (P-2). ``exc`` has
+                    # ALREADY been caught by the enclosing handler; this is
+                    # envelope construction, not work on an abort's travel path,
+                    # so re-raising here would defeat the never-raise envelope
+                    # without honouring anything. Narrow, this falsified
+                    # ``dispatch``'s own "NEVER raises": a classification whose
+                    # ``__str__`` raised ``KeyboardInterrupt`` escaped.
                     error_family = "internal"
                 return {
                     "ok": False,

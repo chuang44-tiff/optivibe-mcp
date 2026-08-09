@@ -23,6 +23,8 @@ Headline 1). That ordering is a load-bearing contract (guard
 NOT dispatchable: no ``TOOL_SPEC``/``TOOL_SPECS``; the server never registers it.
 """
 import math
+from dataclasses import dataclass as _dataclass
+from typing import Literal as _Literal
 
 
 # --------------------------------------------------------------------------- #
@@ -70,6 +72,42 @@ def _sag_faithful_types():
 
 
 SAG_FAITHFUL_TYPES = _sag_faithful_types()
+
+
+# --------------------------------------------------------------------------- #
+# Projection-classifiability.
+#
+# COLOCATED HERE, DELIBERATELY, beside the sag-model type registry above — and it
+# must be said plainly: ``_PROJECTION_CLASSIFIABLE`` is a HAND-MAINTAINED PROXY,
+# NOT AN INVARIANT. ``SAG_FAITHFUL_TYPES`` is DERIVED from the executor registries
+# (it cannot drift from the executor by construction); this set is not derived from
+# anything. It names the surface-type tokens whose geometry the projection predicate
+# can vouch for as IN-PLANE BY CONSTRUCTION, and every member is here because a human
+# decided so — nothing proves it.
+#
+# The relationship to the registry above is pinned ONE DIRECTION ONLY by the drift
+# tripwire H-6: ``_PROJECTION_CLASSIFIABLE <= SAG_FAITHFUL_TYPES``
+# — a projection-classifiable type must at least be a type the renderer models. The
+# REVERSE is deliberately NOT automatic: adding a type to the sag registry does NOT
+# prove it is in-plane, so the projection domain extends only by an explicit per-type
+# decision. The accepted consequence (a known gap) is that a future
+# harmless in-plane type FALSE-ALARMS (S-PROJ-TYPE) until this list is extended — an
+# over-disclosure, which is the fail-CLOSED direction. Registry-colocated
+# classifiability metadata is a filed follow-up.
+#
+# ``CoordinateBreak`` is deliberately ABSENT: a CB is not classified by its type at
+# all — it is classified by its Par CELLS (decenter_x / tilt_y / tilt_z) in
+# ``read_projection_state``, which tests ``_is_coordinate_break`` FIRST. Adding the
+# token here would also break the H-6 subset tripwire (a CB is not a sag-modeled type).
+_PROJECTION_CLASSIFIABLE = frozenset({
+    "Standard",
+    "EvenAspheric",
+    "OddAsphere",
+    "ExtendedAsphere",
+    "ExtendedOddAsphere",
+    "Gradient2",
+    "Gradient3",
+})
 
 
 def sag_model_is_faithful(type_name):
@@ -559,6 +597,129 @@ def sag_to_global_arrays(R, vertex, y_arr, sag_arr):
     return gy, gz
 
 
+# =========================================================================== #
+# Aperture PROVENANCE, group RIMS and the flat-rim CONTOUR.
+#
+# PURE: no engine, no matplotlib, no
+# global state. **Every function below is TOTAL** — it never raises on the
+# documented domain and returns plain dataclasses/tuples.
+#
+# The inversion this section performs (an inverted source of truth):
+# ``resolve_aperture_records`` is CANONICAL and
+# ``resolve_aperture_heights`` becomes a DERIVED WRAPPER over it, byte-compatible
+# with its shipped 2-tuple contract. The wrapper's height for a NON-measured
+# surface is a fabricated fallback retained for compatibility and neutral plot
+# scaling ONLY; the records carry the provenance the drawing code must consult.
+# =========================================================================== #
+
+# The five undiscriminated categories the shipped ``:584`` branch collapsed into
+# one "not measured" bucket, plus the measured case.
+ApertureBasis = _Literal[
+    "measured", "zero", "negative", "nan_or_unreadable",
+    "positive_infinity", "negative_infinity",
+]
+
+Point2D = "tuple[float, float]"   # (z_plot, y_plot) — plot coordinates.
+# Declared as a STRING so the module imports on any supported interpreter; the
+# dataclass annotations below quote their types for the same reason.
+
+
+@_dataclass(frozen=True)
+class ApertureRecord:
+    """One surface's aperture reading WITH its provenance.
+
+    - ``surface``: its OWN index; consumers may assert ``apertures[i].surface == i``.
+    - ``height``: positive and finite for EVERY input (the universal property the
+      shipped ``resolve_aperture_heights`` contract carries, preserved verbatim).
+      **On a non-measured record this is the legacy max/1.0 fallback — a fabricated
+      number retained for compatibility and neutral plot scaling ONLY. It is not a
+      measurement and may not position drawn geometry** (see the prohibition on
+      ``resolve_group_rims`` below).
+    - ``basis``: which of the six categories the raw cell read fell into.
+
+    ``measured`` is a PROPERTY over ``basis``, never a stored bool — a stored bool
+    is a second source of truth that can disagree with the basis it was derived
+    from.
+    """
+
+    surface: int
+    height: float
+    basis: str
+
+    @property
+    def measured(self) -> bool:
+        """True iff ``basis == "measured"`` — derived, never stored."""
+        return self.basis == "measured"
+
+
+def _coerce_semi(value):
+    """``float(value)`` guarded -> ``nan`` for anything non-numeric. Total.
+
+    A failed cell read normally arrives here already as ``nan`` (via ``_raw_float``);
+    this guard means a caller handing in a raw unconverted cell value still lands in
+    the ``nan_or_unreadable`` basis rather than raising.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _semi_is_measured(value) -> bool:
+    """THE one measured-ness predicate: ``isfinite(v) and v > 0.0``.
+
+    Consumed by ``_aperture_basis`` AND (through the records) by the derived
+    ``resolve_aperture_heights`` wrapper, so the wrapper's fallback rule and the
+    records' provenance can never disagree about what "measured" means. Total.
+    """
+    v = _coerce_semi(value)
+    return math.isfinite(v) and v > 0.0
+
+
+def _aperture_basis(value) -> str:
+    """Classify a raw semi-diameter into one of the six ``ApertureBasis`` values.
+
+    Splits the five undiscriminated non-measured categories the shipped fallback
+    branch lumped together: ``zero`` (a Fixed 0 solve — the zoom S31 defect),
+    ``negative``, ``nan_or_unreadable`` (a failed cell read), ``positive_infinity``
+    (an engine-resolved infinite-conjugate object aperture), ``negative_infinity``.
+    Total: never raises.
+    """
+    if _semi_is_measured(value):  # THE one predicate — never a second copy of it
+        return "measured"
+    v = _coerce_semi(value)
+    if math.isnan(v):
+        return "nan_or_unreadable"
+    if math.isinf(v):
+        return "positive_infinity" if v > 0.0 else "negative_infinity"
+    if v == 0.0:
+        return "zero"
+    return "negative"
+
+
+def resolve_aperture_records(semi_diameters):
+    """CANONICAL aperture resolution: raw semis -> ``tuple[ApertureRecord, ...]``.
+
+    The fallback VALUE rule is identical to the shipped one and deliberately so:
+    ``max(finite positive)`` across all surfaces, else ``1.0``. (A median placeholder
+    was considered and struck — it would move the two pinned wrapper values for no
+    correctness gain.) What is NEW is that each record says WHICH of the six bases
+    produced it, so a drawing consumer can refuse to position geometry from a
+    fabricated height.
+
+    Total: a non-numeric entry classifies ``nan_or_unreadable`` rather than raising.
+    """
+    values = list(semi_diameters)
+    finite_pos = [_coerce_semi(s) for s in values if _semi_is_measured(s)]
+    fallback = max(finite_pos) if finite_pos else 1.0
+    records = []
+    for i, s in enumerate(values):
+        basis = _aperture_basis(s)
+        height = _coerce_semi(s) if basis == "measured" else fallback
+        records.append(ApertureRecord(surface=i, height=float(height), basis=basis))
+    return tuple(records)
+
+
 def resolve_aperture_heights(semi_diameters):
     """Resolve a per-surface drawing half-height ``h`` from the semi-diameters (§3.2).
 
@@ -568,21 +729,590 @@ def resolve_aperture_heights(semi_diameters):
     appends a note). Never returns a zero/invisible height.
 
     Returns ``(heights, all_zero)``.
-    """
-    finite_pos = [
-        s for s in semi_diameters if math.isfinite(s) and s > 0.0
-    ]
-    if finite_pos:
-        fallback = max(finite_pos)
-        all_zero = False
-    else:
-        fallback = 1.0
-        all_zero = True
 
-    heights = []
-    for s in semi_diameters:
-        if math.isfinite(s) and s > 0.0:
-            heights.append(s)
+    **DERIVED WRAPPER over ``resolve_aperture_records``.** The
+    public contract is byte-compatible with the shipped one — same 2-tuple, same
+    values — and the compatibility tests (``test_resolve_aperture_heights_fallback``,
+    ``…_all_zero``, and the universal positive-finite property test) pin exactly
+    that.
+
+    **The returned height may not be a measurement.** A non-measured surface's entry
+    here is a FABRICATED fallback: it exists so plot limits and neutral scaling stay
+    sane, and it must NOT be used to position drawn geometry. A caller that needs to
+    know whether a height was read from the engine must consume
+    ``resolve_aperture_records`` and test ``record.measured`` — this wrapper cannot
+    tell you, and signalling "unknown" in-band (a ``None``/``nan`` height) would break
+    the universal positive-finite property this contract carries.
+    """
+    records = resolve_aperture_records(semi_diameters)
+    return [r.height for r in records], all(not r.measured for r in records)
+
+
+@_dataclass(frozen=True)
+class GroupRim:
+    """The flat-rim height ``H`` of ONE cemented group.
+
+    - ``surfaces``: every surface in the group, LDE order.
+    - ``rim_height``: ``H``, always finite and > 0.
+    - ``basis``: ``"measured"`` (at least one member's aperture was read) or
+      ``"placeholder"`` (no member was — the all-placeholder body).
+    - ``contributor``: the surface whose MEASURED height set ``H``; ``None`` iff
+      ``basis == "placeholder"``.
+    - ``clamped``: the non-measured members whose fabricated placeholder EXCEEDED
+      ``H`` and were capped at it.
+
+    ``H`` is ``max(measured clear semi)`` over the group — **OptiVibe's OWN
+    approximation of where to close the drawn body, forced by the fact that the only
+    numbers available to us are clear semi-diameters.** It is a drawing convention,
+    not a physical part dimension, and neither the code, the result dict nor the
+    figure may present it as one.
+    """
+
+    surfaces: "tuple[int, ...]"
+    rim_height: float
+    basis: str
+    contributor: "int | None"
+    clamped: "tuple[int, ...]"
+
+
+def resolve_group_rims(apertures, groups):
+    """Per-group rim height ``H`` + the ONE ``draw_heights`` map.
+
+    Returns ``(rims, draw_heights)``:
+
+    - ``rims``: one ``GroupRim`` per non-empty group, in the order given.
+    - ``draw_heights``: a ``dict[int, float]`` covering **EVERY** surface index
+      ``0 .. len(apertures)-1`` (identity for an ungrouped surface), clamping a
+      non-measured grouped surface to its group's ``H``. This is the ONLY height the
+      drawing code may consume — one computation, two draw paths, no index kept in
+      step by hand.
+
+    Rules (all four):
+
+    1. ``rim_height = max(a.height for a in group if a.measured)`` — a NON-measured
+       aperture can never RAISE a rim (its height is fabricated).
+    2. No measured member at all -> ``basis="placeholder"``, ``rim_height`` = the max
+       placeholder, ``contributor is None``. The body is still drawn (an absent
+       element reads as "no lens here"), but it renders NOT-MEASURED.
+    3. A non-measured member whose placeholder exceeds ``H`` is CLAMPED to ``H`` and
+       named in ``clamped``.
+    4. A MEASURED surface is never clamped — by construction ``h_j <= H``.
+
+    **THE NON-MEASURED-HEIGHT PROHIBITION.** A non-measured
+    record's ``draw_heights`` value may position drawn geometry in EXACTLY ONE place:
+    the all-placeholder body. Everywhere else — surface profiles,
+    internal interfaces, ticks, leaders, closures, label anchors — a non-measured
+    height is scaling/compatibility data only and may never become an artist
+    coordinate. The clamp exists as a structural BOUND on the residual consumers
+    (plot limits, that one body), not as a licence to draw at it.
+
+    Total: never raises. An out-of-range group index is ignored; an empty group
+    produces no rim.
+    """
+    records = list(apertures)
+    n = len(records)
+    draw_heights = {}
+    for i in range(n):
+        h = float(records[i].height)
+        if not math.isfinite(h) or h <= 0.0:
+            h = 1.0
+        draw_heights[i] = h
+
+    rims = []
+    for group in groups:
+        members = []
+        for j in group:
+            try:
+                jj = int(j)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= jj < n:
+                members.append(jj)
+        if not members:
+            continue
+        measured = [records[j] for j in members if records[j].measured]
+        if measured:
+            rim_height = max(a.height for a in measured)
+            # Deterministic contributor: the LOWEST-indexed surface achieving H.
+            contributor = min(a.surface for a in measured if a.height == rim_height)
+            basis = "measured"
         else:
-            heights.append(fallback)
-    return heights, all_zero
+            rim_height = max(draw_heights[j] for j in members)
+            contributor = None
+            basis = "placeholder"
+        rim_height = float(rim_height)
+        if not math.isfinite(rim_height) or rim_height <= 0.0:
+            rim_height = 1.0
+        clamped = []
+        for j in members:
+            if records[j].measured:
+                continue  # rule 4 — a measured surface is never clamped
+            if draw_heights[j] > rim_height:
+                clamped.append(j)
+                draw_heights[j] = rim_height
+        rims.append(GroupRim(
+            surfaces=tuple(members),
+            rim_height=rim_height,
+            basis=basis,
+            contributor=contributor,
+            clamped=tuple(clamped),
+        ))
+    return tuple(rims), draw_heights
+
+
+@_dataclass(frozen=True)
+class GroupSection:
+    """The ONE closed boundary ring of a cemented group, in PLOT coordinates.
+
+    - ``surfaces``: the group's surface indices, LDE order.
+    - ``height``: ``H`` (the group's rim height).
+    - ``polygon``: THE closed boundary ring, in walk order — front
+      cap bottom->top (with extensions), upper rim, back cap top->bottom reversed
+      (with extensions), lower rim. The first point is NOT repeated at the end, and
+      consecutive-identical points are collapsed.
+    - ``rim_upper`` / ``rim_lower``: INDEX RUNS into ``polygon``. Fill and stroke both
+      consume ``polygon``, so the stroke is a subsequence of the fill's own boundary
+      BY CONSTRUCTION (by indices) — never by comparing two independently built
+      coordinate sets.
+    """
+
+    surfaces: "tuple[int, ...]"
+    height: float
+    polygon: "tuple[Point2D, ...]"
+    rim_upper: "tuple[int, ...]"
+    rim_lower: "tuple[int, ...]"
+
+
+@_dataclass(frozen=True)
+class GroupSectionBuild:
+    """The TOTAL result of ``build_group_section`` — one outcome per input case.
+
+    - ``section``: the closed body, or ``None`` when no closed body exists.
+    - ``open_surfaces``: the unmeasured OUTER caps that prevented closure.
+    - ``rim_truncated``: caps whose extension started at the LAST VALID sample
+      because the aperture-edge samples masked out (a steep conic).
+    """
+
+    section: "GroupSection | None"
+    open_surfaces: "tuple[int, ...]"
+    rim_truncated: "tuple[int, ...]"
+
+
+# The rim-reach epsilon. **PURELY RELATIVE**: an extension vertex is emitted only
+# when ``H - |y_edge| > _RIM_REL_EPS * H``. ``H`` is finite and > 0 by construction
+# (``GroupRim``), so no absolute floor exists or is needed.
+#
+# **The ``max(H, 1.0)`` form is FORBIDDEN.** It is an ABSOLUTE 1e-9 whenever H < 1,
+# so on a sub-millimetre element it can suppress a 50 % semi mismatch — exactly the
+# sloped closure this section exists to eliminate. Do not reintroduce it, and do not
+# reintroduce any other absolute floor (``+ 1e-12``, ``max(H, eps)``, a hardcoded
+# tolerance): the sub-unit and near-zero fixtures in the C-16 battery pin this.
+_RIM_REL_EPS = 1e-9
+
+
+def extend_profile_to_rim(y_valid, sag_valid, rim_height):
+    """Append the flat rim extension to ONE cap, **IN LOCAL ``(y, sag)`` SPACE**.
+
+    Appends ``(+H, sag_valid[-1])`` and prepends ``(-H, sag_valid[0])`` — the
+    extension is at CONSTANT local sag (i.e. constant local axial coordinate), so it
+    runs radially outward from the cap's own aperture edge to the group rim.
+
+    Returns the inputs UNCHANGED (**the same objects**) when the cap already reaches
+    ``±H`` within the ``_RIM_REL_EPS`` RELATIVE tolerance — that is the structural
+    half of the equal-semi identity: when every group height equals ``H``, no
+    extension vertex is emitted at all and the polygon is element-for-element the
+    legacy front-forward/back-reversed sequence.
+
+    **This runs BEFORE any transform, and that is load-bearing.** On a fold the
+    extension is NOT axis-aligned in plot space and must not be; building it in
+    global/plot coordinates would produce a horizontal rim in the wrong frame and
+    pass every count-based test.
+
+    **Return-type contract (both branches, stated because they differ):**
+
+    - NO extension needed -> the inputs are returned UNCHANGED, as the SAME OBJECTS,
+      whatever type they were. That identity is the structural equal-semi proof.
+    - An extension IS emitted -> BOTH returns are ``numpy.ndarray`` of dtype float,
+      built with ``np.asarray`` (which takes DATA). On the documented domain — the
+      builder hands in the masked ``sag_profile`` arrays — that means both branches
+      return ndarrays and a vectorised consumer is safe on either.
+
+    An earlier version tried to preserve the caller's type with
+    ``type(y_valid)(ys)``. That is DEAD on the only type it was written for:
+    ``numpy.ndarray``'s constructor takes a SHAPE, not data, so it always raised and
+    the ``except`` always ran — the extended branch silently returned plain lists
+    while the comment claimed the array type was kept. Do not reintroduce it; the
+    return-type contract above is pinned by a test.
+
+    Total on the documented domain: an empty input, or a non-finite/non-positive
+    ``rim_height``, returns the inputs unchanged. (``numpy`` is imported lazily on
+    the extending path only, the same way ``sag_profile`` — which produces this
+    function's inputs — imports it.)
+    """
+    try:
+        h = float(rim_height)
+    except (TypeError, ValueError):
+        return y_valid, sag_valid
+    if not math.isfinite(h) or h <= 0.0:
+        return y_valid, sag_valid
+    if len(y_valid) == 0 or len(sag_valid) == 0:
+        return y_valid, sag_valid
+    tol = _RIM_REL_EPS * h
+    need_lo = (h - abs(float(y_valid[0]))) > tol
+    need_hi = (h - abs(float(y_valid[-1]))) > tol
+    if not need_lo and not need_hi:
+        return y_valid, sag_valid
+    ys = list(y_valid)
+    sags = list(sag_valid)
+    if need_hi:
+        ys.append(h)
+        sags.append(float(sag_valid[-1]))
+    if need_lo:
+        ys.insert(0, -h)
+        sags.insert(0, float(sag_valid[0]))
+    import numpy as np
+
+    # np.asarray takes DATA (unlike np.ndarray, which takes a shape), so this
+    # genuinely returns arrays on both legs — no dead branch, no silent list.
+    return np.asarray(ys, dtype=float), np.asarray(sags, dtype=float)
+
+
+def _cap_profile(np, row, half_height, samples):
+    """Sample ONE cap's local ``(y, sag)`` profile + its validity mask."""
+    y = np.linspace(-float(half_height), float(half_height), int(samples))
+    z, valid = sag_profile(
+        row["radius"], row["conic"], y,
+        coeffs=row.get("aspheric_coefficients"),
+        norm_radius=row.get("asphere_norm_radius"),
+        power=row.get("asphere_power"),
+    )
+    return y, z, valid
+
+
+def _pt_eq(a, b):
+    return a[0] == b[0] and a[1] == b[1]
+
+
+def build_group_section(np, rows, group, apertures, draw_heights, rim, to_plot,
+                        *, samples=81):
+    """Build ONE cemented group's closed boundary ring.
+
+    ``to_plot(surface, y, sag) -> Point2D | None`` is the ONLY thing the two draw
+    paths supply differently: the unfolded path maps ``(i, y, sag)`` to
+    ``(z_vertex[i] + sag, y)``; the folded path transforms the local ``(0, y, sag)``
+    through surface ``i``'s global frame via ``sag_to_global`` and emits ``(gz, gy)``.
+    A ``None`` from ``to_plot`` (a degraded global frame) suppresses the body.
+
+    The construction:
+
+    1. ``H = rim.rim_height``.
+    2. Each OUTER cap is sampled to its OWN ``draw_heights[j]`` and masked by its OWN
+       validity — both caps, always.
+    3. ``extend_profile_to_rim`` appends the flat extension IN LOCAL SPACE. A cap
+       whose aperture-edge samples masked out extends from the LAST VALID sample and
+       is named in ``rim_truncated``; the body still closes.
+    4. Every point — curve and extension — maps through ``to_plot``. **The extension
+       is built BEFORE the transform.**
+    5. The ring is walked ONCE into ONE polygon; ``rim_upper`` / ``rim_lower`` are
+       index runs into it.
+
+    The return state is TOTAL — one outcome per input case:
+
+    ======================================== ============ ==============
+    Group input state                        ``section``  ``rim.basis``
+    ======================================== ============ ==============
+    both OUTER caps measured                 GroupSection ``"measured"``
+    >=1 OUTER cap unmeasured, >=1 measured    ``None``     —
+    NO member measured                       GroupSection ``"placeholder"``
+    empty valid mask / degraded ``to_plot``  ``None``     —
+    ======================================== ============ ==============
+
+    **Must never**: extend in plot/global coordinates; consume
+    ``apertures[j].height`` for a non-measured ``j`` as geometry EXCEPT in the
+    placeholder-basis row above (the one sanctioned case); emit a duplicate vertex on
+    an equal-semi cap; touch matplotlib or the engine.
+
+    Total: never raises. A group of fewer than two surfaces has no body to close and
+    yields ``section=None`` (a single cap is not a boundary).
+    """
+    empty = GroupSectionBuild(section=None, open_surfaces=(), rim_truncated=())
+    try:
+        members = []
+        for j in group:
+            try:
+                members.append(int(j))
+            except (TypeError, ValueError):
+                return empty
+        if len(members) < 2:
+            return empty
+        records = list(apertures)
+        nrec = len(records)
+        front, back = members[0], members[-1]
+        if not (0 <= front < nrec and 0 <= back < nrec):
+            return empty
+        if front == back:
+            return empty
+
+        any_measured = any(records[j].measured for j in members if 0 <= j < nrec)
+        caps_measured = records[front].measured and records[back].measured
+        if any_measured and not caps_measured:
+            # Row 2: an unmeasured OUTER cap. No closed body; the draw path keeps the
+            # MEASURED per-surface profiles and discloses the open cap.
+            open_caps = tuple(j for j in (front, back) if not records[j].measured)
+            return GroupSectionBuild(
+                section=None, open_surfaces=open_caps, rim_truncated=(),
+            )
+
+        h_rim = float(rim.rim_height)
+        truncated = []
+        caps = {}
+        for j in (front, back):
+            h = float(draw_heights.get(j, records[j].height))
+            y, z, valid = _cap_profile(np, rows[j], h, samples)
+            y_valid = y[valid]
+            sag_valid = z[valid]
+            if len(y_valid) == 0:
+                # Row 4: an empty valid mask — the body is suppressed, per-surface
+                # lines are kept by the draw path.
+                return GroupSectionBuild(
+                    section=None, open_surfaces=(), rim_truncated=tuple(truncated),
+                )
+            if not bool(valid[0]) or not bool(valid[-1]):
+                truncated.append(j)
+            y_ext, sag_ext = extend_profile_to_rim(y_valid, sag_valid, h_rim)
+            caps[j] = (y_valid, sag_valid, y_ext, sag_ext)
+
+        pts = []
+        markers = []
+
+        def _emit(surface, ys, sags, order, tags):
+            for k in order:
+                p = to_plot(surface, float(ys[k]), float(sags[k]))
+                if p is None:
+                    return False
+                pts.append((float(p[0]), float(p[1])))
+                markers.append(tags(k))
+            return True
+
+        yv_f, _sv_f, ye_f, se_f = caps[front]
+        f_lo = float(ye_f[0]) != float(yv_f[0])
+        f_hi = float(ye_f[-1]) != float(yv_f[-1])
+        last_f = len(ye_f) - 1
+
+        def _ftag(k):
+            if k == 0 and f_lo:
+                return "F_RIM_LO"
+            if k == last_f and f_hi:
+                return "F_RIM_HI"
+            return "F_CURVE"
+
+        yv_b, _sv_b, ye_b, se_b = caps[back]
+        b_lo = float(ye_b[0]) != float(yv_b[0])
+        b_hi = float(ye_b[-1]) != float(yv_b[-1])
+        last_b = len(ye_b) - 1
+
+        def _btag(k):
+            if k == 0 and b_lo:
+                return "B_RIM_LO"
+            if k == last_b and b_hi:
+                return "B_RIM_HI"
+            return "B_CURVE"
+
+        # The ONE walk: front cap bottom->top (with extensions), then the back cap
+        # top->bottom REVERSED (with extensions). The upper rim is the segment
+        # between the two +H points; the lower rim closes the ring back to point 0.
+        if not _emit(front, ye_f, se_f, range(len(ye_f)), _ftag):
+            return GroupSectionBuild(
+                section=None, open_surfaces=(), rim_truncated=tuple(truncated))
+        if not _emit(back, ye_b, se_b, range(len(ye_b) - 1, -1, -1), _btag):
+            return GroupSectionBuild(
+                section=None, open_surfaces=(), rim_truncated=tuple(truncated))
+
+        poly = []
+        kept = []
+        for p, m in zip(pts, markers):
+            if poly and _pt_eq(poly[-1], p):
+                continue
+            poly.append(p)
+            kept.append(m)
+        while len(poly) > 1 and _pt_eq(poly[-1], poly[0]):
+            poly.pop()
+            kept.pop()
+        if len(poly) < 3:
+            return GroupSectionBuild(
+                section=None, open_surfaces=(), rim_truncated=tuple(truncated))
+
+        def _last(tag):
+            for idx in range(len(kept) - 1, -1, -1):
+                if kept[idx] == tag:
+                    return idx
+            return None
+
+        def _first(tag):
+            for idx, m in enumerate(kept):
+                if m == tag:
+                    return idx
+            return None
+
+        f_top, b_top = _last("F_CURVE"), _first("B_CURVE")
+        rim_upper = (tuple(range(f_top, b_top + 1))
+                     if f_top is not None and b_top is not None and f_top <= b_top
+                     else ())
+        b_bot, f_bot = _last("B_CURVE"), _first("F_CURVE")
+        rim_lower = ((tuple(range(b_bot, len(poly))) + tuple(range(0, f_bot + 1)))
+                     if b_bot is not None and f_bot is not None
+                     else ())
+
+        section = GroupSection(
+            surfaces=tuple(members),
+            height=h_rim,
+            polygon=tuple(poly),
+            rim_upper=rim_upper,
+            rim_lower=rim_lower,
+        )
+        return GroupSectionBuild(
+            section=section, open_surfaces=(), rim_truncated=tuple(truncated),
+        )
+    except Exception:  # noqa: BLE001 — TOTAL: a degraded input suppresses the body
+        return empty
+
+
+@_dataclass(frozen=True)
+class ProjectionState:
+    """What the prescription-level projection check established.
+
+    - ``out_of_plane``: ``True`` (proven out of plane), ``False`` (every surface was
+      classifiable and every coordinate-break term read zero), or ``None`` — **could
+      not be measured. Unknown NEVER collapses to False.**
+    - ``out_of_plane_surfaces``: the surfaces that PROVED out-of-plane geometry.
+    - ``unreadable_surfaces``: the surfaces the check could not classify — either a
+      coordinate-break cell read FAILED, or the surface TYPE is outside the frozen
+      ``_PROJECTION_CLASSIFIABLE`` allow-list.
+
+    The claim is prescription-level ONLY: coordinate-break terms plus surface types.
+    A ray leaving the meridional plane while the prescription reads clean is outside
+    this check.
+    """
+
+    out_of_plane: "bool | None"
+    out_of_plane_surfaces: "tuple[int, ...]"
+    unreadable_surfaces: "tuple[int, ...]"
+
+
+# The three coordinate-break terms that PROVE out-of-plane geometry. ``decenter_y``
+# and ``tilt_x`` are IN-PLANE controls and prove nothing — they are deliberately
+# absent, and adding them would false-alarm every ordinary fold.
+_OOP_CB_TERMS = ("decenter_x", "tilt_y", "tilt_z")
+
+
+def read_projection_state(lde, n, rows):
+    """Classify whether the drawn 2-D meridional projection discards geometry.
+
+    For each coordinate-break row (by the shipped ``_is_coordinate_break`` type test)
+    the three out-of-plane terms ``decenter_x`` / ``tilt_y`` / ``tilt_z`` are read
+    through ``_cb_cells.read_cb_cell`` (Header-verified, DataType-keyed Double cells).
+    **Finite and non-zero on any of the three => out of plane**, and the surface is
+    named. A read failure puts the surface in ``unreadable_surfaces`` and yields
+    ``out_of_plane=None`` unless another surface already proved ``True``.
+
+    **NO TOLERANCE IS INVENTED.** The test is exact finite non-zero. There is no
+    threshold constant here, inline or hidden in a helper: a 1e-12 decenter is a
+    decenter, and the honest report is that it is out of plane, not that it is
+    "small enough". ``0.0`` and ``-0.0`` prove nothing.
+
+    **The classification DOMAIN is FAIL-CLOSED.** A row whose TYPE is outside the
+    frozen ``_PROJECTION_CLASSIFIABLE`` allow-list (a TiltSurface-class type, an
+    unrecognised token, an unreadable Type) goes to ``unreadable_surfaces`` and yields
+    ``out_of_plane = None`` — never a silent ``False``. Type matching is EXACT
+    FULL-TOKEN through the codebase's shared ``_grin_cells._exact_token_match``
+    resolver, never a substring (the ``Gradient1`` subset-of ``Gradient10`` trap
+    class).
+
+    NEVER raises, and never calls the engine beyond the typed cell reads it needs
+    (one ``GetSurfaceAt`` per coordinate-break row, then the three cell reads).
+    """
+    from ._grin_cells import _exact_token_match
+
+    proven = []
+    unreadable = []
+    try:
+        count = int(n)
+    except (TypeError, ValueError):
+        count = 0
+    for i in range(count):
+        try:
+            type_name = str(rows[i]["type_name"])
+        except Exception:  # noqa: BLE001 — an unreadable Type is NOT classifiable
+            unreadable.append(i)
+            continue
+        if _is_coordinate_break(type_name):
+            _classify_cb_row(lde, i, proven, unreadable)
+            continue
+        if _exact_token_match(type_name, _PROJECTION_CLASSIFIABLE) is None:
+            # Fail CLOSED: an unvouched type is UNKNOWN, never assumed in-plane.
+            unreadable.append(i)
+
+    if proven:
+        out_of_plane = True
+    elif unreadable:
+        out_of_plane = None
+    else:
+        out_of_plane = False
+    return ProjectionState(
+        out_of_plane=out_of_plane,
+        out_of_plane_surfaces=tuple(proven),
+        unreadable_surfaces=tuple(unreadable),
+    )
+
+
+def _classify_cb_row(lde, i, proven, unreadable):
+    """Classify ONE coordinate-break row from its Par cells. Never raises.
+
+    **A NON-FINITE typed value is a FAILED READ, not a zero.** ``nan`` is the
+    codebase's NORMAL representation of an unreadable cell — ``_raw_float`` coerces a
+    non-numeric cell to ``nan`` without marking the row degraded — so a ``nan`` term
+    arrives here through the ORDINARY degraded-cell path, not just by injection. An
+    earlier version tested ``math.isfinite(v) and v != 0.0`` and simply fell through
+    to the next term on a non-finite value; with all three terms non-finite the
+    function appended to NEITHER list and the caller's final ``else`` collapsed
+    ``out_of_plane`` to ``False`` — a figure asserting planarity it never
+    established, which is the exact silent-wrong the tri-state exists to prevent.
+    ``nan``/``+inf``/``-inf`` now route to ``unreadable``.
+
+    **PRECEDENCE: a finite non-zero term WINS over a fault on the same row.** All
+    three terms are scanned before the row is classified, so a row whose first term
+    is unreadable and whose second term proves skew reads PROVEN, never unknown. The
+    earlier version returned immediately on a raising read, which had the identical
+    ordering defect on the raising path (a sibling of the non-finite bug) —
+    both are closed by the one loop below. A proven row is NOT also listed as
+    unreadable: its projection status IS measured (it is out of plane), and naming it
+    unreadable would put a "PROJECTION STATUS NOT MEASURED" box on the figure for a
+    surface whose status is settled.
+
+    ``0.0`` / ``-0.0`` are neither a proof nor a fault — they are genuine readings
+    that prove nothing, and a row of three zeros is correctly classified in-plane.
+    """
+    from . import _cb_cells
+
+    try:
+        row = lde.GetSurfaceAt(i)
+    except Exception:  # noqa: BLE001 — an unreachable row is unreadable, not planar
+        unreadable.append(i)
+        return
+    faulted = False
+    for term in _OOP_CB_TERMS:
+        try:
+            v = float(_cb_cells.read_cb_cell(lde, row, term))
+        except Exception:  # noqa: BLE001 — a failed cell read is UNKNOWN, not zero
+            faulted = True
+            continue
+        if not math.isfinite(v):
+            # A non-finite typed value is a degraded read wearing a number's clothes.
+            faulted = True
+            continue
+        # Exact finite non-zero. No tolerance, by design.
+        if v != 0.0:
+            proven.append(i)  # precedence: a proof outranks a fault on the SAME row
+            return
+    if faulted:
+        unreadable.append(i)

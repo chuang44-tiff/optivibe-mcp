@@ -1,9 +1,20 @@
 """session.py — ZemaxSession: single-handle ZOS-API engine lifecycle.
 
-Probe-grounded: the ZOS-API is SINGLE-SEAT (N=1). A 2nd
-``CreateNewApplication()`` binds the SAME engine and closing any one handle
-poisons the shared remoting channel — so ``ZemaxSession`` owns EXACTLY ONE
-application handle, opened once and closed once.
+Probe-grounded, corrected in place in August 2026 (a claim that was true when
+written and went false by measurement teaches the failure mode):
+
+- CLAUSE 1, QUALIFIED. "The ZOS-API is SINGLE-SEAT (N=1)" is NOT a licence
+  hard-block: cross-process coexistence has been measured on the licence this
+  was developed against. N=1 is OptiVibe's own operational discipline, enforced BY US
+  because nothing else enforces it. The rule does not change.
+- CLAUSE 2, KEPT with the probe's qualifier. A 2nd ``CreateNewApplication()``
+  binds the SAME engine and closing any one handle poisons the shared remoting
+  channel — but only WHILE a live registered engine exists; after a poison the
+  next create spawns a genuinely NEW pid (measured live). That poison is the
+  flavour-A fault injection the live channel-dead gate depends on.
+
+So ``ZemaxSession`` owns EXACTLY ONE application handle, opened once and closed
+once.
 
 - ``open()`` is idempotent: a 2nd call returns ``self`` WITHOUT a 2nd
   ``CreateNewApplication()``.
@@ -32,10 +43,69 @@ import time
 
 from . import _bootstrap, process_reaper
 from .errors import (
+    SessionChannelDeadError,
     SessionClosedError,
     SessionConnectError,
     SessionConnectTimeoutError,
     SessionMisuseError,
+)
+
+# The three channel-observation verdicts. DEAD is the ONLY one that
+# latches, and it latches only inside ``observe_channel``.
+CHANNEL_ALIVE = "alive"
+CHANNEL_DEAD = "dead"
+CHANNEL_UNKNOWN = "unknown"
+
+# ------------------------------------------------------------------------- #
+# The refusal prose. TWO module constants + ONE builder
+# (``ZemaxSession.channel_dead_message``) — no other function anywhere composes
+# refusal prose, which a static AST test asserts, so the human wording review is
+# a single-site read.
+#
+# WORDING IS LOAD-BEARING. Each sentence claims ONLY what the design
+# establishes, and the two rejected overclaims are recorded so they are not
+# reintroduced:
+#   - NOT "the engine process is dead" — flavour A leaves it alive.
+#   - NOT "is not reachable from this process" — in flavour A the design IS
+#     reachable; we DECLINE to serve it.
+#   - NOT "re-opening would fail" — for flavour A it would succeed.
+#   - NOT "restarting will fix it" — it is the only remedy MEASURED to work.
+#   - NOT "any designs this session saved are under it" — an explicitly wired
+#     ``artifact_sink`` may have written elsewhere, which is disclosed.
+# ------------------------------------------------------------------------- #
+_CHANNEL_DEAD_PROSE_HEAD = (
+    "The OpticStudio remoting channel for this MCP process is DEAD. OptiVibe has "
+    "stopped serving engine calls on this session and does not re-open the engine: "
+    "a dead channel can be a symptom of a wider fault (the engine was killed, the "
+    "licence service, the machine or the network), and silently re-opening would "
+    "hide that while re-grabbing the single seat.\n"
+    "\n"
+    "REMEDY: restart the MCP process — in Claude Code, restart the session or "
+    "reconnect the `optivibe` MCP server.\n"
+    "\n"
+    "OptiVibe will no longer serve what was loaded through this session. The "
+    "supported way back is a file on disk. "
+)
+
+# The CANNOT-NAME variant is a CONSTANT: no part of a rejected ``workspace_root``
+# is ever interpolated into it (a test asserts equality with this exact string).
+# The reason clause covers all three ways this variant is reached — unset,
+# unreadable, AND un-renderable. The third matters: ``_channel_dead_refusal_text``
+# falls back to this constant when a custom message builder returns a non-str or a
+# blank string, and in THAT case ``workspace_root`` may have been perfectly valid
+# and readable. Saying only "not set, or could not be read"
+# would have been false on exactly that path.
+CHANNEL_DEAD_CANNOT_NAME_MESSAGE = _CHANNEL_DEAD_PROSE_HEAD + (
+    "OptiVibe cannot name a default save folder for this session (it was not set, "
+    "could not be read, or could not be rendered), so look wherever your designs "
+    "were written. If nothing was saved, the design has to be rebuilt."
+)
+
+_CHANNEL_DEAD_NAMED_TEMPLATE = _CHANNEL_DEAD_PROSE_HEAD + (
+    "OptiVibe's default save folder for this session is:\n"
+    "  {root}\n"
+    "Look there first. OptiVibe has not checked whether it contains anything, and "
+    "a session configured with its own artifact sink may have written elsewhere."
 )
 
 
@@ -131,6 +201,13 @@ class ZemaxSession:
         self.slow_call_threshold_s = slow_call_threshold_s
 
         self._app = None
+        # The retained ``ZOSAPI_Connection`` (it used to be a local in
+        # _open_locked, so the cheapest liveness signal was unreachable).
+        self._connection = None
+        # TERMINAL: a channel fault was OBSERVED. NEVER cleared — not by close(),
+        # not by anything. Written at EXACTLY ONE site in this codebase: the
+        # ``IsAlive is False`` branch of ``observe_channel`` (a static guard asserts it).
+        self._channel_dead = False
         self._closed = False
         self._tracked = {}  # {pid: create_time} — only PIDs WE spawned
         self._baseline = set()  # engine PIDs present before our spawn (never touch)
@@ -170,8 +247,240 @@ class ZemaxSession:
     # ------------------------------------------------------------------ #
     @property
     def is_open(self) -> bool:
-        """True if a live engine handle is held and the session is not closed."""
+        """True if a handle is HELD and the session is not closed.
+
+        WHAT THIS ESTABLISHES, precisely: ``_app`` is non-None and ``close()`` has
+        not run. It does NOT establish that the engine's remoting CHANNEL is
+        usable — after a channel fault this still reads ``True`` while every
+        engine touch raises (live probe ``is_open_still_true_after_poison``).
+        Liveness is ``observe_channel()``; the terminal verdict is
+        ``channel_dead``.
+
+        THE BODY IS DELIBERATELY UNCHANGED, and this is a structural ruling, not
+        an oversight. Making this predicate "honest" would silently ship
+        the recovery option the owner REJECTED: ``lazy.py`` reads
+        ``if dispatchable and not self._session.is_open: self._session.open()``,
+        so a truthful ``False`` on a dead channel would make the lazy dispatcher
+        immediately open a NEW engine. A never-opened or cleanly-closed session
+        must keep cold-opening exactly as it does today, and a session whose
+        channel death was OBSERVED must REFUSE — which is enforced by the two
+        gates that read ``channel_dead`` (Dispatcher.dispatch and
+        ``_open_locked``), never by this boolean.
+
+        The qualifier "OBSERVED" is load-bearing, not throat-clearing: on the
+        blind path (``observe_channel``'s residual) nothing sets the
+        flag, so ordinary open logic runs and a re-open can occur exactly as it
+        does today. That degradation is accepted; the unqualified sentence would
+        not be true.
+        """
         return self._app is not None and not self._closed
+
+    @property
+    def channel_dead(self) -> bool:
+        """True once a channel fault was OBSERVED. TERMINAL; never cleared.
+
+        A free flag read — no engine touch, no I/O. Set ONLY by
+        ``observe_channel()`` on a completed ``IsAlive is False`` observation.
+        ``close()`` does NOT clear it: ``_close_locked`` nulls ``_app``,
+        which makes ``is_open`` False, so a close-then-dispatch would otherwise
+        route through the cold-open branch and re-open. Only a NEW ``ZemaxSession``
+        clears it — for the MCP, a process restart, the remedy the message names.
+        """
+        return self._channel_dead
+
+    def observe_channel(self) -> str:
+        """Observe the channel and LATCH IT DEAD if the observation says so.
+
+        Never raises an ordinary ``Exception``; returns
+        ``CHANNEL_{ALIVE,DEAD,UNKNOWN}``. ``KeyboardInterrupt``/``SystemExit``
+        PROPAGATE by design (a deliberate abort is never swallowed into a verdict) —
+        the adversarial suite pins that, so an unqualified "NEVER raises" here would
+        be an overclaim this repo's own tests disprove. Named ``observe_`` and not
+        ``check_`` because it MUTATES: it is the SOLE writer of ``_channel_dead``.
+
+        Called by ``Dispatcher.dispatch``, which already holds ``self._lock``
+        (server.py), so this takes no lock of its own and every engine touch stays
+        serialized.
+
+          0. ``self._channel_dead``                                  -> DEAD (latched)
+          1. ``_closed`` / ``_app is None`` / ``_connection is None`` -> UNKNOWN
+          2. ``self._connection.IsAlive``
+                 literal True                                        -> ALIVE
+                 missing member / raises / non-bool                  -> UNKNOWN
+                 literal False -> LATCH (guarded, below)             -> DEAD
+
+        THE LATCH HAS ONE WRITE SITE. ``self._channel_dead = True`` exists at
+        exactly ONE place in the codebase: the ``IsAlive is False`` branch below,
+        three lines after the read that justifies it, and it stores the literal
+        ``True``. There is no public setter.
+
+        THE STATIC GUARD IS A TRIPWIRE, NOT A PROOF. It parses every module in this package
+        and rejects EXACTLY these static, literal-named shapes outside
+        ``observe_channel``, and it requires the in-branch store to be the literal
+        ``True``:
+
+          - assignment to ``self._channel_dead`` — plain, annotated, augmented,
+            or via tuple/list/starred unpacking;
+          - a ``for`` target and a ``with ... as`` target;
+          - ``setattr`` / ``delattr`` as a BARE NAME, and ``__setattr__`` /
+            ``__delattr__`` as an attribute, in both the bound 2-arg and unbound
+            3-arg spellings;
+          - ``<x>.__dict__["_channel_dead"]`` and ``vars(x)["_channel_dead"]``
+            assignment, and ``del`` of either;
+          - ``.update(_channel_dead=...)`` and ``.update({"_channel_dead": ...})``;
+          - ``.pop("_channel_dead")``.
+
+        NOTHING ELSE. Not ``update(**{...})`` or ``update([(k, v)])``, not
+        ``__dict__ |= {...}``, not a whole-``__dict__`` replacement, not
+        ``setdefault``, not a comprehension target, not ``builtins.setattr(...)``
+        (a QUALIFIED name — only the bare one is matched), not a runtime-computed
+        attribute name or mapping key, and nothing outside this package.
+
+        The claim is deliberately no wider than the check. A static check cannot
+        be exhaustive over Python's dynamic write surface; this guard was extended
+        three times and each round found more forms, which is structural rather
+        than a matter of effort — and each time the PROSE was the thing that
+        outran it.
+
+        What the FLAG's safety actually rests on is therefore not this check but
+        the two gates, which read whatever the flag says at the moment they run.
+
+        THE WRITE IS GUARDED, AND A FAILED WRITE DOES NOT CHANGE THE VERDICT: if
+        the assignment or the breadcrumb throws — only possible on a hostile double
+        or subclass with a raising ``__setattr__`` — this still returns DEAD. The
+        OBSERVATION is what justifies refusing THIS call.
+
+        THE FLAG IS NOT MERELY AN OPTIMISATION, and an earlier revision of this
+        docstring said it was. After ``close()``
+        nulls ``_app``, the flag is the ONLY fact GATE B2 can consult — an
+        un-landed flag therefore permits a real ``CreateNewApplication()`` on the
+        next open, which is the one thing this design exists to prevent. So the write
+        is attempted TWICE: the ordinary assignment, then ``object.__setattr__``,
+        which bypasses an overridden ``__setattr__`` rather than trusting it. No
+        second flag and no new state — the same one flag, written through a path a
+        hostile subclass does not sit on.
+
+        WHAT IS ESTABLISHED, exactly:
+        - For the real ``ZemaxSession`` the write ALWAYS lands, so "does not
+          re-open" holds without qualification.
+        - For a subclass that defeats the ordinary assignment, the fallback lands
+          and it still holds.
+        - For a subclass that defeats BOTH, THIS call is still refused (the verdict
+          is the observation) but a later ``close()`` + ``open()`` CAN re-open.
+          Such a subclass has defeated its own guarantee; nothing in the harness
+          can prevent that, and it is pinned by a test rather than left implied.
+
+        THE RESIDUAL, stated because it is the one hole: if ``IsAlive`` is absent,
+        persistently throws, returns a non-bool, OR RETURNS A READABLE ``True`` FOR
+        A GENUINELY DEAD CHANNEL, this never returns DEAD and NOTHING detects the
+        fault — not once, not on the next call, not ever. Behaviour then degrades to
+        exactly today's. The 5 measured states were all correct,
+        but 5 states is not a proof, so a wrong ``True`` is NOT excluded. Do not
+        describe this as unconditional detection, and do not say "when IsAlive is
+        readable" — say "when IsAlive positively returns False".
+
+        DEPENDENCE, stated not assumed: [I] ``IsAlive`` may be a process-global
+        signal rather than per-handle (unmeasured — the standing
+        order forbids creating the two-handle case). Under N=1 the two coincide, so
+        this is sound HERE and its soundness DEPENDS on N=1. If it is process-global,
+        the failure mode is a MISSED detection — the residual above — never a wrong
+        action.
+        """
+        try:
+            if self._channel_dead:
+                return CHANNEL_DEAD
+            if self._closed or self._app is None or self._connection is None:
+                return CHANNEL_UNKNOWN
+            alive = self._connection.IsAlive
+            if alive is True:
+                return CHANNEL_ALIVE
+            if alive is not False:
+                # Absent members raise AttributeError above; a non-bool (or a
+                # truthy/falsy stand-in) is NOT an observation of deadness.
+                return CHANNEL_UNKNOWN
+        except Exception:  # noqa: BLE001 — an oracle fault must never brick a session
+            return CHANNEL_UNKNOWN
+        # ---- THE ONLY LATCH SITE IN THE CODEBASE (guarded; verdict is fixed) ----
+        # Every widened catch below RE-RAISES a non-``Exception``: a deliberate
+        # abort must keep travelling to ``_channel_gate``'s handler, and absorbing
+        # it here silently cancelled that convention.
+        try:
+            self._channel_dead = True
+        except BaseException as _exc:  # noqa: BLE001 — hostile __setattr__; bypass it
+            if not isinstance(_exc, Exception):
+                raise
+            try:
+                object.__setattr__(self, "_channel_dead", True)
+            except BaseException as _exc2:  # noqa: BLE001 — see the docstring residual
+                if not isinstance(_exc2, Exception):
+                    raise
+        try:
+            # A diagnostic breadcrumb ONLY — deliberately carries no refusal prose,
+            # so the served wording keeps exactly one builder.
+            self._log(
+                "ZemaxSession: CHANNEL DEAD observed (ZOSAPI_Connection.IsAlive is "
+                "False) — this session is now TERMINAL; every engine call will be "
+                "refused from here."
+            )
+        except BaseException as _exc3:  # noqa: BLE001 — a breadcrumb never decides
+            # An ORDINARY breadcrumb failure never changes the verdict; a
+            # deliberate abort still propagates (reproduced
+            # exactly here: ``_log`` raising KeyboardInterrupt returned DEAD).
+            if not isinstance(_exc3, Exception):
+                raise
+        return CHANNEL_DEAD
+
+    def channel_dead_message(self) -> str:
+        """The ONE refusal message. ISSUES NO FILESYSTEM CALL OF ITS OWN.
+
+        Never raises an ordinary ``Exception``; ``KeyboardInterrupt``/``SystemExit``
+        propagate by design, and ``_channel_dead_refusal_text`` DOES NOT absorb them
+        — it re-raises any non-``Exception`` (server.py, the abort-travel-path rule),
+        so a deliberate abort raised while building this string keeps travelling and
+        is never converted into a refusal. (An earlier revision of this sentence said
+        the caller "absorbs even those, because by then the refusal is already
+        decided". That was FALSE against the shipped helper, and it is corrected in
+        place rather than deleted: prose outrunning the code is the defect this cycle
+        closed three times over.)
+
+        THE WHOLE BODY is inside one ``try/except Exception`` returning the
+        cannot-name variant: ``getattr(self, "workspace_root", None)`` does NOT
+        swallow a throwing descriptor's ``TypeError``/``RuntimeError``, and
+        ``root.strip()`` can itself raise on a hostile ``str`` SUBCLASS. (An earlier
+        version of this note cited a raising ``__bool__``/``__len__``; the
+        ``isinstance(root, str)`` test short-circuits first, so that path is
+        unreachable and the claim was wrong.) The never-raise
+        property is established by the wrapper, not asserted about the reads.
+
+        Reads exactly one OPTIONAL attribute (``workspace_root`` is not set
+        in ``__init__``) and requires it to be a NON-EMPTY str. Anything else —
+        absent, None, "", whitespace-only, a non-str, a throwing descriptor —
+        selects the cannot-name variant, which is a CONSTANT: no part of the
+        rejected value is interpolated into it. A long but VALID non-empty str is
+        not degenerate; it is rendered verbatim and there is no length cap.
+
+        Names the workspace FOLDER, not a file. NO manifest read,
+        NO path join, NO existence check — the returned string is a function of one
+        attribute and nothing else.
+
+        WHAT THE STRUCTURAL GUARD ESTABLISHES, precisely: a static test
+        asserts over the AST that this body calls NOTHING outside {getattr,
+        isinstance, str.strip, str.format} and imports nothing, so no filesystem
+        call can be ADDED here without reddening it. That is a structural guard,
+        NOT a proof that no I/O can occur: an allowed ``getattr`` could in
+        principle trigger a property descriptor that itself performs I/O and
+        returns a string. The honest claim is the narrow one — this builder issues
+        no filesystem call of its own, and the allowlist prevents one being added.
+        (It replaces an earlier ``builtins.open`` name-denylist that was hollow:
+        ``pathlib.Path.read_text()`` goes through ``io.open``.)
+        """
+        try:
+            root = getattr(self, "workspace_root", None)
+            if isinstance(root, str) and root.strip():
+                return _CHANNEL_DEAD_NAMED_TEMPLATE.format(root=root)
+        except Exception:  # noqa: BLE001 — the builder must never raise
+            return CHANNEL_DEAD_CANNOT_NAME_MESSAGE
+        return CHANNEL_DEAD_CANNOT_NAME_MESSAGE
 
     @property
     def app(self):
@@ -265,7 +574,23 @@ class ZemaxSession:
         retries we ACCUMULATE (union) every engine PID we spawned into
         ``tracked_acc``; a PID spawned by a failed attempt that did NOT get reaped
         stays tracked (reapable) and never migrates into ``_baseline``.
+
+        GATE B2 is the FIRST statement, and it is the load-bearing gate:
+        this function owns the sole production ``CreateNewApplication()``, so
+        putting the refusal HERE means no future edit to ``lazy.py`` — and no new
+        caller of ``_open_locked`` — can re-open after an OBSERVED channel fault
+        without deleting a line whose mutation a test pins. GATE A in
+        ``Dispatcher.dispatch`` is an ordering guarantee; this one is structural.
+
+        SCOPE: this refuses a fault OBSERVED on an ESTABLISHED session. A remoting
+        error raised DURING an open is a CONNECT failure — the retry loop below
+        catches it and retries, unchanged — because a create-time remoting
+        error is not known to be terminal (the probe measured a create succeeding
+        after a flavour-A poison) and latching there would change the
+        highest-traffic path in the system.
         """
+        if self._channel_dead:
+            raise SessionChannelDeadError(self.channel_dead_message())
         zosapi = _bootstrap.load_zosapi()
 
         # Captured ONCE: the pre-spawn engine baseline and the pre-create
@@ -353,6 +678,9 @@ class ZemaxSession:
                 # the ONE pre-spawn set; tracked is the accumulated union of every
                 # PID we spawned this open (this attempt + any prior un-reaped one).
                 self._app = app
+                # Retain the connection: it carries ``IsAlive``, the one
+                # liveness signal, and used to be dropped as a local.
+                self._connection = connection
                 self._closed = False
                 self._baseline = set(baseline_pids)
                 self._tracked = dict(tracked_acc)
@@ -584,6 +912,11 @@ class ZemaxSession:
         except Exception:  # noqa: BLE001 — unrecord is best-effort hygiene; never raise
             pass
         self._app = None
+        # Drop the retained connection alongside the handle. ``_channel_dead`` is
+        # DELIBERATELY NOT cleared here: close() nulls ``_app``, which
+        # makes ``is_open`` False, so clearing the latch would re-open the
+        # close-then-dispatch back door into a new engine.
+        self._connection = None
 
     def _record_reap_failure(self, result):
         """Record + log a non-successful reap so a survivor is never silent.

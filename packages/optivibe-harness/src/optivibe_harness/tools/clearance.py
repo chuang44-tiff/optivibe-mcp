@@ -68,6 +68,20 @@ def _finite_nonneg(value, label, default):
     Rejects ``bool`` (an int subclass — a client miswrite), a non-number, inf/-inf/
     nan, and a negative value -> ``ToolParamError`` (the caller envelopes it as
     ``clearance_param``). A missing key uses ``default``. Returns the float.
+
+    THE INVARIANT THIS FUNCTION ESTABLISHES: together with
+    ``resolve_floors``, **the ONLY exception class that can leave the resolver is
+    ``ToolParamError``**. That single-class guarantee is what licenses
+    ``workspace._effective_floors``' single-class ``except`` — and ``save_candidate``,
+    which documents "NEVER raises", has NO outer net, so a second escaping class there
+    is a broken contract, not a cosmetic nit.
+
+    The coercion is guarded because the type gate ADMITS values ``float()`` cannot
+    represent: a huge Python ``int`` (measured: ``10**400``) passes
+    ``isinstance(value, (int, float))`` and then ``float(value)`` raises
+    ``OverflowError``, which is NOT a ``ToolParamError``. Fixed HERE, at the root, and
+    not at the two call sites — two patches for one root is how this project has
+    repeatedly bred siblings.
     """
     if value is None:
         return float(default)
@@ -76,7 +90,35 @@ def _finite_nonneg(value, label, default):
             f"{label} must be a finite number >= 0, got {type(value).__name__} "
             f"{value!r}"
         )
-    coerced = float(value)
+    try:
+        coerced = float(value)
+    except Exception:
+        # ROUND 3 — the CONVERGED finding (an external review + an internal one
+        # which DEMONSTRATED it). This was ``except (OverflowError, ValueError)``,
+        # which is NOT exhaustive over what ``float()`` can raise: the type gate above
+        # admits ``int``/``float`` SUBCLASSES, and a subclass whose ``__float__``
+        # misbehaves raises something else entirely. Both measured, by fuzzing the real
+        # tool:
+        #
+        #     save_candidate min_air=<int subclass, __float__ -> str>  -> TypeError
+        #     save_candidate min_air=<float subclass, __float__ raises> -> ZeroDivisionError
+        #
+        # Each escaped this resolver, escaped ``_effective_floors``' single-class
+        # ``except``, and escaped ``save_candidate`` — which has NO outer net precisely
+        # BECAUSE of the single-class guarantee documented above. So the guarantee was
+        # false, and the docstring's categorical claim was an OVERCLAIM of exactly the
+        # kind this cycle exists to close.
+        #
+        # Broadened rather than narrowing the claim: NOTHING else is inside this ``try``,
+        # and every possible failure of ``float(value)`` means the same thing — the
+        # caller named a threshold this module cannot apply — which is already the
+        # ``ToolParamError`` answer. So widening makes the stated invariant TRUE instead
+        # of documenting a hole. (Not reachable across the MCP boundary, where JSON
+        # yields plain ints/floats; reachable in-process, and the claim was categorical.)
+        raise ToolParamError(
+            f"{label} must be a finite number >= 0 (this value cannot be "
+            f"represented as a float), got {type(value).__name__}"
+        )
     if not math.isfinite(coerced):
         raise ToolParamError(
             f"{label} must be finite >= 0 (inf/-inf/nan are not a clearance "
@@ -85,6 +127,36 @@ def _finite_nonneg(value, label, default):
     if coerced < 0.0:
         raise ToolParamError(f"{label} must be >= 0, got {coerced}")
     return coerced
+
+
+def resolve_floors(params):
+    """The ``(min_air, min_glass)`` this module will apply. RAISES ``ToolParamError``.
+
+    AND NOTHING ELSE. ``ToolParamError`` is the ONLY exception class that can leave
+    this function — the guarantee ``workspace._effective_floors``' single-class
+    ``except`` rests on, and therefore the guarantee that ``save_candidate`` (no outer
+    net, documented "NEVER raises") keeps its contract. Test A5 asserts the CLASS over a
+    pathological corpus, not a message.
+
+    THE single resolver. ``check_clearance`` calls it, and
+    ``workspace._effective_floors`` calls it so the audit RECORD a save writes and the
+    guard a promote applies come from ONE acceptance set. Sharing the constants and the
+    validation PRIMITIVE is NOT sharing a resolver — the defaulting, the param lookup
+    and the tuple construction must live here too, or the producer and the guard have
+    two acceptance sets that can diverge.
+
+    ``_finite_nonneg`` always returns a ``float`` (``float(default)`` / ``float(value)``)
+    and already rejects ``bool``, so the returned pair is ``(float, float)`` BY
+    CONSTRUCTION — which is what lets the record's floors be validated as exact floats
+    (``True == 1.0`` and ``False == 0.0`` hold in Python, so
+    an int/bool record would otherwise satisfy an "exact" floor comparison).
+    """
+    params = _require_dict(params)
+    min_air = _finite_nonneg(params.get("min_air"), "min_air", _DEFAULT_MIN_AIR)
+    min_glass = _finite_nonneg(
+        params.get("min_glass"), "min_glass", _DEFAULT_MIN_GLASS
+    )
+    return (min_air, min_glass)
 
 
 # --------------------------------------------------------------------------- #
@@ -447,10 +519,10 @@ def check_clearance(session, params):
     """
     params = _require_dict(params)
     try:
-        min_air = _finite_nonneg(params.get("min_air"), "min_air", _DEFAULT_MIN_AIR)
-        min_glass = _finite_nonneg(
-            params.get("min_glass"), "min_glass", _DEFAULT_MIN_GLASS
-        )
+        # ONE resolver, shared with workspace._effective_floors.
+        # Do NOT re-inline the _finite_nonneg calls here — two copies is two acceptance
+        # sets, and the guard would then be able to disagree with the producer.
+        min_air, min_glass = resolve_floors(params)
     except ToolParamError as exc:
         return error_envelope("check_clearance", _CL_PARAM, str(exc))
 

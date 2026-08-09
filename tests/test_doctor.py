@@ -4666,28 +4666,33 @@ def test_d22_the_pinned_operand_query_holds_in_both_enrichment_tiers(tmp_path, t
         conn.close()
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "search_reference is dead by the shipped wiring defect: the reference Dispatcher "
-    "builds every other plane's connection but never wires manual_conn, so the manual "
-    "corpus can be present, valid and openable while this door still answers "
-    "corpus_unavailable. NO query can be proven to return a hit on this release line. "
-    "STRICT on purpose: the day the dispatcher wires that connection this test starts "
-    "passing, the pin has become verifiable, and this xfail must be removed rather than "
-    "left standing as a stale exemption."))
-def test_d22_the_pinned_search_reference_case_is_unverifiable_on_this_release_line():
-    """D-22's known-unverified pin, marked rather than quietly kept.
+def test_d22_the_pinned_search_reference_case_holds_where_the_corpus_is_built():
+    """D-22's third pin, now assertable: the door answers through a production Dispatcher.
 
-    This is the one pinned case that cannot be shown to hold, because the door it targets
-    is unreachable in the shipped dispatcher.  An xfail keeps the assertion in the suite
-    and keeps its cause written down; deleting it would let the pin rot unnoticed, and asserting
-    it would redden the suite for a defect 0.1.3 ships on purpose.
+    This case was a STRICT xfail, because the reference Dispatcher built every other
+    plane's connection but never wired ``manual_conn``: the manual corpus could be present,
+    valid and openable while this door still answered ``corpus_unavailable``, so no query
+    could be proven to return a hit.  That wiring defect is fixed -- the no-argument
+    Dispatcher production uses now resolves the packaged corpus -- and per the marker's own
+    instruction the xfail is REMOVED rather than left standing as a stale exemption.
 
-    Honest limit: where the corpus is ABSENT (public CI gitignores it) this fails for the
-    ordinary reason rather than the defect, so it discriminates the wiring only on a
-    machine that has actually built the corpus.  Measured on this one: the file is present,
-    self-consistent and openable by ``open_manual_corpus()`` under its OWN default
-    argument, and the door still answers ``corpus_unavailable``."""
+    The honest limit the marker carried is unchanged, and is now expressed as a SKIP:
+    where the corpus is genuinely ABSENT (public CI gitignores the ``.db``) there is
+    nothing here to verify, and asserting would redden for the ordinary reason rather than
+    the interesting one.  The skip predicate is ``open_manual_corpus()`` under its OWN
+    default argument, which is the same single acceptance predicate the dispatcher
+    consumes -- not a second existence rule that could disagree with it.
+
+    What the assertion buys where the corpus IS built: it reconciles the two facts nothing
+    previously compared, "the corpus opens" against "the dispatcher wired it".  Their
+    disagreement WAS the defect, and it presented as an honest-looking degrade envelope."""
+    from optivibe_reference import manual_build
     from optivibe_reference.server import Dispatcher
+
+    probe = manual_build.open_manual_corpus()
+    if probe is None:
+        pytest.skip("no manual corpus built here: the door has nothing to answer from")
+    probe.close()
 
     dispatcher = Dispatcher()
     envelope = dispatcher.dispatch(

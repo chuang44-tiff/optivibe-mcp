@@ -198,19 +198,27 @@ class Dispatcher:
         else:
             self._conn = None
         # The manual-corpus connection is OPTIONAL: use an injected one, else open
-        # it from the gitignored ``.db`` path when given, else stay None (absent).
+        # it from the gitignored ``.db`` path when given, else open the PACKAGED
+        # default path. The no-argument default is the ONLY shape production uses
+        # (``optivibe_harness/__main__.py`` builds ``ReferenceDispatcher()``), so a
+        # ``None`` here made ``search_reference`` answer ``corpus_unavailable`` 100%
+        # of the time even where the corpus was built and openable
+        #. Falling through to
+        # ``open_manual_corpus()`` under its OWN default argument is safe because
+        # that opener is the single acceptance predicate: it already returns None
+        # for a missing file, an incomplete build, or a chunk-count mismatch — so
+        # an absent corpus still degrades to ``corpus_unavailable``, never a false
+        # positive. Do NOT re-derive that predicate with a local isfile() check.
         if manual_conn is not None:
             self._manual_conn = manual_conn
         elif manual_db_path is not None:
             self._manual_conn = manual_build.open_manual_corpus(manual_db_path)
         else:
-            self._manual_conn = None
-        # The glass connection is OPTIONAL (user-built-JSON model, like the
-        # gitignored manual corpus): use an injected one, else build from the
-        # given .db path, else build from the user-built glass_catalog.json when
-        # it exists — else stay None (fresh clone, build_glass_catalog.py not run
-        # yet) so Dispatcher construction survives and the OTHER reference tools
-        # stay alive; glass requests answer glass_catalog_unavailable.
+            self._manual_conn = manual_build.open_manual_corpus()
+        # The glass connection is ALWAYS available (committed-JSON model, like the
+        # operand catalog — NOT the gitignored manual corpus): use an injected one,
+        # else build from the given .db path, else build from the committed
+        # glass_catalog.json so a fresh clone resolves glass queries out of the box.
         if glass_conn is not None:
             self._glass_conn = glass_conn
         elif glass_db_path is not None:
