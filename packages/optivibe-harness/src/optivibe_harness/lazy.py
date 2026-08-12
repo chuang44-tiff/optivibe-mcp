@@ -76,6 +76,23 @@ import threading
 from ._stdio_log import _open_log_fd
 from .server import Dispatcher, _safe_error_text
 
+# Open-failure families forwarded VERBATIM to the wire; every other open failure
+# still degrades to "engine_unavailable" (the hang-watchdog contract). This
+# list is EXTENDED, never relaxed.
+#
+# "engine_channel_dead" is needed because the close-after-an-observed-fault
+# path reaches ``session.open()`` -> ``_open_locked`` -> GATE B2, and without the
+# entry it would be mislabelled ``engine_unavailable`` — which PROMISES a later
+# retry for a session that is terminal and will never re-open.
+#
+# Disclosed seam: these strings are DECLARED on the exception classes in errors.py
+# and REPEATED here — a hand-sync dependency, correct for these two entries
+# and pinned by ``test_close_after_fault_does_not_report_engine_unavailable``: drop
+# ``engine_channel_dead`` from this tuple and it reddens. That regression lives in
+# the development suite and is not shipped with this package, so a reader of the
+# published file cannot run it — the guarantee is disclosed here, not demonstrated.
+_FORWARDED_OPEN_FAMILIES = ("engine_connect_timeout", "engine_channel_dead")
+
 
 class LazyHarnessDispatcher:
     """Dispatcher-shaped wrapper that opens the ZOS engine on the FIRST harness call.
@@ -151,11 +168,17 @@ class LazyHarnessDispatcher:
     # ------------------------------------------------------------------ #
     @property
     def engine_opened(self) -> bool:
-        """True once the engine has been opened (the session holds a live handle).
+        """True once the engine has been opened (the session HOLDS a handle).
 
         Reads the session's own ``is_open`` (``_app is not None and not _closed``), so a
-        post-reap ``close()`` flips this back to False — it reflects LIVE engine state,
+        post-reap ``close()`` flips this back to False — it reflects handle state,
         not a one-way latch.
+
+        WHAT IT DOES NOT ESTABLISH: it inherits ``is_open`` verbatim, one hop
+        out, so like ``is_open`` it says nothing about whether the engine's remoting
+        CHANNEL is usable — after an observed channel fault this still reads True
+        while every engine call is refused. The channel verdict is
+        ``session.channel_dead``.
         """
         return bool(self._session.is_open)
 
@@ -298,8 +321,8 @@ class LazyHarnessDispatcher:
                 # a generic ``session_connect`` family the agent's contract does not expect.
                 family = getattr(exc, "error_family", None)
                 wire_family = (
-                    "engine_connect_timeout"
-                    if family == "engine_connect_timeout"
+                    family
+                    if family in _FORWARDED_OPEN_FAMILIES
                     else "engine_unavailable"
                 )
                 return {
