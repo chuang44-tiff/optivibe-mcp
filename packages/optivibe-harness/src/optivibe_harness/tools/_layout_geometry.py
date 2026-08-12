@@ -732,9 +732,11 @@ def resolve_aperture_heights(semi_diameters):
 
     **DERIVED WRAPPER over ``resolve_aperture_records``.** The
     public contract is byte-compatible with the shipped one — same 2-tuple, same
-    values — and the compatibility tests (``test_resolve_aperture_heights_fallback``,
-    ``…_all_zero``, and the universal positive-finite property test) pin exactly
-    that.
+    values. ``test_resolve_aperture_heights_fallback`` pins that compatibility on the
+    mixed case (a zero and an infinity fall back to the max finite positive while a
+    good semi is kept verbatim); its all-zero sibling and a positive-finite property
+    row over degenerate inputs cover the rest. Those regressions live in the
+    development suite and are not shipped with this package.
 
     **The returned height may not be a measurement.** A non-measured surface's entry
     here is a FABRICATED fallback: it exists so plot limits and neutral scaling stay
@@ -906,7 +908,9 @@ class GroupSectionBuild:
 # so on a sub-millimetre element it can suppress a 50 % semi mismatch — exactly the
 # sloped closure this section exists to eliminate. Do not reintroduce it, and do not
 # reintroduce any other absolute floor (``+ 1e-12``, ``max(H, eps)``, a hardcoded
-# tolerance): the sub-unit and near-zero fixtures in the C-16 battery pin this.
+# tolerance): the sub-unit and near-zero fixtures parameterised over
+# ``test_c16_rim_eps_is_purely_relative`` pin this. That regression lives in the
+# development suite and is not shipped with this package.
 _RIM_REL_EPS = 1e-9
 
 

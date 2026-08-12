@@ -1082,7 +1082,10 @@ def _validated_audit_summary(verdict, summary):
         # PRESENT-and-``None`` is legitimate (``_coverage_gap`` returns None on a clean
         # sweep) and an ABSENT key is legitimate — both reach ``_COVERAGE_TEXT_DEFAULT``.
         # What is not legitimate is an UNHASHABLE value, because ``dict.get`` hashes.
-        # Requiring a ``str`` would over-refuse the two legitimate shapes (test E2).
+        # Requiring a ``str`` would over-refuse the two legitimate shapes;
+        # ``test_e2b_no_OVER_refusal_the_legitimate_coverage_shapes_still_validate``
+        # pins that both keep validating. That regression lives in the development
+        # suite and is not shipped with this package.
         reason = summary.get("coverage_reason")
         if reason is not None and not isinstance(reason, str):
             return False
@@ -1232,7 +1235,10 @@ def _read_audit_record(zmx_dir, seq, filename):
         # corrupted duplicate row now takes a redundant live audit AND loses its keeper
         # PICTURE (disclosed as ``best_png_reason: "zmx_identity_unproven"``). Both are
         # the fail-closed direction, both are disclosed, and the ``.zmx`` still
-        # publishes. Test CR1b pins that combined envelope.
+        # publishes.
+        # ``test_cr1b_the_promote_takes_the_LIVE_path_and_LOSES_the_picture`` pins
+        # that combined envelope. That regression lives in the development suite
+        # and is not shipped with this package.
         return [], "unreadable"
     if records:
         return records, "ok"
@@ -1387,8 +1393,14 @@ def _png_blocked_by_identity(identity):
     proven, and what conflicts is the audit FIELDS.
 
     LIMIT: this rule is only as good as each reason's ``digest_match``. The
-    exhaustive per-token table in the tests (P0c) plus the vocabulary-parity row (P0d)
-    are the tripwire that forces a NEW reason to make an EXPLICIT decision.
+    tripwire that forces a NEW reason to make an EXPLICIT decision is
+    ``test_p0d_the_G0_table_enumerates_the_WHOLE_identity_vocabulary``. It derives the
+    vocabulary STRUCTURALLY — this module's ``_ID_*`` names whose value is a bare
+    lowercase slug — and reddens when one of those has no row in the exhaustive
+    per-token table beside it. That is the mechanism and also its edge: a reason
+    introduced as an inline literal, or under a name outside ``_ID_*``, is not
+    discovered and does not redden. That regression lives in the development suite
+    and is not shipped with this package.
     """
     if not isinstance(identity, dict):
         # PRE-FORK: ``identity`` is None until ``_classify_identity`` has run, and no

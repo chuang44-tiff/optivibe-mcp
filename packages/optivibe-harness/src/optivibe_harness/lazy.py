@@ -87,7 +87,10 @@ from .server import Dispatcher, _safe_error_text
 #
 # Disclosed seam: these strings are DECLARED on the exception classes in errors.py
 # and REPEATED here — a hand-sync dependency, correct for these two entries
-# and pinned by M14/M15.
+# and pinned by ``test_close_after_fault_does_not_report_engine_unavailable``: drop
+# ``engine_channel_dead`` from this tuple and it reddens. That regression lives in
+# the development suite and is not shipped with this package, so a reader of the
+# published file cannot run it — the guarantee is disclosed here, not demonstrated.
 _FORWARDED_OPEN_FAMILIES = ("engine_connect_timeout", "engine_channel_dead")
 
 

@@ -50,8 +50,28 @@ def _channel_dead_refusal_text(session):
 
     That constant is the honest text for this path: its "(it was not set, or could
     not be read)" clause is exactly the situation — the folder could not be read.
-    Reusing it also keeps ALL refusal prose in one module behind one builder, so
-    the wording review stays a single-site read.
+
+    Reusing it also keeps ALL refusal prose at module scope in ``session.py``, read
+    by exactly TWO named functions. ``ZemaxSession.channel_dead_message`` COMPOSES
+    the served message out of those constants. ``_channel_dead_refusal_text`` — this
+    function — SELECTS the constant fallback when that composition cannot be used.
+    It assembles no prose of its own; it chooses between two finished texts. Those
+    two names are the whole surface of the human wording review, which is what
+    keeps that review a bounded read rather than a package-wide hunt.
+
+    The check that holds that set at two is
+    ``test_refusal_prose_has_exactly_one_builder``: it asserts over the AST that no
+    refusal-prose LITERAL sits inside any function, and that the package-wide set of
+    functions loading a refusal-prose constant BY ITS BARE NAME is exactly those two
+    names. Its name predates the second reader and is now stale — the set the check
+    enumerates is two, not one. That regression lives in the development suite and is
+    not shipped with this package.
+
+    That check is a tripwire, not a proof. It collects unqualified name loads, so a
+    third reader reaching a constant through an attribute
+    (``session.CHANNEL_DEAD_CANNOT_NAME_MESSAGE``) or through an aliased import does
+    not redden it, and such a reader adds no marker-bearing literal for the other
+    half to catch either. The pair is held at two by the review, not by the AST.
     """
     try:
         text = session.channel_dead_message()

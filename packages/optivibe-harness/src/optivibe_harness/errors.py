@@ -74,9 +74,15 @@ class SessionChannelDeadError(SessionClosedError):
 
     Subclasses ``SessionClosedError`` so every existing ``except SessionClosedError``
     still catches it (behavioural compat); its own ``error_family`` overrides the
-    parent's ``"session_closed"`` on the wire. OptiVibe does NOT re-open after an
-    observed channel fault (``DECISION-recovery-semantics.md``, OPTION 1) — the
-    remedy is a restart of the MCP process, which the message names.
+    parent's ``"session_closed"`` on the wire.
+
+    OptiVibe does NOT re-open after an observed channel fault. That is a design
+    ruling, not a limitation discovered at runtime: of the two fault flavours
+    measured, one leaves the engine process alive and re-openable and the other
+    kills it and is not recoverable in-process, and nothing readable from here
+    tells the two apart at refusal time. Re-opening would therefore succeed
+    sometimes and mislead the rest of the time, so the session is TERMINAL either
+    way and the remedy is a restart of the MCP process, which the message names.
     """
 
     error_family = "engine_channel_dead"

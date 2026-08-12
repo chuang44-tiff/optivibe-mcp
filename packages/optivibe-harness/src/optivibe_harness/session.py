@@ -57,10 +57,30 @@ CHANNEL_DEAD = "dead"
 CHANNEL_UNKNOWN = "unknown"
 
 # ------------------------------------------------------------------------- #
-# The refusal prose. TWO module constants + ONE builder
-# (``ZemaxSession.channel_dead_message``) — no other function anywhere composes
-# refusal prose, which a static AST test asserts, so the human wording review is
-# a single-site read.
+# The refusal prose. THREE module constants and TWO named readers, which
+# together are the whole surface of the human wording review.
+# ``ZemaxSession.channel_dead_message`` COMPOSES the served message out of these
+# constants. ``server._channel_dead_refusal_text`` SELECTS the constant fallback
+# ``CHANNEL_DEAD_CANNOT_NAME_MESSAGE`` when that composition cannot be used. It
+# assembles no prose of its own; it chooses between two finished texts.
+#
+# WHAT THE STATIC AST CHECK ASSERTS, precisely — it cannot read prose for truth:
+# (1) no refusal-prose LITERAL appears inside any function in this module or in
+# ``server.py`` / ``lazy.py`` / ``errors.py``; every fragment lives at module
+# scope here. (2) PACKAGE-WIDE, the set of functions that load a refusal-prose
+# constant BY ITS BARE NAME is exactly those two names. The check is
+# ``test_refusal_prose_has_exactly_one_builder``. Its name predates the second
+# reader and is now stale — renaming it is not part of this fix, and the set the
+# check enumerates is the two names above, not one. That regression lives in the
+# development suite and is not shipped with this package.
+#
+# ITS BLIND SPOT, named so nobody reads (2) as stronger than it is: half (2)
+# collects unqualified name loads only. A third reader that reaches a constant
+# through an attribute (``session.CHANNEL_DEAD_CANNOT_NAME_MESSAGE``) or through
+# an aliased import is invisible to it, and half (1) cannot see that reader either
+# because concatenating existing constants introduces no marker-bearing literal.
+# The check is a tripwire for the ordinary regression; the wording review is still
+# the thing that holds the pair at two.
 #
 # WORDING IS LOAD-BEARING. Each sentence claims ONLY what the design
 # establishes, and the two rejected overclaims are recorded so they are not
@@ -415,8 +435,9 @@ class ZemaxSession:
                 if not isinstance(_exc2, Exception):
                     raise
         try:
-            # A diagnostic breadcrumb ONLY — deliberately carries no refusal prose,
-            # so the served wording keeps exactly one builder.
+            # A diagnostic breadcrumb ONLY — deliberately carries no refusal
+            # prose, so it does not join the two named readers that make up the
+            # wording-review surface described at the top of this module.
             self._log(
                 "ZemaxSession: CHANNEL DEAD observed (ZOSAPI_Connection.IsAlive is "
                 "False) — this session is now TERMINAL; every engine call will be "

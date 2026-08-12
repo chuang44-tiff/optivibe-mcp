@@ -132,11 +132,35 @@ def _finite_nonneg(value, label, default):
 def resolve_floors(params):
     """The ``(min_air, min_glass)`` this module will apply. RAISES ``ToolParamError``.
 
-    AND NOTHING ELSE. ``ToolParamError`` is the ONLY exception class that can leave
-    this function — the guarantee ``workspace._effective_floors``' single-class
-    ``except`` rests on, and therefore the guarantee that ``save_candidate`` (no outer
-    net, documented "NEVER raises") keeps its contract. Test A5 asserts the CLASS over a
-    pathological corpus, not a message.
+    AND NOTHING ELSE FROM ITS OWN LOGIC. Every refusal this function itself reaches
+    is a ``ToolParamError`` — the guarantee
+    ``workspace._effective_floors``' single-class ``except`` rests on, and therefore
+    the guarantee that ``save_candidate`` (no outer net, documented "NEVER raises")
+    keeps its contract.
+    ``test_a5_resolve_floors_raises_ONLY_ToolParamError`` asserts the CLASS over a
+    pathological corpus of values, not a message. That regression lives in the
+    development suite and is not shipped with this package.
+
+    THE LIMIT, MEASURED — and stated in full because TWO successively weaker versions
+    of this claim have already been written here and BOTH were still false. The
+    guarantee is over what this function DECIDES. It is not a guarantee about
+    everything that can leave the frame, because building a refusal MESSAGE runs code
+    the caller owns. Two escapes are known; neither is closed here:
+
+    * ``__repr__`` RUNS DURING THE REFUSAL. Both ``{value!r}`` sites below format the
+      rejected value, so a hostile ``__repr__`` propagates whatever it raises — from
+      inside a PLAIN ``dict``, which is what makes this the sharper of the two.
+      Measured: a non-number whose ``__repr__`` raises leaves as ``RuntimeError`` at
+      the type gate; an ``inf`` ``float`` SUBCLASS whose ``__repr__`` raises leaves as
+      ``ZeroDivisionError`` at the finiteness refusal. Both ``{value!r}`` sites are
+      already-published code, so the repr-safe message is a follow-up rather than an
+      edit smuggled in under a prose fix.
+    * ``_require_dict`` accepts any ``dict`` SUBCLASS and the two ``params.get(...)``
+      calls below are unguarded, so a subclass whose ``get`` raises escapes as well.
+
+    No caller constructs either — ``params`` arrives off the wire as a plain ``dict``
+    of JSON scalars — but the honest predicate is "total over well-behaved values",
+    never "total".
 
     THE single resolver. ``check_clearance`` calls it, and
     ``workspace._effective_floors`` calls it so the audit RECORD a save writes and the

@@ -39,10 +39,6 @@ from . import _layout_rays as _rays
 from ._image_gate import _is_png
 
 _DEFAULT_TITLE = "Layout"
-_FOLDED_BANNER = (
-    "Folded system (coordinate break / mirror) — axial layout past the fold is "
-    "schematic; open the .zmx for the native 3D layout."
-)
 _N_SAMPLES = 81  # linspace(-h, +h, 81) per §3.2
 # UNIFORM-ARROW-LENGTH, EDGE-ANCHORED callout scheme (Loop-4): every surface number is
 # a thin ARROW (a leader with an arrowhead) pointing to ITS surface vertex at ITS OWN
@@ -103,8 +99,11 @@ _STAMP_TIER_MAX = 6
 # re-frame call inside `_draw` — removing it stays green because
 # `_expand_limits_to_drawn_text` catches the residue — and the number+word UNION
 # in `_tier_colliding_stamps`, which still reads 0/0 on the dense fixture. The
-# union's PREDICATE is pinned directly by test U-3, which is the part a unit test
-# can reach; nobody has yet built a fixture that discriminates its EFFECT.
+# union's PREDICATE is pinned directly by
+# `test_u3_a_block_is_one_occupancy_unit_for_collision`, which is the part a unit
+# test can reach; nobody has yet built a fixture that discriminates its EFFECT.
+# That regression lives in the development suite and is
+# not shipped with this package.
 _STAMP_TIER_PASSES = 3
 # STOP must read as ATTACHED to its own number, so its gap to that number is
 # DELIBERATELY TIGHTER than the gap between two stacked labels (0.5 pt vs the
@@ -196,6 +195,20 @@ _FOOTER_GAP_PT = 6.0
 #: Deterministic figure-coordinate seat for the footer, used when the canvas
 #: cannot be measured. Bottom-right of the figure, below every axes.
 _FOOTER_FALLBACK_XY = (0.995, 0.005)
+#: Clear space between two stacked disclosure boxes. THE NAME OVERSTATES WHAT IS
+#: DELIVERED, and the number is left alone deliberately.
+#:
+#: The use site divides this constant by the FIGURE height in pixels and uses the
+#: result as an AXES fraction, so the gap actually laid down is
+#: ``4 * axes_height_px / figure_height_px`` DEVICE PIXELS — not 4 points, and not
+#: 4 pixels either. It carries neither the pt -> px factor (``dpi / 72``) nor the
+#: axes-to-figure ratio, so the delivered spacing moves with BOTH the dpi and the
+#: axes' share of the canvas.
+#:
+#: Correcting the arithmetic would move every box in every figure, so this release
+#: corrects the CLAIM and defers the delivery. Compare ``_FOOTER_GAP_PT``, which
+#: applies ``dpi / 72`` and works in pixel space throughout, and therefore does
+#: deliver points.
 _DISCLOSURE_GAP_PT = 4.0
 _DISCLOSURE_X = 0.02          # axes coords — the stack's left anchor
 _DISCLOSURE_TOP = 0.98        # axes coords — the stack's top anchor
@@ -1178,8 +1191,11 @@ def _tier_colliding_stamps(fig, ax, placements):
             # and nothing else changed, one design's STOP block overlaps s6 and the
             # eyepiece's IMAGE block overlaps s7 (2 overlaps, 2 touches; 0 with
             # it). The cost is real and also corpus-only: eyepiece 44.85 -> 39.36
-            # and another 44.80 -> 42.27 percent of frame. `test_u3` pins the
-            # union PREDICATE directly, which is the part a unit test can reach.
+            # and another 44.80 -> 42.27 percent of frame.
+            # `test_u3_a_block_is_one_occupancy_unit_for_collision` pins the union
+            # PREDICATE directly, which is the part a unit test can reach. That
+            # regression lives in the development suite and is
+            # not shipped with this package.
             block = _union_x(bb, rider_bb)
             tier = 0
             while (tier < _STAMP_TIER_MAX - 1
@@ -1430,8 +1446,15 @@ def _place_disclosures(fig, ax, strings):
     # box is seated below the previous one's measured bottom -- so reading the
     # patch here would need a full canvas draw PER BOX. The reconstruction is
     # therefore the only measurement available at this point, and it is not
-    # trusted: tests I-3/I-4 assert the no-intersection contract POST-DRAW on
-    # the real patches, which is what catches any drift in this arithmetic.
+    # trusted: `test_i3_disclosure_boxes_never_overlap_and_stay_on_canvas`
+    # asserts the no-intersection contract POST-DRAW on the real patches. That
+    # regression lives in the development suite and is
+    # not shipped with this package.
+    #
+    # WHAT THAT DOES NOT COVER, stated because the earlier wording claimed it did:
+    # the post-draw check is NON-OVERLAP AND ON-CANVAS ONLY. It says nothing about
+    # the SIZE of the gap, so this arithmetic can drift by a pixel or two in either
+    # direction and stay green. It catches a REGRESSION TO OVERLAP, not drift.
     pad_px = ((_DISCLOSURE_BOX_PAD * _DISCLOSURE_FONT_PT + _NARROW_LINE_PT)
               * (float(fig.dpi) / 72.0))
 
@@ -1450,6 +1473,13 @@ def _place_disclosures(fig, ax, strings):
         px_h = float(fig.get_figheight()) * float(fig.dpi)
     except Exception:  # noqa: BLE001
         px_h = 600.0
+    # The constant divided by the FIGURE height in pixels, then used below as an
+    # AXES fraction. Two conversions are missing: ``dpi / 72`` (pt -> px) and the
+    # axes-to-figure height ratio. The gap this delivers is therefore
+    # ``4 * axes_height_px / figure_height_px`` device pixels, not the 4 points the
+    # constant's name promises (see its definition). Left as-is on purpose: this
+    # arithmetic IS the figure's current geometry and changing it would move every
+    # box in every figure.
     gap_axes = _DISCLOSURE_GAP_PT / max(px_h, 1.0)
     fallback_step = 0.075
 
@@ -2422,7 +2452,7 @@ def render_layout(session, params):
     # config). The title stamps [config k] so the figure is unambiguous.
     try:
         with _cfg.with_configuration(session.system, cfg_idx) as ctx:
-            result = _render_layout_at(session, params, config_title=cfg_idx)
+            result = _render_layout_at(session, params)
         if isinstance(result, dict) and result.get("ok"):
             result.setdefault("config_evaluated", cfg_idx)
             if not ctx["restore_verified"]:
@@ -2445,14 +2475,13 @@ def _resolve_render_config(system, config):
     return _cfg.resolve_single_config_selector(system, config, "render_layout")
 
 
-def _render_layout_at(session, params, config_title=None):
+def _render_layout_at(session, params):
     """The pure per-config render body (draws at the ACTIVE config). See ``render_layout``.
 
-    ``config_title`` (int|None) records that a config was selected by the caller. The
-    TITLE suffix no longer derives from it: the suffix reports the READ-BACK identity
+    Takes NO config argument. The title suffix reports the READ-BACK identity
     (``[config k of N]`` whenever the read-back count ``N > 1``, whether or not a
     config was requested), because a figure must state what it SHOWS, not what was
-    asked for. The argument contract is unchanged.
+    asked for — so the caller's selection is not an input to this body at all.
     """
     title = params.get("title")
     if not isinstance(title, str) or title == "":
@@ -2514,7 +2543,26 @@ def _render_layout_at(session, params, config_title=None):
             projection = _geom.read_projection_state(
                 _ProjectionReader(lde, session.system), n, rows
             )
-        except BaseException:  # noqa: BLE001 — a predicate fault is "not measured"
+        # An ORDINARY fault in the projection predicate is "not measured", never a
+        # failed render: every surface goes into ``unreadable_surfaces`` and the
+        # figure discloses that the check could not decide. A deliberate abort is
+        # NOT an ordinary fault, so this catches ``Exception`` — a
+        # ``KeyboardInterrupt`` or ``SystemExit`` raised inside the reader LEAVES
+        # THIS HANDLER instead of being silently recorded as an unmeasurable
+        # prescription.
+        #
+        # IT DOES NOT LEAVE ``render_layout``, and the difference is the whole
+        # honest scope of this change: the outermost handler of this function is
+        # still ``except BaseException``, so an abort that gets past here is turned
+        # into a ``render_failed`` envelope one frame out rather than propagating to
+        # the caller. What is bought here is that the abort no longer shows up as a
+        # SUCCESSFUL render whose projection reads unmeasurable.
+        #
+        # ``exc`` is BOUND AND DELIBERATELY NOT CONSUMED, stated so it does not
+        # read as an oversight: ``ProjectionState`` carries no reason field and
+        # both disclosure strings are constants, so there is nowhere honest to put
+        # the diagnosis, and inventing a place would change what the figure says.
+        except Exception as exc:  # noqa: F841 — see the note above
             projection = _geom.ProjectionState(
                 out_of_plane=None, out_of_plane_surfaces=(),
                 unreadable_surfaces=tuple(range(n)),
