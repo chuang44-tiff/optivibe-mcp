@@ -64,6 +64,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import tempfile
 
 from .. import _io
@@ -78,6 +79,90 @@ from ..server import ToolSpec
 # ``min_air``/``min_glass`` mean.
 from .clearance import check_clearance, resolve_floors
 from ._image_gate import _is_png
+# The bound-scorecard seam. ``loop/`` imports ``tools.*``
+# handlers and ``catalog.metrics``; it imports THIS module only LAZILY, inside
+# ``clearance_evidence``, so this module-level import closes no cycle and the MCP
+# still boots (a boot test pins it). Every algorithm lives in ``loop/`` — what lands
+# here is a guarded call, two validator CALL SITES with no schema logic, two record
+# fields, a tuple widening and one envelope key.
+#
+# OPTIONAL, and the reason is a PACKAGING boundary rather than a runtime one.  ``loop/``
+# is private-only: it is deliberately outside the published surface, so in the public
+# distribution these three modules DO NOT EXIST.  Until 0.1.6 these were hard
+# module-level imports, which made the published ``workspace.py`` raise on import -- and
+# because this module owns ``save_candidate`` / ``promote_best``, the whole MCP would
+# have failed to boot.  That is the 0.1.1 failure again -- a published package that cannot
+# start -- and it was caught by an import check over the published tree, not by any test
+# here, which is the gap a dedicated import test in this suite closes.
+#
+# ABSENT IS NOT DEGRADED HERE, and that distinction is the whole design.  The gate
+# already models "there is no contract to enforce" as a first-class outcome -- the
+# all-None triple from ``grade_checkpoint`` and ``promotion_gate.NOT_APPLICABLE`` -- and
+# both are specified to be BYTE-IDENTICAL to the pre-feature envelope.  A build with no
+# ``loop/`` is structurally in that state permanently, so it takes the reviewed
+# uncontracted path rather than a degradation invented at the import site.  Nothing is
+# silently weakened: with no contract there is no verdict to weaken.
+try:                                                    # pragma: no cover - packaging
+    from ..loop import scorecard as _loop_scorecard
+# The contract-gated promotion guard. The guard
+# BODY is a ``loop/`` module ``promote_best`` consumes; what lands in THIS file is the
+# call at point P, one refusal return, and two ``**`` spreads. ``loop/`` may not import
+# ``tools.*``, so the row-acceptance predicate is INJECTED (``validate_row=``) rather
+# than re-implemented there — ONE acceptance predicate, no layering inversion.
+    from ..loop import promotion_gate as _promotion_gate
+# ``criteria.path_state`` — THE ONE ``lstat``-based absence predicate, shared
+# rather than re-expressed. ``_read_audit_record``'s ``record_state`` crosses into the
+# guard WHOLE, where ``absent`` is read as a POSITIVELY ESTABLISHED absence, so this
+# reader is on the enforcement path and its absence question must be the same question
+# the gate's own champion / manifest / contract reads ask. Pure stdlib + ``statuses`` /
+# ``registry``; ``promotion_gate`` already imports it, so no new package edge is created.
+    from ..loop import criteria as _loop_criteria
+except ImportError:                                     # pragma: no cover - packaging
+    _loop_scorecard = None
+    _promotion_gate = None
+    _loop_criteria = None
+
+#: ``"absent"`` | ``"present"`` | ``"unknown"`` for one path.  NEVER raises.
+#:
+#: A DELIBERATE TWIN of ``loop.criteria.path_state``, and the duplication is the point of
+#: contention, so it is answered mechanically rather than argued.  That function's own
+#: docstring warns that a second absence helper anywhere is exactly the duplicated-predicate
+#: drift it exists to prevent -- correct, and it cannot be honoured by importing across a
+#: packaging boundary the published build does not have.  Two mitigations, both structural:
+#:
+#:   1. This twin is used in BOTH builds, never only the public one.  A fork here would
+#:      mean the published tool answers a different absence question than the tested one,
+#:      which is a worse property than duplication for a release artifact.
+#:   2. ``test_workspace_path_state_twin_agrees`` asserts the two agree across an
+#:      ENUMERATED set of real filesystem states -- regular file, directory, missing,
+#:      missing parent, dangling link/junction, non-path object -- so a future edit to
+#:      either one reddens.  The repo's own precedent is ``optivibe_doctor``'s hand-rolled
+#:      marker fallback, cross-checked against real ``packaging`` over a battery.
+#:
+#: The BODY is copied verbatim; every subtlety lives in the original's docstring and is
+#: not restated here, because a restatement is a second thing to keep true.  The load-
+#: bearing points: ``lstat`` never ``stat``/``isfile``/``exists`` (all three FOLLOW the
+#: link, so a dangling junction reads as absent -- measured on win32 -- and absent means
+#: "no contract, proceed"); and the default arm is UNKNOWN, written as the trailing
+#: statement so an ``elif`` inserted above it cannot fail open.
+PATH_ABSENT = "absent"
+PATH_PRESENT = "present"
+PATH_UNKNOWN = "unknown"
+
+
+def _path_state(path):
+    """See ``PATH_*`` above -- the twin of ``loop.criteria.path_state``."""
+    try:
+        st = os.lstat(path)
+        if stat.S_ISREG(st.st_mode):
+            return PATH_PRESENT
+        return PATH_UNKNOWN
+    except (FileNotFoundError, NotADirectoryError):
+        return PATH_ABSENT
+    except Exception:
+        return PATH_UNKNOWN
+
+
 # Production imports the REAL render tool per the pinned interface (Coder A owns
 # layout_render.py). A unit test may monkeypatch ``render_layout`` on THIS module.
 from .layout_render import render_layout
@@ -689,14 +774,38 @@ def _classify_clearance(env):
     return "clean", _summary_single(env)
 
 
+def _configuration_count(session):
+    """``NumberOfConfigurations``, or ``None`` on a read fault. NEVER raises.
+
+    It lives HERE, not in ``loop/``, so ``collect`` remains the only function in
+    ``loop/`` that reaches into the session — the property the seam's contract states
+    and which an engine read inside ``_grade_checkpoint_impl`` quietly contradicted. The
+    seam is already the engine-touching layer; the grader is handed values, not a
+    session to
+    rummage in.
+    """
+    try:
+        return int(session.system.MCE.NumberOfConfigurations)
+    except Exception:  # noqa: BLE001 — a config-count read must never sink a save
+        return None
+
+
 def _run_clearance_gate(session, min_air=None, min_glass=None, config=None):
     """Run ``check_clearance`` + classify, fully guarded — NEVER raises (§2).
 
-    Returns ``(verdict, summary)`` where ``verdict`` is ``"clean"|"thin"|
+    Returns ``(verdict, summary, gate)`` where ``verdict`` is ``"clean"|"thin"|
     "indeterminate"``. A ``check_clearance`` throw OR a malformed envelope ->
-    ``("indeterminate", None)`` so a gate defect can never break the save tools'
+    ``("indeterminate", None, None)`` so a gate defect can never break the save tools'
     never-raise contract. ``check_clearance`` is looked up on THIS module at call time
     so a unit test patches ``workspace.check_clearance``.
+
+    ``gate`` is ``{"params": <the params this gate actually ran>, "result": <the raw
+    envelope>}`` — the scorecard seam's ``clearance_env``. It
+    carries the PARAMS as well as the envelope deliberately: the scorecard reuses this
+    reading only when its ``CallKey`` matches the compiled call BYTE-FOR-BYTE, so a
+    "reuse" can never grade at floors nobody asked for — and the params are resolved
+    HERE, once, rather than reconstructed at the seam, which would be the two
+    independent resolutions class this module already fixed twice.
     """
     try:
         cp = {}
@@ -707,9 +816,10 @@ def _run_clearance_gate(session, min_air=None, min_glass=None, config=None):
         if config is not None:
             cp["config"] = config
         env = check_clearance(session, cp)
-        return _classify_clearance(env)
+        verdict, summary = _classify_clearance(env)
+        return verdict, summary, {"params": cp, "result": env}
     except Exception:  # noqa: BLE001 — the gate must NEVER break the never-raise contract
-        return "indeterminate", None
+        return "indeterminate", None, None
 
 
 def _worst_of(viols):
@@ -959,9 +1069,117 @@ def _exact_float_nonneg(value):
     )
 
 
+def _writable_name(value):
+    """True iff ``value`` is a non-blank ``str`` the manifest writer can ENCODE.
+
+    ``isinstance(str) and .strip()`` is a check on the OBJECT; the guarantee is about
+    the WRITE. Those came apart on a class of values that are perfectly legal ``str``
+    and cannot be encoded at all — a **lone
+    surrogate** such as ``"\\ud800"`` (and either half of a surrogate pair, which
+    ``json.loads`` on a hand-edited manifest, a ``surrogateescape`` filesystem read and
+    the wire all produce). ``json.dumps(..., ensure_ascii=False)`` emits it verbatim,
+    ``_io.append_line_fsync`` opens the manifest ``encoding="utf-8"``, and the write dies
+    ``not_written:UnicodeEncodeError`` — which under the Matrix-B conjunction flips ``ok``
+    on a CONTRACTED checkpoint. **A disclosure-only field failed a save.** MEASURED, not
+    reasoned: the pre-fix corpus reproduced it.
+
+    **The codec is the writer's, and the coupling is the point.** ``ensure_ascii=False``
+    is what makes this reachable — under ``ensure_ascii=True`` the surrogate would be
+    escaped and encodable — so this predicate must move if that argument ever does. It is
+    PINNED by execution rather than by comment: the record-write corpus drives the REAL
+    ``_write_audit_record``, so a divergence between this acceptance and the writer's
+    reddens there rather than shipping.
+
+    Folded into ``bad_design_name`` rather than given a fourth token: the lineage reason
+    vocabulary is frozen at three, and a name the evidence writer cannot record IS a bad
+    design name. `[INTERPRETATION — the spec enumerates the reasons, not this case.]`
+
+    **The ``except`` is WIDE on purpose.** ``str.encode`` on a real ``str`` can only raise
+    ``UnicodeEncodeError``, so a narrow clause would be correct TODAY — but this adds a
+    NEW call inside a boundary whose caller (``_declared_parent``) documents that it does
+    not raise for a ``dict``, and a ``str`` SUBCLASS may override ``encode`` to raise
+    anything at all. The shipped ``_targets_champion`` states the rule this follows:
+    *"safe only because of who calls it"* is the property a later caller silently
+    invalidates. Any failure to ANSWER is a name we cannot record — fail closed.
+    """
+    if not (isinstance(value, str) and value.strip()):
+        return False
+    try:
+        value.encode("utf-8")
+    except Exception:                    # noqa: BLE001 — see the docstring; fail closed
+        return False
+    return True
+
+
+def _declared_parent(params):
+    """Resolve the DECLARED parent lineage from the caller's params. PURE.
+
+    **The never-raise claim is NARROWED to match what is checked**, because a claim
+    wider than its check is the class this file keeps closing: it never raises **for a
+    ``dict``**, which is what its one caller passes — ``save_candidate`` coerces any
+    non-dict ``params`` to ``{}`` as its first act, exactly so every reader below can
+    assume it. On a non-dict this raises ``AttributeError`` like any other ``.get``
+    consumer in the file. Stated rather than defended with a second coercion.
+
+    Returns ``(parent | None, parent_source, envelope_keys)`` where ``parent_source``
+    is exactly one of ``declared`` / ``undeclared`` / ``rejected`` and
+    ``envelope_keys`` is ``{}`` or ``{"lineage": ...}``.
+
+    **A DECLARED FIELD, NOT A DERIVED ONE. No inference, ever.** Not "the previous
+    seq", not "the last thing loaded" — session state that can be silently wrong after
+    a ``load_design`` the agent never mentioned. The loop skill KNOWS the parent
+    because it just loaded it; the tool is where a guess becomes a lie. Consequence,
+    accepted: an ordinary human session records ``undeclared``, which is NOT ABSENT and
+    says so.
+
+    **``rejected`` IS A THIRD TOKEN, and that is the ABSENT-vs-UNREADABLE rule one
+    layer over.** A caller who made a claim we could not accept — one scalar without
+    the other, a non-str name, a name the evidence writer cannot ENCODE
+    (:func:`_writable_name`; a check on the OBJECT is not a check on the WRITE, and the
+    two came apart on a lone surrogate), a non-integral or negative seq — has NOT made
+    no claim, and collapsing the two would be the ABSENT/UNREADABLE collapse the rule
+    above exists to police. ``parent`` is
+    ``None`` for both, and only ``parent_source`` tells them apart.
+
+    **BOTH HALVES OR NEITHER.** A bare ``parent_seq`` is the trap this rule exists
+    for: *a seq identifies a WORKSPACE candidate, not a design's candidate* (see this
+    module's header), so a lone seq names some other design's checkpoint. It is
+    ``missing_pair``, never a half-recorded parent.
+
+    **THE ORDERING IS THE GUARANTEE.** A malformed declaration is turned into
+    ``(None, "rejected", ...)`` HERE, before ``_write_audit_record`` builds the row, so
+    it can never make the row fail ``_validated_audit_row`` — which under the Matrix-B
+    conjunction would flip ``ok`` on a CONTRACTED checkpoint. Lineage can therefore
+    never fail a checkpoint, and it is closed by ORDER, not by a guard.
+
+    ``parent_seq`` is advertised ``"number"``, so an integral float ``3.0`` is
+    NORMALISED to ``3`` here and the stored shape is an exact ``int``. That is
+    normalisation at a single site — the same discipline ``_write_audit_record`` states
+    for the floors — and it is why ``_validated_audit_parent`` may demand the exact
+    ``int`` without being a second, divergent acceptance set: it accepts the NORMALISED
+    form, this function produces it. ``bool`` is excluded by ``_exact_int`` and is not a
+    ``float``, so ``True`` is a ``bad_seq``, never seq 1.
+    """
+    name, seq = params.get("parent_design_name"), params.get("parent_seq")
+    if name is None and seq is None:
+        return None, "undeclared", {}
+    reason = (
+        "missing_pair" if name is None or seq is None
+        else "bad_design_name" if not _writable_name(name)
+        else "bad_seq" if not (_exact_int(seq) or (isinstance(seq, float)
+                                                   and seq.is_integer())) or seq < 0
+        else None)
+    if reason is not None:
+        return None, "rejected", {"lineage": f"rejected:{reason}"}
+    return ({"design_name": name, "seq": int(seq)}, "declared",
+            {"lineage": "declared"})
+
+
 def _write_audit_record(zmx_dir, *, seq, design_name, filename, zmx_sha256,
                         png_filename, png_sha256, active_configuration,
-                        verdict, scope, summary, min_air, min_glass):
+                        verdict, scope, summary, min_air, min_glass,
+                        scorecard=None, scorecard_failure=None,
+                        parent=None, parent_source="undeclared"):
     """Append ONE ``candidate_audit`` row to ``<zmx_dir>/manifest.jsonl``.
 
     Returns ``"written"`` or ``"not_written:<reason>"``. NEVER raises.
@@ -988,6 +1206,16 @@ def _write_audit_record(zmx_dir, *, seq, design_name, filename, zmx_sha256,
             "png_filename": png_filename,
             "png_sha256": png_sha256,
             "active_configuration": active_configuration,
+            # DECLARED lineage, written UNCONDITIONALLY: both keys are written on
+            # EVERY row from this release onward, contracted or not, so an uncontracted
+            # design gets lineage too and there is no second sidecar file to keep
+            # consistent. This is the one declared row-shape break; measured before
+            # taking it — no key-set-equality assertion exists anywhere in ``tests/``
+            # on this row or on ``save_candidate``'s envelope (swept by every
+            # assertion form: ``set(...)==``, ``sorted(...)==``, ``== {literal}``).
+            # Both halves are stored because a seq alone names a WORKSPACE candidate.
+            "parent": parent,
+            "parent_source": parent_source,
             "audit": {
                 "verdict": verdict,
                 # The ECHOED config_evaluated, never the REQUESTED value — a gate that
@@ -998,6 +1226,16 @@ def _write_audit_record(zmx_dir, *, seq, design_name, filename, zmx_sha256,
                 "summary": summary,
             },
         }
+        # The two blocks are MUTUALLY EXCLUSIVE and both are ADDITIVE: an
+        # uncontracted save writes neither key and the row is byte-identical to today.
+        # ``scorecard`` names the payload and pins its bytes; ``scorecard_failure``
+        # CLAIMS NOTHING — no verdict, no root asserted as authority, no binding — so
+        # "no record claims a scorecard that was not written" holds because the shape
+        # makes no claim to preserve.
+        if scorecard is not None:
+            row["scorecard"] = scorecard
+        elif scorecard_failure is not None:
+            row["scorecard_failure"] = scorecard_failure
         # A non-finite ``worst``/``threshold`` anywhere in the summary would make
         # json.dumps(allow_nan=False) raise; the sink's own sanitiser is reused so the
         # record's shape matches every other manifest row.
@@ -1092,6 +1330,87 @@ def _validated_audit_summary(verdict, summary):
     return True
 
 
+def _validated_audit_scorecard(ref, artifact_sha256):
+    """THE acceptance predicate for an ``AuditScorecardRef`` — A THIN DELEGATE.
+
+    Its entire body is the delegation, and it inspects NO key itself.
+    Two acceptance predicates over one question is the single-definition defect this
+    repo keeps closing, and it is the same defect already closed for ``compile()``.
+    The schema lives in ``loop/``; this module keeps only the call site the record
+    ladder needs.
+
+    ``artifact_sha256`` is the ROW's own ``zmx_sha256``, threaded through so the
+    binding cross-check happens at the single locus that holds
+    both values. This function still decides nothing — it hands both to the predicate.
+    """
+    if _loop_scorecard is None:                         # pragma: no cover - packaging
+        # No ``loop/`` means no scorecard was ever GRADED in this build, so a ref read
+        # out of a record cannot be validated here.  FALSE, not True: an unvalidatable
+        # ref is exactly the "we could not establish it" case, and this predicate's
+        # consumers read True as an established binding.
+        return False
+    return _loop_scorecard.validated_ref(ref, artifact_sha256)
+
+
+def _validated_audit_failure(block):
+    """True iff ``block`` is a ``scorecard_failure`` that CLAIMS NOTHING.
+
+    Exactly two keys, and neither is a verdict or a root asserted as authority. The
+    exact-key-set test is what keeps it that way: adding ``gate_verdict`` here would
+    re-create the second, unbound verdict surface this design deleted.
+    """
+    return (isinstance(block, dict)
+            and set(block.keys()) == {"state", "campaign_root"}
+            and isinstance(block.get("state"), str)
+            and block.get("state").strip() != "")
+
+
+def _validated_audit_parent(row):
+    """True iff ``row``'s declared lineage pair is well formed. NEVER raises.
+
+    HERE, at the class rule's own locus, exactly as ``_validated_audit_summary`` is —
+    never guarded at the consumer. ``_write_audit_record`` validates its own row with
+    ``_validated_audit_row`` before writing, so a row this refuses is never written.
+
+    The four clauses, in order:
+
+    * **both keys present or both absent.** A row carrying neither is a LEGACY row and
+      still validates (the shipped legacy-row precedent) — this release must not
+      invalidate every manifest written before it. Exactly one key is a HALF CLAIM and
+      is refused: a ``parent`` with no ``parent_source`` asserts a lineage with no
+      provenance for it.
+    * ``parent_source`` is exactly one of the three tokens.
+    * ``parent is None`` **iff** ``parent_source != "declared"`` — both directions. A
+      ``declared`` row with a null parent claims a parent it does not name; an
+      ``undeclared`` / ``rejected`` row carrying one names a parent it disclaims.
+    * a declared parent is a dict with the EXACT key set, a non-blank ``str`` name and
+      an exact ``int`` seq >= 0 (``_exact_int``, so ``True`` is not seq 1).
+
+    **Membership is tested against a TUPLE, not a frozenset, deliberately.** ``in`` over
+    a tuple compares with ``==`` and never hashes, so a hand-edited unhashable
+    ``parent_source`` cannot raise ``TypeError`` out of a reader documented never to
+    raise — the same trap the ``verdict`` clause below carries an ``isinstance`` guard
+    for, closed here by choosing a container that cannot spring it.
+
+    It demands the NORMALISED shape (exact ``int``) while ``_declared_parent`` accepts
+    an integral float and converts. That is ONE acceptance set with a single
+    normalisation point, not two — the discipline ``_write_audit_record``'s docstring
+    already states for the floors.
+    """
+    declared = [k for k in ("parent", "parent_source") if k in row]
+    if len(declared) != 2:
+        return not declared          # both absent = legacy row; exactly one = refuse
+    source, parent = row.get("parent_source"), row.get("parent")
+    if source == "declared":
+        return (isinstance(parent, dict)
+                and set(parent) == {"design_name", "seq"}
+                and isinstance(parent.get("design_name"), str)
+                and parent.get("design_name").strip() != ""
+                and _exact_int(parent.get("seq"))
+                and parent.get("seq") >= 0)
+    return source in ("undeclared", "rejected") and parent is None
+
+
 def _validated_audit_row(row):
     """True iff ``row`` passes EVERY clause below. A row failing ANY is not a record.
 
@@ -1119,6 +1438,42 @@ def _validated_audit_row(row):
     design_name = row.get("design_name")
     if not isinstance(design_name, str) or design_name.strip() == "":
         return False
+    # === ROW-LEVEL OPTIONAL BLOCKS — ABOVE the audit ladder, and the position is the
+    # fix (found by the lineage test itself, NOT by review).
+    #
+    # These three clauses used to sit at the BOTTOM, below ``if summary is None: return
+    # verdict == "clean"``. That is an EARLY RETURN, so on the row shape
+    # ``verdict: "clean"`` + ``summary: null`` — legal by that very clause — none of them
+    # ran. Measured: a row carrying an arbitrary ``{"totally": "bogus"}`` scorecard
+    # VALIDATED, and ``promotion_gate._scorecard_ref`` then read ``(None, None)`` off it
+    # as a card identity, with ``validated_ref``'s artifact-digest cross-check — *"the
+    # whole point"*, per its own docstring — never executed. Rows are read from a
+    # manifest this process did not necessarily write, which is the entire reason the
+    # ladder exists, so a hand-edited or version-skewed row reaches it.
+    #
+    # They are row-level and read nothing from ``audit``, so hoisting them is
+    # behaviour-preserving for every row that already reached them and strictly more
+    # REFUSING for the ones that did not — the fail-closed direction. The grouping is now
+    # the invariant: ROW-level clauses first, AUDIT-level clauses after, so no future
+    # early return inside the audit ladder can strand one again.
+    #
+    # The new consumer's fields are validated HERE, at the class rule's own locus,
+    # never guarded at the consumer. Either block failing makes the WHOLE record
+    # refuse with the shipped ``not_written:record_would_not_validate``: there is no
+    # half-bound record. Both keys are OPTIONAL (a legacy row carrying neither still
+    # validates) and MUTUALLY EXCLUSIVE.
+    if "scorecard" in row and "scorecard_failure" in row:
+        return False
+    if ("scorecard" in row
+            and not _validated_audit_scorecard(row.get("scorecard"),
+                                               row.get("zmx_sha256"))):
+        return False
+    if ("scorecard_failure" in row
+            and not _validated_audit_failure(row.get("scorecard_failure"))):
+        return False
+    # The declared lineage pair, at the same locus and for the same reason.
+    if not _validated_audit_parent(row):
+        return False
     audit = row.get("audit")
     if not isinstance(audit, dict):
         return False
@@ -1143,7 +1498,9 @@ def _validated_audit_row(row):
         return False
     # The element/field-level clauses live in ONE helper whose docstring states the rule
     # as a CLASS, so a future consumer's field is added there rather than re-derived.
-    return _validated_audit_summary(verdict, summary)
+    if not _validated_audit_summary(verdict, summary):
+        return False
+    return True
 
 
 def _read_audit_record(zmx_dir, seq, filename):
@@ -1156,7 +1513,9 @@ def _read_audit_record(zmx_dir, seq, filename):
     ABSENT and UNREADABLE are separated DETERMINISTICALLY, mirroring
     ``_resolve_candidate``'s shipped ``saw_content and not parsed_any`` discrimination:
 
-    | manifest missing                                     | absent     |
+    | manifest ``path_state`` absent (no directory entry)  | absent     |
+    | manifest ``path_state`` unknown (dir, dangling link, |            |
+    |   junction, device, stat fault)                      | unreadable |
     | open/decode fault (OSError, or UnicodeDecodeError —  |            |
     |   a ValueError, NOT an OSError)                      | unreadable |
     | content but ZERO lines parsed as a dict              | unreadable |
@@ -1171,23 +1530,39 @@ def _read_audit_record(zmx_dir, seq, filename):
     corruption would break every promote.
     """
     manifest_path = os.path.join(zmx_dir, "manifest.jsonl")
-    if not os.path.isfile(manifest_path):
-        # This was a bare ``not isfile -> absent``, which
-        # collapses TWO different facts: "no evidence exists" and "something is there and
-        # I cannot read it". Make ``manifest.jsonl`` a DIRECTORY and ``isfile`` is False,
-        # so the state read ``absent``, so ``_png_blocked_by_identity`` took its
-        # ``no_record`` EXEMPTION and published a ``paired_by_seq`` picture off an
-        # unreadable evidence location.
-        #
-        # That is this module's OWN ABSENT-vs-UNREADABLE principle, broken inside
-        # the very function whose docstring table exists to enforce it. ``exists()`` is
-        # guarded because a malformed path (embedded NUL) makes it raise on some
-        # platforms, and an unanswerable question is UNKNOWN, never "absent".
-        try:
-            present = os.path.exists(manifest_path)
-        except (OSError, ValueError):
-            return [], "unreadable"
-        return ([], "unreadable") if present else ([], "absent")
+    # This was a bare ``not isfile -> absent``, which
+    # collapses TWO different facts: "no evidence exists" and "something is there and I
+    # cannot read it". Make ``manifest.jsonl`` a DIRECTORY and ``isfile`` is False, so
+    # the state read ``absent``, so ``_png_blocked_by_identity`` took its ``no_record``
+    # EXEMPTION and published a ``paired_by_seq`` picture off an unreadable evidence
+    # location. That is this module's OWN ABSENT-vs-UNREADABLE principle — broken
+    # inside the very function whose docstring table exists to enforce it.
+    #
+    # The repair was ``isfile`` then a guarded
+    # ``exists``, and BOTH OF THOSE FOLLOW THE LINK: a dangling symlink or directory
+    # junction at ``manifest.jsonl`` is False on both, so the pair fell through to the
+    # SAME ``absent`` the repair existed to stop returning. MEASURED on this platform: a
+    # junction is creatable with NO privilege, and reads ``isfile`` False / ``exists``
+    # False / ``lstat`` OK — the two implementations disagree on a real object.
+    #
+    # The design named this locus and DEFERRED it, on the stated ground that neither
+    # was then on the enforcement path. THAT JUSTIFICATION EXPIRED in this module's
+    # own repair: ``record_state`` now crosses to ``promotion_gate`` WHOLE, and
+    # ``_absence_established`` reads ``absent`` as a POSITIVELY ESTABLISHED absence —
+    # which is what lets the gate answer ``not_applicable`` and publish with no referee.
+    # A deferred defect was promoted onto the enforcement path by another one's fix.
+    #
+    # ``criteria.path_state`` is THE one absence predicate — ``lstat``-based, so a link
+    # is OBSERVED rather than resolved-and-lost, and its default arm is UNKNOWN. Asked
+    # here rather than answered again: a second absence helper is precisely the sibling
+    # defect the single-predicate rule exists to prevent. Its three states map onto this
+    # reader's two — ABSENT alone is absent; PRESENT (a regular file) proceeds to the
+    # open; everything else, INCLUDING an unenumerated future state, is UNREADABLE and
+    # fails closed.
+    path_state = _path_state(manifest_path)
+    if path_state != PATH_PRESENT:
+        return [], ("absent" if path_state == PATH_ABSENT
+                    else "unreadable")
     try:
         with open(manifest_path, "r", encoding="utf-8", newline="") as fh:
             lines = fh.read().split("\n")
@@ -1255,8 +1630,11 @@ def _classify_identity(records, state, src_sha, design_name, floors):
     It contains NO ``try``/``except`` by design: a mutation inside a never-raise
     wrapper is INERT, so the wrapper stays where it belongs — at the tool boundary.
 
-    ``identity_proven`` means: THE PUBLISHED BYTES ARE, BY DIGEST, THE BYTES SOME
-    VALIDATED RECORD NAMES. It does NOT mean "the record was used"; the ladder below is
+    ``identity_proven`` means: THE SOURCE BYTES, READ BEFORE THE COPY, ARE BY DIGEST
+    THE BYTES SOME VALIDATED RECORD NAMES. It is a claim about the CANDIDATE at
+    ``src_sha`` time, NOT about the published file — nothing here re-verifies the
+    destination after ``_atomic_copy``. It does NOT mean "the record was
+    used" — the classification cases below are
     exactly where those differ (a proven digest whose record is conflicting, foreign,
     or not keeper-grade still routes to the LIVE audit).
 
@@ -1299,13 +1677,41 @@ def _classify_identity(records, state, src_sha, design_name, floors):
         # i.e. by file order — the last-row-wins hazard this key exists to remove, one
         # field over.
         #
-        # Both new members are validator-REQUIRED keys, so the subscripts are permitted
-        # and cannot KeyError (do not switch them to ``.get()``). Compared as a TUPLE with
-        # ``!=`` — never hashed, never a ``set()`` — so an unhashable hand-edited value
-        # cannot raise out of a function that has no try/except.
+        # ``png_sha256`` and ``summary`` are REQUIRED record keys, so the subscripts are
+        # permitted and the row-shape test stays green (do not switch THOSE to
+        # ``.get()``). Compared as a TUPLE with ``!=`` — never hashed, never a ``set()``
+        # — so an unhashable hand-edited value cannot raise out of a function that has
+        # no try/except.
+        #
+        # THE SAME DEFECT A THIRD TIME. This release made ``scorecard`` AUTHORISE a
+        # promotion: the gate takes the challenger card from ``_scorecard_ref(rec)``,
+        # i.e. from whichever row ``own[-1]`` lands on. Two
+        # validated rows for the SAME bytes, same design, same keeper verdict, same
+        # floors, same summary, same picture, naming DIFFERENT cards were merged here —
+        # so ``[A, B]`` promoted on B's card and ``[B, A]`` refused on A's. Same evidence,
+        # opposite outcome, decided by APPEND ORDER, with ``identity_proven`` reading true
+        # in both. This comment's own invariant — "EVERY field a usable record AUTHORISES
+        # belongs in the conflict key" — was already written down, in this file, in those
+        # words, and the change that granted a new field authority did not re-ask it.
+        #
+        # ``scorecard`` / ``scorecard_failure`` are OPTIONAL record keys (a legacy row
+        # carries neither), so these two are reached with ``.get()`` — which is what the
+        # row-shape test REQUIRES, not a lapse from the subscripts above: a subscript on
+        # an optional key would raise KeyError out of a try-free function on the common
+        # legacy row.
+        #
+        # ``scorecard_failure`` is one notch WIDER than outcome-determining today: no
+        # consumer reads its VALUE, and the two blocks are mutually exclusive, so
+        # ``scorecard`` alone already separates "names a card" from "names none". It is
+        # included because the difference between two rows is then reported as
+        # ``record_conflicting`` (two rows disagree) rather than resolved silently, and
+        # because a consumer that later reads the failure block must not re-open this
+        # exact hole. Both directions fail CLOSED — a conflict yields ``rec = None``, the
+        # gate sees no card, and a contracted promote is refused.
         return (audit["verdict"], audit.get("scope"),
                 audit["min_air"], audit["min_glass"],
-                rec["png_sha256"], audit["summary"])
+                rec["png_sha256"], audit["summary"],
+                rec.get("scorecard"), rec.get("scorecard_failure"))
 
     # ``design_name`` AUTHORISES (the ownership clause below rejects on it) but was
     # NOT in the conflict key, so the anti-flip clause could not see two rows that
@@ -1336,6 +1742,17 @@ def _classify_identity(records, state, src_sha, design_name, floors):
     if any(_key(r) != first for r in own[1:]):
         return _fail(_ID_CONFLICTING, True, None, True)
 
+    # ``own[-1]`` IS STILL SOUND, and it is sound for a reason that must be RE-DERIVED
+    # every time the key changes, never inherited: it is safe only while the key covers
+    # every field a consumer reads off the chosen row. Re-enumerated here —
+    # ``design_name`` and ``zmx_sha256`` are pinned by the ``own``/``matching`` filters
+    # themselves; ``audit.verdict``/``scope``/``min_air``/``min_glass``/``summary``,
+    # ``png_sha256``, ``scorecard`` and ``scorecard_failure`` are all in the key. That is
+    # the whole consumer set (a consumer-set test pins it: only ``_classify_identity``
+    # and ``promote_best`` subscript ``rec``; the gate reaches it through
+    # ``_scorecard_ref``/``verify_binding``, both of which read ``scorecard`` and
+    # ``zmx_sha256``). So the rows in ``own`` are indistinguishable to every reader and
+    # the index cannot decide anything. ADD A CONSUMER FIELD AND THIS ARGUMENT LAPSES.
     rec = own[-1]               # proved equal above on the load-bearing tuple
     # Retained as a belt: ``own`` is filtered on exactly this, so a mismatch here
     # is now unreachable, and if a future edit breaks the filter this still fails closed
@@ -1492,6 +1909,44 @@ def _design_name_error(design_name):
     ``projects/123/...``). Reject a non-str, AND a str that sanitizes to empty (a
     name made purely of illegal/trailing chars is not a usable workspace name).
     Returns ``None`` when the name is acceptable.
+
+    **THE FIXED-POINT CLAUSE.** A ``design_name`` is admitted
+    only when it is its OWN ``_safe_name`` — i.e. ``_safe_name(n) == n``. Before this
+    clause the docstring above already CLAIMED to reject a name that ``_safe_name``
+    reduces to the empty/placeholder value while the code only tested
+    ``strip() == ""``; the clause makes that existing claim TRUE, and closes a great
+    deal more besides.
+
+    WHY HERE, AND NOT AT THE GUARD. ``promote_best`` resolves the DESTINATION through
+    ``_safe_name(design_name)`` while ``loop/promotion_gate._g0`` resolves the CONTRACT
+    SUBJECT through the RAW name (``criteria.resolve_contract`` is exact
+    concatenation). ``_safe_name`` strips trailing dots/spaces, maps ``<>:"/\\|?*`` and
+    control characters to ``_``, prefixes a Windows reserved device name, collapses an
+    empty result to ``snapshot`` and truncates at 120; ``resolve_contract`` does none of
+    it. EVERY name on which the two disagree therefore names a CONTRACTED design's
+    champion file while reading UNCONTRACTED to the guard — measured with
+    ``design_name="<contracted> "``: ``ok:true``, no ``referee_verdict`` key, the
+    contracted champion's ``.zmx`` replaced, and the referee asked properly refuses
+    that same challenger with ``refuse_regression``. Handing the guard the SAFE name
+    instead would switch it OFF for any contracted design whose stem is not a fixed
+    point (the same defect reflected across the normalisation) and would disagree with
+    ``loop/scorecard``'s save-time resolution from the RAW name, producing a
+    permanently unpromotable contracted design whose printed remedy is a lie.
+
+    The DECIDING property is what happens when ``_safe_name`` is edited again. Under a
+    raw/safe split a new sanitising clause creates a new disagreement domain — it fails
+    OPEN. Under this door a new clause simply makes more names non-fixed-points — it
+    fails CLOSED. Downstream of it ``raw == safe`` on every reachable input, so
+    ``resolve_contract``, ``campaign_dir_for``, the ``candidate_audit`` rows, the owner
+    guard, the scorecard and the promotion gate agree BY CONSTRUCTION rather than by
+    parallel maintenance.
+
+    DELIBERATE BREAKING CHANGE, ratified by the human. An UNCONTRACTED design whose
+    name is not a fixed point used to be accepted and silently redirected to the
+    sanitised destination; it now refuses. Measured migration cost: ZERO (all 19
+    ``design_name`` values in the tracked manifests are already fixed points).
+    Precedent: ``build_merit``'s positive thickness floors, the grating ``reflective``
+    declaration.
     """
     if not isinstance(design_name, str):
         return "design_name must be a non-empty string"
@@ -1499,6 +1954,15 @@ def _design_name_error(design_name):
     # caller asserted; _safe_name("") -> "snapshot", so check the pre-sanitize stem.
     if design_name.strip() == "":
         return "design_name must be a non-empty string"
+    safe = _safe_name(design_name)
+    if safe != design_name:
+        return (
+            f"design_name {design_name!r} is not a canonical workspace name: it "
+            f"sanitizes to {safe!r}. Two spellings that sanitize to the same stem "
+            f"name the SAME files but are DIFFERENT contract subjects, so a "
+            f"non-canonical spelling is refused rather than silently redirected. "
+            f"Use {safe!r}."
+        )
     return None
 
 
@@ -1949,7 +2413,7 @@ def save_candidate(session, params):
     # satisfy is the class this cycle exists to close, so the CODE is fixed, not the
     # claim.
     floors = _effective_floors(params)
-    verdict, clearance_summary = _run_clearance_gate(
+    verdict, clearance_summary, clearance_gate = _run_clearance_gate(
         session,
         # When the thresholds do NOT resolve, pass the RAW values through unchanged so
         # the gate refuses exactly as it does today (its own firewall -> indeterminate).
@@ -2024,16 +2488,94 @@ def save_candidate(session, params):
     # set it only inside the ``else``, leaving it UNBOUND on the three
     # ``not_written`` branches — a NameError straight out of a tool documented to never
     # raise, i.e. the fix breeding the very sibling class it was closing.)
+    #
+    # ONE MOVE, +0 statements: the guarded computation is HOISTED
+    # above the scorecard call and the ladder below READS the hoisted value. Computing
+    # it twice is the two-independent-resolutions class the long comment that used to
+    # live here exists to close, so the comment moved WITH the code. The guarded
+    # derivation is unchanged: it comes from ``zmx_path`` — the file actually hashed —
+    # rather than a second ``_design_dir(...)`` resolution, and it runs INSIDE a guard
+    # because ``os.path.dirname`` on a pathological value would otherwise escape
+    # ``save_candidate``, which has no outer net and documents "NEVER raises".
+    # DECLARED lineage — resolved AT THE TOOL BOUNDARY, above every path that builds the
+    # row. A malformed declaration becomes ``(None, "rejected", ...)`` here, so it can
+    # never reach ``_validated_audit_row`` and can never turn the write into
+    # ``not_written:record_would_not_validate`` — which the Matrix-B conjunction below
+    # would then read as a CONTRACTED checkpoint failure and flip ``ok``. LINEAGE CAN
+    # NEVER FAIL A CHECKPOINT, and it is closed by ORDERING, not by a guard.
+    #
+    # Deliberately BELOW the name door and the sink guard: their refusal envelopes are
+    # unreachable from here, so a refusal that recorded nothing cannot carry a
+    # disclosure about what it recorded. The "only when a parent param was supplied"
+    # rule is enforced by POSITION on those two exits and by ``{}`` on this one.
+    parent, parent_source, _lineage_key = _declared_parent(params)
     _audit_dir = None
     _write_audit = False
+    if zmx_ok and isinstance(zmx_sha, str):
+        try:
+            _audit_dir = os.path.dirname(zmx_path)
+        except (OSError, ValueError, TypeError):
+            _audit_dir = None
+
+    # --- the bound scorecard seam --------------------------------
+    # The seam sits AFTER the digest and BEFORE the record — the window that is
+    # already "bytes written, digest computed, record still unwritten" — and never in
+    # the :1902-1938 window, which was DELIBERATELY emptied of engine calls.
+    #
+    # ``grade_checkpoint`` is TOTAL: it cannot raise, and a ``(None, None, None)``
+    # return means NO CONTRACT, on which this tool stays byte-identical to today —
+    # no envelope key, no record field, ``ok`` untouched (Matrix B row 1). ABSENT is
+    # not UNREADABLE: an unreadable criteria root is a contracted failure that
+    # DOES flip ``ok``.
+    #
+    # The config-restore precondition is the source's OWN pair, free — both reads
+    # already happened. ``active_before is not None`` is load-bearing exactly as it is
+    # for ``png_sha`` above: ``None == None`` would let TWO UNKNOWN READINGS CERTIFY a
+    # restoration, and a card graded against an unrestored configuration would describe
+    # a different configuration than the bytes it binds to.
+    # ``grade_checkpoint`` is called UNCONDITIONALLY. The guard that used to stand
+    # here (``if _audit_dir and floors is not None``) took a SKIP DECISION BEFORE THE
+    # CONTRACT WAS RESOLVED, so a design with a real criteria file and an unresolvable
+    # ``min_air`` produced no card, no failure block, no envelope key and ``ok: true``
+    # — the exact envelope shape Matrix-B row 1 reserves for "there is no contract".
+    # Contract existence is the FIRST question, and only ``grade_checkpoint`` can
+    # answer it; the unbindable inputs are passed through and refused on the far side
+    # of that answer.
+    if _loop_scorecard is None:                         # pragma: no cover - packaging
+        # THE NOT-APPLICABLE TRIPLE, verbatim.  The comment below states that the
+        # all-None triple is what "keeps an uncontracted save byte-identical to today";
+        # a build with no ``loop/`` is permanently uncontracted, so it produces exactly
+        # that triple rather than a fourth outcome nobody specified.
+        scorecard_ref, scorecard_failure, scorecard_path = None, None, None
+    else:
+        scorecard_ref, scorecard_failure, scorecard_path = _loop_scorecard.grade_checkpoint(
+            session,
+            design_name=design_name,
+            seq=seq,
+            label=label,
+            audit_dir=_audit_dir,
+            artifact_path=zmx_path,
+            artifact_sha256=zmx_sha,
+            clearance_env=clearance_gate,
+            # The restore proof is established INSIDE, after the scorecard's own engine
+            # calls. ``active_after`` above was read before they ran, so it could not
+            # witness a configuration sweep the scorecard itself performed.
+            active_before=active_before,
+            read_active_config=lambda: _active_configuration(session),
+            n_configs=_configuration_count(session),
+        )
+    # CONTRACTED is the disjunction of the two non-trivial outcomes: a card, or a
+    # failure. The not-applicable triple is all-None, and on it nothing below fires —
+    # which is what keeps an uncontracted save byte-identical to today.
+    _contracted = scorecard_ref is not None or scorecard_failure is not None
     if not zmx_ok:
         audit_record = "not_written:snapshot_failed"
     elif not isinstance(zmx_sha, str):
         audit_record = "not_written:digest_unreadable"
     elif floors is None:
         audit_record = "not_written:floors_unresolved"
-    else:
-        # This USED TO re-resolve the destination as
+    elif not _audit_dir:
+        # The destination USED TO be re-resolved here as
         # ``os.path.join(_design_dir(session, design_name), "candidates", "zmx")`` — a
         # SECOND, independent resolution, the exact class the promote side already fixed
         # by resolving the artifact first and deriving everything else FROM it. Two
@@ -2047,17 +2589,13 @@ def save_candidate(session, params):
         #      escaped ``save_candidate``, which has no outer net and documents
         #      "NEVER raises".
         #
-        # Derive the directory from ``zmx_path`` — the file actually hashed — and do it
-        # inside a guard. ``zmx_path`` is already known to be a ``str`` here (``zmx_sha``
-        # was computed from it), so this cannot silently target the wrong tree.
-        try:
-            _audit_dir = os.path.dirname(zmx_path)
-        except (OSError, ValueError, TypeError):
-            _audit_dir = None
-        if not _audit_dir:
-            audit_record = "not_written:dir_unresolved"
-        else:
-            _write_audit = True
+        # It is derived from ``zmx_path`` — the file actually hashed — inside a guard,
+        # so it cannot silently target the wrong tree. The derivation now happens ONCE,
+        # above the scorecard seam, and this ladder READS it; the guarded
+        # computation moved, its reasoning came with it, and nothing is resolved twice.
+        audit_record = "not_written:dir_unresolved"
+    else:
+        _write_audit = True
     if _write_audit:
         audit_record = _write_audit_record(
             _audit_dir,
@@ -2078,8 +2616,23 @@ def save_candidate(session, params):
             summary=clearance_summary,
             min_air=floors[0],
             min_glass=floors[1],
+            scorecard=scorecard_ref,
+            scorecard_failure=scorecard_failure,
+            # The DECLARED parent (or null) and the token that says which of
+            # the three facts it is. Already resolved and already well formed.
+            parent=parent,
+            parent_source=parent_source,
         )
 
+    # MATRIX B, APPLIED AS ONE INVARIANT RATHER THAN PER-SKIP-PATH: a CONTRACTED
+    # checkpoint is ``ok`` only if it produced a bound scorecard — a card written AND
+    # a record that accepted it. Stated as a property, this covers the two skip paths
+    # the audit found, the writer/validator failures Matrix B rows 4-5 name, and any
+    # future path nobody has thought of yet; enumerating skip reasons here is what let
+    # two of them ship. It runs AFTER the record ladder because the record's outcome
+    # is half the conjunct. An UNCONTRACTED save is untouched.
+    if _contracted and (scorecard_ref is None or audit_record != "written"):
+        ok = False
     # L-7: TOTAL. The bare dict index here raised KeyError straight out of save_candidate
     # on any unrecognised verdict token; an unknown token now reads None = could-not-audit.
     clearance_ok = _clearance_ok_flag(verdict)
@@ -2090,6 +2643,22 @@ def save_candidate(session, params):
         None if png_ok
         else "no layout figure was rendered — run render_layout to eyeball the design"
     )
+    # ON THE SUCCESS PATH THE ONLY THING ENTERING THE AGENT'S CONTEXT
+    # IS A PATH. No verdict, no counts, no warning — a second, unbound grade surface
+    # could diverge from the digest-bound file, which is why ``scorecard_warning`` was
+    # cut. When there is NO CONTRACT the key is ABSENT ENTIRELY: omitting it is the only
+    # construction under which "byte-identical to today" is a true statement.
+    # The basename, NOT ``os.path.relpath``: the card is written INTO ``_audit_dir`` by
+    # construction, so the basename IS the relative path — and it cannot raise the
+    # cross-drive ``ValueError`` ``relpath`` can, in a tool documented to never raise.
+    # It is also the same convention the audit record's own ``filename`` uses.
+    #
+    # Emitted only when the card is BOUND. A path handed to the agent for a card the
+    # record refused would name a file nothing points at — a grade with no binding is
+    # the surface the binding rule exists to prevent, not a convenience.
+    _scorecard_key = {} if (scorecard_path is None or audit_record != "written") else {
+        "scorecard": os.path.basename(scorecard_path)
+    }
 
     return {
         "ok": ok,
@@ -2112,7 +2681,58 @@ def save_candidate(session, params):
         "artifact_sha256": zmx_sha,          # sha256 of the candidate .zmx on disk
         "png_sha256": png_sha,               # null when the picture is unbindable
         "audit_record": audit_record,        # "written" | "not_written:<reason>"
+        **_scorecard_key,                    # PRESENT only when a card was written
+        # DECLARED lineage — "declared" or "rejected:<missing_pair|bad_design_name|
+        # bad_seq>". ABSENT ENTIRELY when NO parent param was supplied, so a call that
+        # declares nothing gains no key and stays byte-identical to today — the same
+        # construction ``_scorecard_key`` uses one line up, and the only one under which
+        # "byte-identical" is a true statement rather than a nearly-true one.
+        **_lineage_key,
     }
+
+
+#: Per-token IN-BAND remedies for a contract-guard refusal. Every one is
+#: an act the agent can perform without a human editing anything; ``force`` is NOT
+#: among them, because the contract guard is ABSOLUTE (by design) and a
+#: remedy sentence offering it would train the caller to reach for the one lever
+#: that cannot work here.
+_GATE_REMEDIES = {
+    "refuse_contract_name_unproven": (
+        "no validated candidate_audit row for these EXACT BYTES names this design, "
+        "so the contract governing them is not this caller's to invoke; re-save the "
+        "design under its own name (load_design then save_candidate) and promote "
+        "THAT seq"),
+    "refuse_no_bound_scorecard": (
+        "this candidate carries no scorecard bound to its bytes; re-save it with "
+        "OPTIVIBE_CRITERIA_ROOT set so save_candidate grades and binds a card"),
+    "refuse_champion_unbound": (
+        "no validated record binds a scorecard to the CURRENT BEST_*.zmx bytes; "
+        "load_design(BEST) then save_candidate writes one bound by digest"),
+    "refuse_champion_conflict": (
+        "two validated records name DIFFERENT scorecards for the champion's bytes "
+        "and file order may not choose between them; load_design(BEST) then "
+        "save_candidate"),
+}
+_GATE_REMEDY_UNBOUND, _GATE_REMEDY_REFEREE = (
+    "the contract could not be asked about these bytes; produce a bound scorecard "
+    "for them, or unset OPTIVIBE_CRITERIA_ROOT",
+    "the criteria referee compared this candidate against the incumbent and did not "
+    "permit the move; see the referee block for the limb that decided")
+
+
+def _gate_refusal_text(gate):
+    """The refusal sentence — it NAMES THE TOKEN and gives an in-band remedy.
+
+    The default arm is chosen by FAMILY, not by a catch-all string: *we could not
+    ask* and *we asked and the answer was no* are different facts and deserve
+    different next actions. ``force`` appears in neither.
+    """
+    default = (_GATE_REMEDY_REFEREE
+               if (_promotion_gate is not None
+                   and gate.family == _promotion_gate.FAMILY_REFEREE_REFUSED)
+               else _GATE_REMEDY_UNBOUND)
+    return ("REFUSED by the criteria contract guard (%s): %s."
+            % (gate.verdict, _GATE_REMEDIES.get(gate.verdict, default)))
 
 
 def _atomic_copy(src: str, dst: str) -> None:
@@ -2323,6 +2943,111 @@ def promote_best(session, params):
             records, record_state, src_sha, design_name, floors)
         identity_warning = _identity_warning(identity)
 
+        # === POINT P — THE CONTRACT-GATED PROMOTION GUARD =======================
+        # Placed HERE, and the position is the enforcement:
+        #
+        #   * it is ABOVE ``force`` (read two statements below), so the guard is
+        #     force-independent MECHANICALLY rather than by convention — a deliberate
+        #     choice, and the same shape as the shipped owner guard;
+        #   * it is ABOVE the audit-source fork and therefore above the ONLY engine
+        #     call on this path (``_run_clearance_gate``), so a contract refusal is
+        #     SEAT-FREE;
+        #   * it is BELOW the owner guard's return, so a proven-foreign candidate is
+        #     still refused as an ARTIFACT question before the contract asks a DESIGN
+        #     question about it — different questions, and answering them out of order
+        #     makes the more specific error unreachable;
+        #   * it is BELOW ``_resolve_candidate``, so the guard is about BYTES
+        #     (``src_zmx`` / ``src_sha``) and never about a seq, which is a
+        #     workspace-global index.
+        #
+        # Every argument is ALREADY IN SCOPE — nothing is re-derived and no second file
+        # resolution is created. ``record_state`` crosses WHOLE: it used to be decided
+        # here as ``(record_state == "ok")``, and that boolean COLLAPSED ABSENT INTO
+        # UNREADABLE at the seam — the ABSENT-vs-UNREADABLE rule broken one layer above
+        # the gate, in this very call — after which the gate had to relay the distinction
+        # back in through ``identity["reason"]``. The reason it was decided here was
+        # real but narrow
+        # (``loop/`` may not re-type the nine status tokens as literals, and this
+        # reader's "ok" is spelled like ``metrics.STATUS_OK`` by coincidence); the gate
+        # resolves that collision the way an existing verdict token already does, by
+        # importing the spelling. A three-state fact is passed as three states.
+        # PACKAGING ARM.  No ``loop/`` in this build (see the import block) means there
+        # is no contract to enforce, which is the gate's own NOT_APPLICABLE state and not
+        # a new one.  `contract_gate` stays None and every consumer below reads
+        # `contracted` -- so the uncontracted path taken here is the SAME path a private
+        # build takes for a design with no criteria file, already reviewed and already
+        # specified as byte-identical to the pre-feature envelope.
+        contract_gate = None
+        if _promotion_gate is not None:
+            contract_gate = _promotion_gate.evaluate(
+                design_name=design_name,
+                src_zmx=src_zmx,
+                src_sha=src_sha,
+                rec=rec,
+                identity=identity,
+                records=records,
+                record_state=record_state,
+                zmx_dir=zmx_dir,
+                best_zmx=best_zmx,
+                validate_row=_validated_audit_row,
+            )
+        # UNCONTRACTED ⇒ NOT ONE NEW KEY. Omitting the keys — rather than
+        # emitting them as nulls — is the only construction under which "byte-identical
+        # to today" is a TRUE statement, and it is the half a fix for a CRIT most easily
+        # breaks (the shipped ``_scorecard_key`` precedent, one tool over).
+        contracted = (contract_gate is not None
+                      and contract_gate.verdict != _promotion_gate.NOT_APPLICABLE)
+        gate_keys = {} if not contracted else {
+            "contract_state": contract_gate.contract_state,
+            "referee": contract_gate.referee,
+            "referee_verdict": contract_gate.verdict,
+            "campaign_approval": contract_gate.campaign_approval,
+        }
+        # The keeper-gate ESCALATION RECORD. Pre-computed here and spread into
+        # the EXISTING keeper refusal below; ``{}`` when uncontracted, so an
+        # uncontracted refusal stays byte-identical. It does not change the refusal —
+        # it makes the referee-PASSES / keeper-refuses case LEGIBLE. Escalated, never
+        # overridden. The coverage reason is already carried verbatim inside
+        # ``clearance_summary``, so no new key is needed to tell "unmeasurable on this
+        # topology" apart from the five other causes.
+        keeper_record = {} if not contracted else {
+            "promotion_refused_by_keeper_gate": True,
+            "referee": contract_gate.referee,
+        }
+        # `contract_gate is None` is the no-``loop/`` build: no contract, so nothing to
+        # refuse ON.  Written as an explicit None test rather than folded into
+        # `contracted`, because the two questions differ -- `contracted` decides whether
+        # KEYS are emitted, this decides whether the promotion is BLOCKED, and a future
+        # verdict that is contracted-but-permitting must not silently start refusing.
+        if contract_gate is not None and not contract_gate.permits:
+            # A PRE-FORK exit, so the envelope contract holds: every identity key present and
+            # ``clearance_source`` present. Unlike the owner-guard exit, identity HAS
+            # been evaluated by now, so the identity keys carry their REAL values rather
+            # than a blanket null — and ``clearance_source`` still reads "not_evaluated",
+            # because no audit ran on this path. Claiming "live_session_geometry" here
+            # was this cycle's own defect inside the previous fix, one guard over.
+            return {
+                "ok": False,
+                "error_family": contract_gate.family,
+                "error": _gate_refusal_text(contract_gate),
+                "design_name": design_name,
+                "seq": seq,
+                "best_zmx": None,
+                "best_png": None,
+                "png_promoted": False,
+                "candidate_file": cand_file,
+                "clearance_ok": None,          # no audit ran on this path
+                "clearance_summary": None,
+                "active_configuration": None,
+                **_pre_fork_identity_keys(),
+                # The REAL, evaluated identity — computed three statements above.
+                "identity_proven": bool(identity.get("proven")),
+                "identity": identity,
+                "identity_warning": identity_warning,
+                **gate_keys,
+            }
+        # === END POINT P =========================================================
+
         # STRICT bool — only the literal ``True`` forces. ``bool()`` coercion would
         # let ``force="no"`` / ``force="0"`` (truthy strings) silently override the keeper
         # refusal — the OPPOSITE of intent. ``is True`` admits ONLY True (1 / "yes" / any
@@ -2351,7 +3076,7 @@ def promote_best(session, params):
             # no copy, no temp, no manifest row). Audits at config="all" — a zoom thin in
             # a NON-current config is the silent case the keeper boundary must catch.
             #
-        # Thread the optional min_air/min_glass thresholds into the keeper
+            # (gap 7) The optional min_air/min_glass thresholds are threaded so a
             # manufacturable micro-lens can promote against scale-appropriate floors
             # instead of false-refusing at the fixed 0.5/1.0 macro floors. A bad
             # threshold hits check_clearance's firewall -> the gate's except ->
@@ -2363,7 +3088,10 @@ def promote_best(session, params):
             # resolve, the RAW values pass through unchanged and the gate refuses exactly
             # as before — never the defaults, which would audit at floors the caller
             # never asked for while the ladder reported ``scope_insufficient``.
-            verdict, clearance_summary = _run_clearance_gate(
+            # The third element (the raw gate reading + its params) is the
+            # scorecard's ``clearance_env``; ``promote_best`` does not grade, so it is
+            # DISCARDED here and this tool's behaviour is byte-identical.
+            verdict, clearance_summary, _gate = _run_clearance_gate(
                 session,
                 min_air=floors[0] if floors is not None else params.get("min_air"),
                 min_glass=floors[1] if floors is not None else params.get("min_glass"),
@@ -2416,6 +3144,10 @@ def promote_best(session, params):
                 "artifact_sha256": None,
                 "png_identity": None,
                 "best_png_reason": None,
+                # Present ONLY when a contract was present AND the contract
+                # guard PERMITTED — i.e. exactly the referee-PASSES/keeper-refuses
+                # case. ``{}`` on an uncontracted refusal (byte-identical to today).
+                **keeper_record,
             }
 
         # Atomic .zmx promote (the load-bearing artifact).
@@ -2564,9 +3296,10 @@ def promote_best(session, params):
             "png_identity": png_identity,
             # Non-null exactly when NO picture was published, naming why.
             "best_png_reason": best_png_reason,
-            # ``identity_proven`` says the PUBLISHED BYTES are,
-            # by digest, the bytes some validated record names — NOT that the record was
-            # used, and NOT that the geometry is sound.
+            # ``identity_proven`` says the SOURCE BYTES — read BEFORE the copy — are, by
+            # digest, the bytes some validated record names. NOT the published file
+            # (nothing re-verifies the destination; see the ``artifact_sha256`` note
+            # below), NOT that the record was used, and NOT that the geometry is sound.
             "identity_proven": bool(identity.get("proven")),
             "identity": identity,
             "identity_warning": identity_warning,
@@ -2597,6 +3330,10 @@ def promote_best(session, params):
             "clearance_source": clearance_source,
             # The SAME allow-list the gate reads, so ``forced`` can never disagree with it.
             "forced": bool(force and verdict not in _PROMOTING_VERDICTS),
+            # The four contract keys, on a CONTRACTED success only. ``{}`` when no
+            # contract governs these bytes, which is what keeps the "byte-identical to
+            # today" claim literally true rather than nearly true.
+            **gate_keys,
         }
         if note is not None:
             result["note"] = note
@@ -2643,6 +3380,14 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "render": "boolean",
         "min_air": "number",
         "min_glass": "number",
+        # DECLARED lineage — TWO OPTIONAL SCALARS, not one nested object: the adapter's
+        # type-aware reparse shim skips json.loads for a "string" param, so
+        # a design legitimately named "123" reaches the handler verbatim and no nested
+        # shape has to be validated at the wire. NEITHER is in required_params, and
+        # NEITHER is offered on promote_best — lineage is declared where the checkpoint
+        # is MADE, never re-asserted where it is published.
+        "parent_design_name": "string",
+        "parent_seq": "number",
     },
     description=(
         "Snapshot the live system as a durable project candidate .zmx (+ paired "
@@ -2656,7 +3401,14 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "beside the bytes it measured (artifact_sha256 / png_sha256 / audit_record) so a "
         "later promote_best of THIS seq can report a verdict about THESE bytes instead of "
         "about whatever is loaded then. Returns the saved Zemax file path under zmx_path; "
-        "use that value for persistence/read-back."
+        "use that value for persistence/read-back. "
+        "Declare the checkpoint this one was derived from with parent_design_name AND "
+        "parent_seq TOGETHER (a seq alone names a WORKSPACE candidate, not this "
+        "design's, so a lone seq is refused): lineage is a DECLARED field, never "
+        "inferred from session state, and is recorded beside the bytes. Supplying "
+        "neither is recorded as 'undeclared' — an honest no-claim, not a gap. The "
+        "lineage key echoes 'declared' or 'rejected:<reason>' and is ABSENT when you "
+        "declared nothing; a rejected declaration NEVER fails the checkpoint."
     ),
 )
 

@@ -237,6 +237,234 @@ class CatalogLoadError(SurfaceWriteError):
     error_family = "catalog_load"
 
 
+class SolveDrivenError(SurfaceWriteError):
+    """A write was refused because the target cell is DRIVEN by a solve.
+
+    A ``SurfaceWriteError`` subclass, on the house pattern of ``AsphereWriteError`` /
+    ``GrinWriteError`` / ``CatalogLoadError``: it inherits the structured
+    ``(field, intended, actual, surface)`` attrs AND the existing
+    ``except SurfaceWriteError`` envelope plumbing, so it needs NO dispatch wiring and NO
+    ``__init__``. Only ``error_family`` is overridden, to the DISTINCT ``solve_driven``,
+    because the remedy is unlike any other write failure: nothing about the VALUE is
+    wrong, and retrying will not help.
+
+    WHY REFUSING BEATS THE READ-BACK ORACLE HERE — MEASURED, and it corrects an earlier
+    note. That note said a write to a driven cell raises, so "the raise is therefore
+    certain". A live probe falsified it twice. On ``semi_diameter`` under a
+    ``SurfacePickup``, a bare write
+    returns ``ok: true``, THE VALUE MOVES, and the solve is silently converted
+    ``SurfacePickup -> Fixed``: a destroyed design relationship reported as success, which
+    NO read-back oracle can catch because the value did land. Writing a driven cell its own
+    current value does not raise either. So on that cell this guard is the ONLY thing
+    standing between an ordinary-looking write and a silent relationship deletion.
+
+    RAISE, NOT A REFUSAL DICT, and that is load-bearing: ``lens_spec.py``'s apply loop does
+    not bind ``set_surface``'s return, so a refusal dict would be DISCARDED and the apply
+    would report success for a surface it never wrote. The raise routes to apply's "ANY
+    throw routes to rollback" broad-except instead.
+    """
+
+    error_family = "solve_driven"
+
+    #: The remedy for the DRIVEN arm. ONE constant per arm, consumed once — a second copy
+    #: of either is how two call sites come to promise different things.
+    #:
+    #: IT NAMES ONLY SHIPPED DOORS, and only doors that WORK FOR THIS ARM.
+    #: A refusal whose remedy names an action with no door is inadmissible in every
+    #: branch. ``set_solve`` / ``clear_solve`` DID NOT EXIST when this constant was
+    #: written and the guard was a DENYLIST forbidding their names; **THIS RELEASE SHIPS
+    #: BOTH**, so the denylist is INVERTED into the stronger manifest-derived rule — every
+    #: tool name either REMEDY constant mentions must be in ``load_manifest()``, which
+    #: guards future names too instead of only these two. ``clear_solve`` is
+    #: named below as the door for REMOVING the relationship. A door that exists but
+    #: cannot resolve THIS refusal is the same defect one step in, and one was shipped:
+    #:
+    #: THE FALSIFIED SENTENCE, DELETED HERE (external HIGH). This text used to end "…or
+    #: re-author the design through apply_lens_spec, whose reset sets non-re-declared
+    #: geometry solves Fixed". It is served on EVERY refusal, and it was a door that
+    #: PROVABLY CANNOT WORK: ``Variable`` is in ``NON_DRIVING``, so a refusal is BY
+    #: CONSTRUCTION always about a DRIVING solve, while the reset's solve arm clears only
+    #: ``Variable`` ones. The sentence sent the agent round a loop ending at the same
+    #: refusal.
+    #:
+    #: THE REPLACEMENT IS UNCONDITIONAL, AND IT TOOK A LIVE MEASUREMENT TO GET THERE.
+    #: The first cut named the door WITH a condition — "…or when the apply reverts an
+    #: omitted asphere on this surface back to Standard", on the audit's reading that a
+    #: retype destroys the solve (a probe finding). MEASURED by a live probe:
+    #: an asphere->Standard revert
+    #: PRESERVES a driving solve on radius, thickness AND conic. The audit's reading was
+    #: measured on the opposite transition (Standard -> CB/asphere). So there is no
+    #: exception to name:
+    #: apply's reset can NEVER clear the solve behind a refusal, and the sentence is
+    #: shorter for it. See ``lens_spec._RESET_ARM_B_NOTE`` and its measurement block.
+    REMEDY = (
+        "Read `solves` on read_surface to see the relationship before writing. To make "
+        "this cell an optimizer variable anyway, pass replace_solve=true to "
+        "set_variable/vary (the prior solve is reported back). To REMOVE the solve, call "
+        "clear_solve(surface=<n>, cell='<token>') — it FREEZES the cell at its CURRENT "
+        "value (it does not restore a default or an earlier number), then write. "
+        "Otherwise reload a design without the solve — re-authoring through "
+        "apply_lens_spec will NOT clear it: its reset clears only Variable solves, so a "
+        "driving solve survives and the apply rolls back on this same refusal."
+    )
+
+    #: The remedy for the UNKNOWN arm, and it is DIFFERENT ON PURPOSE.
+    #:
+    #: ``replace_solve=true`` is NOT a door here. It replaces a solve that was READ, and
+    #: reports it back as ``replaced_solves``; there is nothing to report when the read
+    #: failed, and the hole where the override converted UNKNOWN into mutation
+    #: permission is CLOSED (the write once proceeded and returned an envelope
+    #: BYTE-IDENTICAL to a clean undriven cell's). Naming it here would name a door this
+    #: arm deliberately shuts.
+    #: THIS ADDS THE EXPLICIT NEGATIVE, NOT A DOOR. ``set_solve``/``clear_solve`` now exist,
+    #: and the instinct on reading this arm is to reach for one of them — so the text says
+    #: outright that they refuse this state too (``clear_solve`` CAPTURES the prior solve
+    #: before acting, so it hits the same unreadable reading). Ruled over silence because
+    #: an earlier failure was served text UNDERSTATING the options at the moment an
+    #: agent is stuck: a reader who is not told a door is closed will try it, and read the
+    #: same refusal a second time with no new information.
+    REMEDY_UNKNOWN = (
+        "Read `solves` on read_surface: this cell will be listed under "
+        "`solves_unreadable`. replace_solve=true does NOT apply to this refusal — it "
+        "replaces a solve that was read, and reports what it replaced, so it is refused "
+        "when the reading itself failed. set_solve and clear_solve also refuse this "
+        "state — clear_solve captures the prior solve before acting, so it reads the same "
+        "unreadable cell. Recover the reading first (reload the design "
+        "and read it back); a solve that stays unreadable is an engine-state fault "
+        "rather than a design decision."
+    )
+
+    @classmethod
+    def from_probe(cls, probe, *, cell_token, surface, tool, intended=None):
+        """Build the refusal from a ``refuse_if_driven`` probe. ONE factory, not N sites.
+
+        Branches on ``probe["driven"] is True`` / ``is None`` by IDENTITY — the probe is
+        TRI-STATE and truthiness would fold UNKNOWN into "not driven", the two-character
+        fail-open this whole guard exists to avoid. ``probe`` is read with ``.get`` so a
+        malformed probe cannot raise a ``KeyError`` while BUILDING a refusal (which would
+        surface as an opaque ``internal`` in place of a precise diagnosis).
+
+        NO ``str()`` COERCION of a solve reading anywhere: ``str(None)`` is the string
+        ``"None"``, which is a REAL non-driving solve type, so coercing an unreadable
+        reading would render an UNKNOWN cell as a named, harmless one.
+        """
+        probe = probe if isinstance(probe, dict) else {}
+        driven = probe.get("driven")
+        solve_type = probe.get("solve_type")
+        if driven is True:
+            # A REVIEW FINDING: the hazard was stated BACKWARDS, and on the one cell
+            # where this guard is the ONLY protection. "Silently discarded" is the
+            # radius/thickness behaviour; a live probe measured semi_diameter under a
+            # SurfacePickup doing the OPPOSITE — ok:true, the value MOVES, and the solve
+            # is converted SurfacePickup -> Fixed. Telling an agent its write would be
+            # discarded understates that case into a harmless no-op, when it is the
+            # silent DELETION of a design relationship that no read-back oracle can see
+            # (the value did land). Both outcomes are named; neither is promised.
+            message = (
+                f"{cell_token} on surface {surface} is driven by a {solve_type} solve — "
+                "the value is the engine's own recomputation, so writing it either goes "
+                "nowhere (the read-back agrees with the solve, not with you) or lands "
+                "and DESTROYS the relationship, converting the solve to Fixed. Which "
+                "one is cell-dependent and neither is what you asked for. "
+                f"{tool} refused before mutating anything. {cls.REMEDY}"
+            )
+        else:
+            reason = probe.get("reason") or "no reason was recorded"
+            message = (
+                f"{cell_token} on surface {surface}: the solve could not be read "
+                f"({reason}) — refusing rather than writing through a solve we cannot "
+                f"see. {tool} refused before mutating anything. {cls.REMEDY_UNKNOWN}"
+            )
+        return cls(message, field=cell_token, intended=intended,
+                   actual=solve_type, surface=surface)
+
+
+class SolvePartialStateError(SurfaceWriteError):
+    """A solve author MUTATED the cell and the RESTORE could not be proven.
+
+    THIS IS THE ONE OUTCOME ``set_solve`` / ``clear_solve`` cannot make safe, so it is
+    given its own family rather than being folded into ``surface_write``. Every OTHER
+    post-mutation failure in those tools ends with the prior solve restored AND the
+    restoration verified, and reports as ``surface_write`` saying so. This class means the
+    opposite: the write is known to have been attempted, the rollback is NOT known to have
+    landed, and the cell's solve state is therefore UNKNOWN rather than either state.
+
+    WHY A FAMILY AND NOT A ``partial_state: true`` BOOLEAN, ruled at a human
+    checkpoint. The envelope-shaped precedents (``apply_lens_spec``'s
+    ``{ok:false, rolled_back, partial_state, checkpoint}``) reach that flag by CATCHING
+    and RETURNING a dict, so they never raise past their own boundary.
+    ``set_solve``/``clear_solve`` RAISE, and the dispatch failure envelope is the frozen
+    5-key shape ``ok/tool/result/error/error_family`` which projects NO exception
+    attributes — so a RAISING tool genuinely cannot put a boolean on that wire. Adding
+    conditional plumbing to the highest-blast-radius module to duplicate a signal the
+    family already carries was rejected. **The machine-readable partial-state signal
+    is ``error_family == "solve_partial_state"``, 1:1 with the condition, and the served
+    docs say so. No consumer may check for a ``partial_state`` boolean here.**
+
+    THE MESSAGE'S FIRST CLAUSE STATES THE UNKNOWN, before anything else. An agent that
+    reads only the opening of a refusal must not come away thinking the cell holds either
+    the old or the new solve. It then names the prior type, the observed post-restore type
+    and value where readable, WHICH restore step failed (``type`` / ``value`` / ``proof``),
+    and the remedy.
+
+    THE REMEDY IS THE NATIVE CHECKPOINT, and that is not a generic "reload": a
+    ``.zmx`` written by ``save_snapshot``/``save_candidate`` is the only snapshot that
+    preserves solve state, so ``load_design`` on the last native checkpoint is the
+    recovery, and re-authoring from a LensSpec is NOT (the flat schema cannot carry a
+    solve at all).
+    """
+
+    error_family = "solve_partial_state"
+
+    #: ONE constant, consumed once — a second copy is how two call sites come to promise
+    #: different things.
+    REMEDY = (
+        "Reload the last native checkpoint with load_design — a .zmx written by "
+        "save_snapshot/save_candidate is the only snapshot that preserves solve state, "
+        "and re-applying a lens spec will NOT restore it because the flat spec "
+        "schema carries no solves. Read `solves` on read_surface first to see what this "
+        "cell actually holds now."
+    )
+
+
+#: The EXPLICIT channel a handler attaches a partial-state finding to before letting an
+#: abort travel unchanged. ONE definition, read by the writers
+#: (``surface_solve._restore``, ``cb_surface``) and by the single reader
+#: (``server.Dispatcher._classify``) — a second copy of the string is how the two ends
+#: come to disagree silently.
+#:
+#: WHY NOT ``__context__``, which was used before. Python assigns ``__context__`` IMPLICITLY to
+#: whatever exception happened to be in flight, so an abort raised anywhere inside a
+#: ``HarnessError`` handler acquires one for free — and ``_classify`` then renamed that
+#: unrelated abort with the context's family. A review reproduced it: a
+#: ``ToolParamError`` being handled, an independent ``KeyboardInterrupt`` raised, and
+#: ``_classify`` answering ``"tool_param"``. A marker only a handler writes cannot be
+#: acquired by accident. ``__context__`` is still SET by those writers, for a human
+#: reading a traceback; it is simply no longer what decides the family.
+PARTIAL_STATE_ATTR = "_optivibe_partial_state"
+
+
+class CbPartialStateError(SurfaceWriteError):
+    """A coordinate-break author MUTATED the editor and an ABORT interrupted it.
+
+    A ``SurfaceWriteError`` subclass so it inherits the structured attrs; only the
+    ``error_family`` is distinct. It is NEVER raised into dispatch — the CB tools return
+    never-raise envelopes for every ``Exception``, and this class exists solely for the
+    one exit those envelopes cannot cover: a ``KeyboardInterrupt`` / ``SystemExit``
+    arriving after a CB sub-step has been entered on the engine.
+
+    On that path the abort MUST travel unchanged, so the tool's ``committed`` /
+    ``attempted`` ledgers — the whole point of the two-ledger design — would otherwise
+    die with the frame and dispatch would serve a bare ``internal``. This class is the
+    finding, emitted durably to the interaction log and attached to the abort through
+    ``PARTIAL_STATE_ATTR``, so the family reaching the MCP caller is TRUE instead of
+    opaque while the exception that reaches a Python caller is still the one that
+    actually happened.
+    """
+
+    error_family = "cb_partial_state"
+
+
 class ClearanceError(ToolError):
     """A ``check_clearance`` geometry-read failure (geometry-readouts cycle).
 
@@ -302,11 +530,57 @@ class PromoteCandidateOwnerMismatchError(ToolError):
     error_family = "promote_candidate_owner_mismatch"
 
 
+class PromoteVerdictUnboundError(ToolError):
+    """``promote_best`` REFUSED: **we could not ask** the criteria contract.
+
+    Parity class for the ``promote_verdict_unbound`` family (the WIRE contract is
+    the ``error_family`` string the handler constructs in its
+    ``{ok:false}`` envelope, never an ``isinstance`` check; this class is never
+    raised). Its members are every gate-emitted refusal: an unreadable contract, a
+    challenger with no bound scorecard or one that would not bind, a champion that
+    could not be read or digested, a champion no validated record binds, two
+    validated records naming different cards, the gate's own never-raise net (which
+    also catches a referee token outside the frozen vocabulary), and a set of bytes
+    whose proven design identity is not the caller's ``design_name``.
+
+    **Every member is UNKNOWN, so every member fails CLOSED.** DISJOINT from
+    ``promote_referee_refused`` — that family had an ANSWER and the answer was no.
+    DISJOINT from ``promote_candidate_owner_mismatch``, which asks *which artifact*;
+    this family's name clause asks *which design*, a third question, which is why
+    it is folded into neither.
+
+    NOT overridable by ``force``: the contract guard is absolute (a deliberate decision,
+    and ``force`` is not in scope where the question is asked). The in-band remedies
+    are to produce a bound scorecard for these bytes (``save_candidate`` under the
+    design's own name) or to unset ``OPTIVIBE_CRITERIA_ROOT``.
+    """
+
+    error_family = "promote_verdict_unbound"
+
+
+class PromoteRefereeRefusedError(ToolError):
+    """``promote_best`` REFUSED: **we asked, and the criteria referee said no.**
+
+    Parity class for the ``promote_referee_refused`` family (the WIRE contract is
+    the ``error_family`` string, never ``isinstance``; never
+    raised). It carries the referee's own token — a gating regression, a protected
+    margin traded away, an ineligible NOT-MEASURED ``required`` row, a tie, or one
+    of the ``incomparable_*`` tokens — plus the full ``referee`` disclosure block.
+
+    DISJOINT from ``promote_verdict_unbound`` (which could not ask at all), and
+    DISJOINT from ``promote_clearance_violation`` / ``promote_clearance_indeterminate``,
+    which are verdicts about the GEOMETRY; this is a verdict about whether the
+    criteria contract permits the move. NOT overridable by ``force``.
+    """
+
+    error_family = "promote_referee_refused"
+
+
 class AnalysisResultError(ToolError):
     """A results-extraction failure carrying a structured ``family``.
 
     The analysis tier distinguishes operationally distinct failure outcomes the
-    agent must branch on (§1): ``analysis_empty`` (the analysis ran but
+    agent must branch on (locked): ``analysis_empty`` (the analysis ran but
     produced nothing — a design/config signal), ``analysis_malformed`` (the
     analysis returned a structurally-wrong result — a misaligned X/Y length or an
     arity-drifted ray tuple — that must never green as ok:true), ``batch_unavailable``
@@ -365,7 +639,7 @@ class OptimizeError(ToolError):
     """An optimize-tier failure carrying a structured ``family``.
 
     The optimization tier distinguishes operationally distinct failure
-    outcomes the agent must branch on: ``optimize_no_variables``
+    outcomes the agent must branch on (locked Decision 1): ``optimize_no_variables``
     (the preflight found no variable cell to drive), ``optimize_no_merit`` (no
     merit operands / a 0.0 placeholder / a non-finite merit), ``optimize_unavailable``
     (``OpenLocalOptimization`` returned ``None`` — the single-instance optimizer is

@@ -547,7 +547,13 @@ def set_asphere_variable(session, params):
     """
     params = _require_dict(params)
     try:
-        return _set_asphere_variable_impl(session, params)
+        # The prior-solve DISCLOSE stamp, at the PUBLIC entry, so no
+        # success return inside the impl can be added later and quietly miss it.
+        # Function-local import, the house style already used in this module for
+        # ``_optimize_common`` (it imports these tool modules back).
+        from . import _optimize_common as _oc_stamp
+        return _oc_stamp._stamp_prior_solve_unchecked(
+            _set_asphere_variable_impl(session, params), "asphere coefficient (Par)")
     except ToolParamError as exc:
         return error_envelope("set_asphere_variable", _ASPHERE_PARAM, str(exc))
     except SurfaceWriteError as exc:

@@ -2160,6 +2160,48 @@ def _hammer_session(system, *, run_time_m=None, cores=None):
             pass
 
 
+# --------------------------------------------------------------------------- #
+# The prior-solve DISCLOSE stamp for the four Par/MCE variable tools.
+# --------------------------------------------------------------------------- #
+#: The four tools that author a variable on a cell OUTSIDE the five geometry cells
+#: (asphere / CB / GRIN Par cells, and per-config MCE cells). They DISCLOSE that the
+#: incumbent solve went unchecked; they do NOT check it, and their envelopes must not
+#: claim they did.
+#:
+#: WHY THEY ARE NOT GUARDED, executed rather than asserted: ``refuse_if_driven`` takes a
+#: token from the five-cell vocabulary. Handed anything else it returns UNKNOWN without
+#: touching a row — so wiring it here is either 100% denial of service (UNKNOWN fails
+#: closed) or a guard that can never fire. And for the Par-writing tools it would inspect
+#: an LDE geometry cell while the tool writes a PAR cell: the wrong cell, under the
+#: guard's name. The real guard needs the Par-cell solve substrate, and is deferred.
+_PRIOR_SOLVE_TICKET = ""
+
+
+def _stamp_prior_solve_unchecked(result, cell_family):
+    """Add the additive prior-solve disclosure to a SUCCESSFUL variable-authoring envelope.
+
+    ONE locus for all four tools: four copies of a disclosure sentence is four
+    chances for one of them to quietly stop saying it.
+
+    STAMPED ON SUCCESS ONLY. A refusal envelope never got as far as a solve it might have
+    overwritten, so disclosing "the prior solve was not checked" there would be noise
+    attached to an operation that changed nothing.
+
+    NEVER RAISES and never fabricates a shape: a non-dict or non-``ok`` result is returned
+    untouched, because a disclosure helper must not be able to convert a tool's answer
+    into something else.
+    """
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return result
+    result["prior_solve_not_checked"] = True
+    result["prior_solve_reason"] = (
+        "the %s cell's incumbent solve was NOT inspected before this variable was "
+        "authored — set_variable/set_surface guard the five geometry cells only; a "
+        "driving solve on this cell would have been replaced silently%s"
+        % (cell_family, _PRIOR_SOLVE_TICKET))
+    return result
+
+
 __all__ = [
     "error_envelope",
     "classify_verdict",
@@ -2194,6 +2236,7 @@ __all__ = [
     "_cycles_member_name",
     "_resolve_cycles_member",
     "_solve_type_variable_enum",
+    "_stamp_prior_solve_unchecked",
     "_VERDICT_REL_TOL",
     "_VERDICT_ABS_TOL",
 ]

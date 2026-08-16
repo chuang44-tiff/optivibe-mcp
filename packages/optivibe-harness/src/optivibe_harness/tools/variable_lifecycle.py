@@ -189,6 +189,16 @@ def vary(session, params):
             f"cells must be a non-empty array of {'|'.join(_VARY_CELLS)}",
         )
 
+    # ``replace_solve`` is validated UP FRONT, in phase 1, with the
+    # SAME predicate ``set_variable`` uses (a second copy is how a bulk call and a
+    # single call come to disagree about what "true" means). A malformed override is a
+    # malformed CALL: refuse the whole thing, mutate nothing, rather than discover it
+    # pair-by-pair after some pairs have already been written.
+    try:
+        _var._require_replace_solve(params)
+    except ToolParamError as exc:
+        return error_envelope("vary", _FAMILY, str(exc))
+
     try:
         # Dedupe (preserve order) so a repeated surface/cell is one attempt.
         surfaces_deduped = list(dict.fromkeys(surfaces))
@@ -200,6 +210,7 @@ def vary(session, params):
         applied = []
         skipped = []
         refused = []
+        replaced_solves = []
         for s in surfaces_deduped:
             # Interior optical surfaces only — OBJECT (0) and IMAGE (N-1) are skipped
             # (an out-of-range surface is NOT a malformed call; it skips ONE pair, DIV-6).
@@ -211,14 +222,27 @@ def vary(session, params):
                 continue
             for c in cells_deduped:
                 try:
-                    _var.set_variable(session, {"surface": s, "cell": c})
+                    one = _var.set_variable(
+                        session,
+                        {"surface": s, "cell": c,
+                         "replace_solve": params.get("replace_solve", False)})
                     applied.append(
                         {"surface": s, "cell": c, "solve_type": "Variable"}
                     )
-                except SurfaceWriteError as exc:  # silent MakeSolveVariable no-op
+                    # Per-pair disclosure of every relationship replaced. A probe
+                    # measured the silent version of exactly this call reporting
+                    # ok:true / n_refused:0 while deleting two pickups.
+                    replaced_solves.extend(one.get("replaced_solves") or [])
+                except SurfaceWriteError as exc:  # silent no-op OR a driven cell
+                    # The family is read OFF THE EXCEPTION, not hardcoded.
+                    # ``SolveDrivenError`` is a ``SurfaceWriteError`` subclass, so it
+                    # routes into ``refused`` for free — but a hardcoded
+                    # ``"surface_write"`` would have relabelled every driven-cell refusal
+                    # as a write failure and the agent could not tell the two apart (one
+                    # is retryable with replace_solve, the other is not).
                     refused.append(
                         {"surface": s, "cell": c, "reason": str(exc),
-                         "family": "surface_write"}
+                         "family": getattr(exc, "error_family", "surface_write")}
                     )
                 except ToolParamError as exc:  # a bad surface/cell reached set_variable
                     refused.append(
@@ -261,6 +285,10 @@ def vary(session, params):
             "refused": refused,
             "n_variables_now": n_variables_now,
             "inventory_matches_optimizer": inventory_matches_optimizer,
+            # ADDITIVE, and ALWAYS PRESENT on a successful bulk call. Present-and-empty
+            # is the honest shape: an absent key would make "nothing was replaced"
+            # indistinguishable from "this build does not report replacements".
+            "replaced_solves": replaced_solves,
         }
     except Exception as exc:  # noqa: BLE001 — never raise past the boundary (L26)
         return error_envelope(
@@ -301,14 +329,19 @@ VARY_SPEC = ToolSpec(
     name="vary",
     handler=vary,
     required_params=("surfaces", "cells"),
-    param_types={"surfaces": "array", "cells": "array"},
+    param_types={"surfaces": "array", "cells": "array",
+                 "replace_solve": "boolean"},
     description=(
         "Bulk-make many surfaces' cells optimizer variables in ONE call, each "
         "read-back-proven. Params: surfaces (array of int), cells (array of "
         "radius|thickness|conic). Returns applied/skipped/refused buckets + the "
         "variable-inventory cross-check. Gotcha: asphere/MCE coefficients are out of "
         "scope (use set_asphere_variable / set_config_variable); an out-of-range "
-        "surface is skipped, a bad cell token refuses the whole call."
+        "surface is skipped, a bad cell token refuses the whole call. A pair whose "
+        "cell is already driven by a solve is REFUSED with family solve_driven "
+        "(varying it would DELETE that relationship) while the other pairs still "
+        "apply; pass replace_solve=true to replace them deliberately — each is then "
+        "listed in replaced_solves with its prior solve type."
     ),
 )
 
