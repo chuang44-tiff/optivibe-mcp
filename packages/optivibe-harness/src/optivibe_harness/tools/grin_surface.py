@@ -659,7 +659,13 @@ def set_grin_variable(session, params):
     # MakeSolveVariable; a failure at-or-after MakeSolveVariable stamps ``partial_state``.
     state = {"mutated": False}
     try:
-        return _set_grin_variable_impl(session, params, state)
+        # The prior-solve DISCLOSE stamp, at the PUBLIC entry, so no
+        # success return inside the impl can be added later and quietly miss it.
+        # Function-local import, the house style already used in this module for
+        # ``_optimize_common`` (it imports these tool modules back).
+        from . import _optimize_common as _oc_stamp
+        return _oc_stamp._stamp_prior_solve_unchecked(
+            _set_grin_variable_impl(session, params, state), "GRIN coefficient (Par)")
     except ToolParamError as exc:
         # Backstop: honor ``state["mutated"]`` (a post-MakeSolveVariable ToolParamError
         # must never read as a clean, non-partial refusal). All param validation here is

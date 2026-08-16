@@ -25,7 +25,8 @@ from dataclasses import dataclass, field, fields as dc_fields
 from typing import Optional, Tuple
 
 from .._io import safe_float
-from ..errors import CatalogLoadError, SurfaceWriteError, ToolParamError
+from ..errors import (CatalogLoadError, SolveDrivenError, SurfaceWriteError,
+                      ToolParamError)
 from ..server import ToolSpec
 from . import _asphere_cells as _asph
 from . import _lens_common as _c
@@ -639,7 +640,8 @@ class LensSpec:
                 # surfaced via the additive ``warnings`` envelope (scanned read-only in
                 # the success envelope below) — never a rollback.
                 if "thickness" in fields:
-                    cls._apply_object_fields(lde, {"thickness": fields["thickness"]})
+                    cls._apply_object_fields(
+                        system, lde, {"thickness": fields["thickness"]})
             else:
                 lens_surface.set_surface(sess, {"surface": i, **fields})
 
@@ -785,7 +787,7 @@ class LensSpec:
         }
 
     @staticmethod
-    def _apply_object_fields(lde, fields):
+    def _apply_object_fields(system, lde, fields):
         """Write the declared OBJECT (index 0) fields with read-back proof.
 
         ``set_surface`` refuses index-0 geometry (OBJECT is not a lens surface you
@@ -794,7 +796,32 @@ class LensSpec:
         read-back-as-proof gate every mutator uses (a dropped OBJECT write
         must raise, never silently succeed). Geometry/semi-diameter are floats;
         ``comment`` is a string.
+
+        REFUSAL SITE 2, IN THE FUNCTION BODY. The guard lives HERE
+        and not at either call site, and the difference is a shipped-once HIGH: this
+        function has TWO callers — apply's OBJECT branch, and ``set_surface(surface=0)``
+        by way of ``lens_surface._set_object_surface`` — so guarding a call site leaves
+        the other door open. The body is the only place both pass through.
+
+        ``system`` is a REQUIRED parameter with NO default. A defaulted one would make an
+        un-updated caller silently skip the probe, which is the same bypass one level
+        down; both shipped call sites and the probe script were updated in the same
+        commit, and an AST census pins their arity.
+
+        EVERY DECLARED FIELD IS PROBED BEFORE THE FIRST SETATTR — a multi-field OBJECT
+        write carrying one driven cell mutates nothing.
         """
+        from . import _solve_cells as _sc
+        for fname in fields:
+            token = fname if fname in _sc.CELL_TOKENS else None
+            if token is None:
+                continue
+            probe = _sc.refuse_if_driven(system, lde, 0, token)
+            if probe.get("driven") is not False:
+                raise SolveDrivenError.from_probe(
+                    probe, cell_token=token, surface=0,
+                    tool="apply_lens_spec/set_surface(surface=0)",
+                    intended=fields.get(fname))
         for fname, intended in fields.items():
             if fname in _OBJECT_GEOMETRY_TO_PROP:
                 prop = _OBJECT_GEOMETRY_TO_PROP[fname]
@@ -903,6 +930,153 @@ def _object_skipped_field_warnings(object_surf):
 # locus consumed by BOTH ``apply_lens_spec`` and ``substitute_glass``'s air arm). It
 # is re-exported into this module via the top-level import so the call site above and
 # any ``lens_spec._clear_material_to_air`` reference stay valid (back-compat).
+
+
+#: The pre-scan's entry cap. A design with hundreds of driven cells produces a list no
+#: agent reads; the count is what matters past that point, and the truncation is DECLARED
+#: (``driven_cells_truncated``) rather than silent.
+_DRIVEN_CELLS_CAP = 40
+
+#: Which cells ``_reset_surfaces_to_spec`` can set Fixed before the writes: the three
+#: GEOMETRY cells, and NOT ``semi_diameter`` / ``material``.
+_RESET_BY_APPLY = ("radius", "thickness", "conic")
+
+#: ...AND ONLY WHEN THE SOLVE IS ``Variable``. MEASURED against the function's own body,
+#: which is the correction: its (B) arm tests ``_cell_is_variable`` and clears THAT — so a
+#: ``SurfacePickup`` on a re-declared radius SURVIVES the reset and is then refused by the
+#: write-time guard, which routes to the atomic rollback.
+#:
+#: THE WRITTEN RULE IS NARROWER IN FACT THAN IT READS. It says the reset "sets
+#: every non-re-declared radius/thickness/conic SOLVE to Fixed"; the code sets every
+#: non-re-declared VARIABLE one. Stamping ``will_be_reset_by_apply`` from that wording
+#: would have shipped a FALSE promise inside a disclosure — the annotation would
+#: have told the agent the solve is about to be cleared while the apply was in fact about
+#: to roll back on it. Annotated here, beside the code, rather than upstream.
+#:
+#: (This makes the DISCLOSURE-not-refusal decision for the pre-scan STRONGER, not weaker:
+#: refusing here would refuse designs whose Variable solves apply really does clear.)
+_RESET_CLEARS_SOLVE_TYPES = ("Variable",)
+
+#: THE RESET'S ARM (A), MEASURED, AFTER A REVIEW SAID THE ANNOTATION ABOVE
+#: WAS STILL INCOMPLETE. THE FINDING IS **FALSIFIED**; THE ANNOTATION ABOVE IS COMPLETE.
+#:
+#: The claim: ``_reset_surfaces_to_spec`` has a SECOND arm — (A) reverts an omitted-asphere
+#: surface to ``Standard`` — and since a probe recorded that "a ``SurfacePickup`` does
+#: not survive a retype", that ``ChangeType`` must clear the solve too. On that reading the
+#: entry below is inverted: it would promise a rollback while the apply silently deleted a
+#: relationship and ran to completion. That is a serious enough shape that the fix was
+#: built before measuring, and the LIVE GATE then refused it.
+#:
+#: MEASURED DIRECTLY by a live probe, driving the reset's OWN
+#: ``_revert_to_standard_proven`` call and reading the solve back::
+#:
+#:     radius     EvenAspheric+SurfacePickup --revert--> Standard+SurfacePickup  SURVIVED
+#:     thickness  EvenAspheric+SurfacePickup --revert--> Standard+SurfacePickup  SURVIVED
+#:     conic      EvenAspheric+SurfacePickup --revert--> Standard+SurfacePickup  SURVIVED
+#:
+#: An asphere->Standard revert PRESERVES a driving geometry solve on all three cells. So
+#: arm (A) clears NOTHING here, the entry below is CORRECT as written, and the end-to-end
+#: apply behaves exactly as its note says: the write door refuses and the whole apply rolls
+#: back (the LIVE GATE observes that too, `applied:false, rolled_back:true`).
+#:
+#: WHY THE QUOTED PROBE RESULT DOES NOT GENERALISE, and this is the transferable part.
+#: It was measured while building the non-Standard fixture, on the OTHER direction —
+#: Standard -> CB/asphere, where ``add_coordinate_break`` retypes in place. Arm (A) only
+#: ever performs asphere-family -> Standard. A retype is not one behaviour; "solves do not
+#: survive a retype" was true of the transition that was measured and was applied to a
+#: transition that was not.
+#:
+#: CONSEQUENCE FOR THE REMEDY, and it makes the served text SIMPLER rather than more
+#: qualified: since arm (B) clears only ``Variable`` and ``Variable`` is in
+#: ``NON_DRIVING``, and arm (A) now measurably clears nothing, **apply's reset can never
+#: clear a solve that caused a refusal.** There is no exception to name.
+_RESET_ARM_B_NOTE = (
+    "apply's reset clears only Variable solves, so this one SURVIVES "
+    "it and the write door then refuses — the whole apply rolls back")
+
+
+def _driven_cells_prescan(system, spec):
+    """``(entries, scan_failed)`` — which declared cells carry a driving solve.
+
+    DISCLOSURE ONLY. It changes no decision; it tells the agent WHY a write may behave
+    unexpectedly, on the SUCCESS path and — more importantly — on the failing one.
+
+    Consumes ``_declared_writes`` (the SAME generator apply writes from and the
+    verifier compares against, so the scan can never drift on which fields exist), and
+    probes ALL FIVE ``CELL_TOKENS``. Disclosure is safe for ``material``; its
+    divergence hazard is a REFUSAL-semantics hazard only.
+
+    THE FAULT CHANNEL IS THE POINT. A scan-level failure returns ``(None, True)`` so the
+    envelope can carry ``driven_cells: null`` + ``driven_scan_failed: true`` — NEVER a
+    silently SHORT list, which would read exactly like a clean design. That is the
+    variable-lifecycle discipline: a swallowed discovery fault that ships
+    as an empty finding is a false clean.
+    """
+    from . import _solve_cells as _sc
+    try:
+        lde = system.LDE
+        n = int(lde.NumberOfSurfaces)
+        entries, seen = [], set()
+        for i, fname, _value in _declared_writes(spec):
+            if fname not in _sc.CELL_TOKENS or (i, fname) in seen:
+                continue
+            # A growing spec's rows are UNKNOWABLE, not UNKNOWN-refusable — skip an index
+            # the live system does not have rather than reporting a probe fault for it.
+            if not (0 <= i < n):
+                continue
+            # Mirror apply's OBJECT branch: surface 0 takes ``_apply_object_fields``,
+            # which writes THICKNESS only, so probing its other cells would disclose a
+            # constraint on a write that never happens.
+            if i == 0 and fname != "thickness":
+                continue
+            seen.add((i, fname))
+            probe = _sc.refuse_if_driven(system, lde, i, fname)
+            driven = probe.get("driven")
+            if driven is False:
+                continue
+            entry = {"surface": i, "cell": fname, "driven": driven,
+                     "solve_type": probe.get("solve_type"),
+                     "reason": probe.get("reason")}
+            if fname in _RESET_BY_APPLY:
+                # Keyed on the solve TYPE, not merely the cell — see
+                # ``_RESET_CLEARS_SOLVE_TYPES``, and the arm-(A) measurement beside it
+                # (a retype PRESERVES a driving geometry solve, so the surface's live
+                # type does not enter this prediction). A driving solve apply will NOT
+                # clear is told the truth: the write door refuses and the apply rolls back.
+                will_reset = probe.get("solve_type") in _RESET_CLEARS_SOLVE_TYPES
+                entry["will_be_reset_by_apply"] = will_reset
+                if not will_reset:
+                    entry["note"] = _RESET_ARM_B_NOTE
+            elif fname == "semi_diameter":
+                entry["note"] = ("apply's reset does NOT cover semi_diameter; the write "
+                                 "door may still refuse and roll the whole apply back")
+            elif fname == "material":
+                entry["no_guarded_write_door"] = True
+                entry["note"] = ("material flows through substitute_glass, which has no "
+                                 "driven-cell guard")
+            entries.append(entry)
+            if len(entries) >= _DRIVEN_CELLS_CAP:
+                break
+        return entries, False
+    except Exception:  # noqa: BLE001 — a scan fault DISCLOSES; it never fails the apply
+        return None, True
+
+
+def _driven_cells_keys(driven_cells, driven_scan_failed):
+    """The additive envelope keys, built ONCE and merged into every apply return.
+
+    Wrapped: a malformed probe dict must not convert a clean disclosure into an opaque
+    ``internal``, and this helper runs on the SUCCESS path too.
+    """
+    try:
+        if driven_scan_failed:
+            return {"driven_cells": None, "driven_scan_failed": True}
+        out = {"driven_cells": list(driven_cells or [])}
+        if len(out["driven_cells"]) >= _DRIVEN_CELLS_CAP:
+            out["driven_cells_truncated"] = True
+        return out
+    except Exception:  # noqa: BLE001 — a disclosure must never break the envelope
+        return {"driven_cells": None, "driven_scan_failed": True}
 
 
 def _declared_writes(spec):
@@ -1808,6 +1982,21 @@ def apply_lens_spec(session, params):
         return prescan["envelope"]
     auto_loaded = prescan["auto_loaded"]
 
+    # ---- THE DRIVEN-CELL PRE-SCAN. DISCLOSURE, NOT REFUSAL. ----
+    # Positioned with the glass pre-scan, BEFORE ``SaveAs(checkpoint_path)``.
+    #
+    # IT DOES NOT REFUSE, AND THE REASON IS DECISIVE ENOUGH TO STATE ONCE SO NO LATER
+    # ROUND RE-LITIGATES IT. ``_reset_surfaces_to_spec`` — called INSIDE the checkpoint —
+    # sets every non-re-declared radius/thickness/conic SOLVE to Fixed BEFORE the writes.
+    # So a refusing pre-scan would (i) FALSE-REFUSE the ordinary read -> modify -> apply
+    # round-trip on any design carrying a geometry solve, and (ii) be CIRCULAR: apply was
+    # the only shipped door that cleared a non-Variable solve before ``clear_solve``
+    # existed, so its refusal would name itself as the remedy.
+    #
+    # TWO MECHANISMS, STATED AS TWO. This is the DISCLOSURE. Write-time ENFORCEMENT is
+    # the guard raising into the ":1902 ANY throw routes to rollback" broad-except.
+    driven_cells, driven_scan_failed = _driven_cells_prescan(system, spec)
+
     # ---- Atomic checkpoint (fail-closed): SaveAs(tmp.zmx) BEFORE mutating. ----
     checkpoint_path = None
     try:
@@ -1830,6 +2019,7 @@ def apply_lens_spec(session, params):
             partial_state=False,
             mismatches=[],
             auto_loaded_catalogs=auto_loaded,
+            driven_cells=driven_cells, driven_scan_failed=driven_scan_failed,
         )
 
     # The success env is BUILT inside the atomic try but RETURNED in the
@@ -1864,6 +2054,11 @@ def apply_lens_spec(session, params):
                 "applied": True, "lens_spec": read_back.to_dict(),
                 "auto_loaded_catalogs": auto_loaded,
             }
+            # Threaded into SUCCESS, FAILURE and ROLLBACK alike (the
+            # ``auto_loaded`` precedent). The agent needs to learn WHY on the failing
+            # path most of all, so a success-only stamp would disclose it exactly where
+            # it is least useful.
+            env.update(_driven_cells_keys(driven_cells, driven_scan_failed))
             # GAP-2: an additive, read-only WARN scan of over-long comments — the
             # engine truncated them to the 32-char clean prefix. NEVER affects the
             # apply/rollback decision (cannot introduce a rollback regression).
@@ -1908,6 +2103,7 @@ def apply_lens_spec(session, params):
             return _rollback_lens_apply(
                 system, checkpoint_path, pre_snapshot, reason=repr(exc),
                 mismatches=mismatches, auto_loaded_catalogs=auto_loaded,
+                driven_cells=driven_cells, driven_scan_failed=driven_scan_failed,
             )
     finally:
         # D2 step 7: reaped on EVERY path. The LIVE engine writes its native ``.ZDA``
@@ -2003,7 +2199,8 @@ def _mismatches_from_exc(exc):
 
 
 def _rollback_lens_apply(system, checkpoint_path, pre_snapshot, *, reason, mismatches,
-                         auto_loaded_catalogs=None):
+                         auto_loaded_catalogs=None, driven_cells=(),
+                         driven_scan_failed=None):
     """Restore from the checkpoint + POST-RESTORE verify (D2 steps 4-6 / D3 envelope).
 
     - ``LoadFile(ckpt, False)`` restores the pre-apply ``.zmx``.
@@ -2027,6 +2224,7 @@ def _rollback_lens_apply(system, checkpoint_path, pre_snapshot, *, reason, misma
             partial_state=True,
             mismatches=mismatches,
             auto_loaded_catalogs=auto_loaded_catalogs,
+            driven_cells=driven_cells, driven_scan_failed=driven_scan_failed,
         )
 
     # POST-RESTORE verify: did the LoadFile actually bring the system back?
@@ -2042,6 +2240,7 @@ def _rollback_lens_apply(system, checkpoint_path, pre_snapshot, *, reason, misma
             partial_state=True,
             mismatches=mismatches,
             auto_loaded_catalogs=auto_loaded_catalogs,
+            driven_cells=driven_cells, driven_scan_failed=driven_scan_failed,
         )
 
     return _lens_apply_failure(
@@ -2053,6 +2252,7 @@ def _rollback_lens_apply(system, checkpoint_path, pre_snapshot, *, reason, misma
         partial_state=False,
         mismatches=mismatches,
         auto_loaded_catalogs=auto_loaded_catalogs,
+        driven_cells=driven_cells, driven_scan_failed=driven_scan_failed,
     )
 
 
@@ -2111,7 +2311,7 @@ def _auto_loaded_note(auto_loaded):
 
 
 def _lens_apply_failure(message, *, checkpoint, rolled_back, partial_state, mismatches,
-                        auto_loaded_catalogs=None):
+                        auto_loaded_catalogs=None, driven_cells=(), driven_scan_failed=None):
     """Build the structured ``lens_apply`` failure envelope (D3 — never raises).
 
     ``auto_loaded_catalogs`` (default ``[]``) discloses any catalog the pre-scan
@@ -2130,6 +2330,11 @@ def _lens_apply_failure(message, *, checkpoint, rolled_back, partial_state, mism
         "partial_state": partial_state,
         "mismatches": mismatches,
         "auto_loaded_catalogs": list(auto_loaded_catalogs or []),
+        # The driven-cell disclosure on the FAILING path. Defaults
+        # make every PRE-pre-scan caller (a malformed spec, a refused material) emit an
+        # empty list rather than a misleading null: nothing was scanned because nothing
+        # could be, and ``driven_scan_failed`` is reserved for a scan that RAN and broke.
+        **_driven_cells_keys(driven_cells, driven_scan_failed),
     }
 
 

@@ -18,10 +18,11 @@ geometry firewall every mutator funnels through. The surface index is bounds-che
 Live ZOS-API integration: exercised by the live closed-loop test; unit-tested
 against the fixture-seeded fake LDE/cell.
 """
-from ..errors import SurfaceWriteError, ToolParamError
+from ..errors import SolveDrivenError, SurfaceWriteError, ToolParamError
 from ..server import ToolSpec
 from . import _lens_common as _lc
 from . import _optimize_common as _oc
+from . import _solve_cells as _sc
 
 # The cell tokens a caller may target and the ILDERow property each maps to.
 _CELL_TO_PROP = {
@@ -46,6 +47,31 @@ def _solve_type_name(cell):
     return str(cell.GetSolveData().Type)
 
 
+def _require_replace_solve(params):
+    """Pull + validate ``replace_solve``. STRICT ``is True``; a non-bool is a param error.
+
+    The ``promote_best`` ``force`` precedent. ``1``, ``"true"``, ``"yes"`` and ``[]`` must
+    NOT force — a destructive override reached by truthiness is an override nobody chose.
+    But a non-bool is not silently read as "no" either: that would let a caller who meant
+    to override believe they had, and then destroy the solve on a later retry with a
+    different spelling. It is refused, loudly, before any engine touch.
+
+    WHICH LINE DECIDES, stated because a mutation measured it: the ``isinstance`` REFUSAL
+    is what enforces strictness — replacing the ``is True`` below with ``bool(value)`` is
+    INERT, because by then the domain is already exactly ``{True, False}``. The ``is True``
+    is a redundant backstop that becomes load-bearing only if the refusal is ever relaxed.
+    Recorded rather than claimed the other way round.
+    """
+    value = params.get("replace_solve", False)
+    if not isinstance(value, bool):
+        raise ToolParamError(
+            f"replace_solve must be a boolean (true/false), got "
+            f"{type(value).__name__} {value!r}; it is refused rather than read as "
+            "false, because a caller who meant to override must not silently not have"
+        )
+    return value is True
+
+
 def set_variable(session, params):
     """Make a surface's radius/thickness cell a Variable, with read-back proof.
 
@@ -53,6 +79,35 @@ def set_variable(session, params):
     is refused) BEFORE any typed call, calls ``cell.MakeSolveVariable()``, then
     re-reads ``cell.GetSolveData().Type`` and verifies it is ``Variable``. A read-
     back that is still ``Fixed`` (the bool lied) -> ``SurfaceWriteError``.
+
+    THE DRIVEN-CELL GUARD AND ``replace_solve``.
+
+    A cell already carrying a DRIVING solve is REFUSED by default. This is a
+    DELIBERATE BREAKING CHANGE, on the ``require_free_stop`` / grating-``reflective``
+    precedent, and a probe measured why: ``vary([1..5], ["radius"])`` over a design with
+    ``SurfacePickup`` on surfaces 2 and 4 returned
+
+        ok:true, n_applied:5, n_refused:0, n_variables_now:5,
+        inventory_matches_optimizer:true
+
+    — a textbook-clean envelope for an operation that SILENTLY DELETED TWO DESIGN
+    RELATIONSHIPS. ``list_variables`` then reported five LDE variables with nothing
+    marking two of them as former pickups. Disclose-only was rejected precisely because
+    THAT call already passed a clean envelope through a real bulk operation.
+
+    ``replace_solve=true`` proceeds anyway and REPORTS the solve it replaced, so the
+    legitimate re-vary workflow stays open. STRICT ``is True`` (the ``promote_best``
+    ``force`` precedent): ``1``, ``"true"``, ``"yes"``, ``[]`` do NOT force. Anything
+    other than a bool is a param error rather than a silent "no".
+
+    THE GUARD RUNS AFTER the tool's own ``_require_geometry_index``, so its stricter
+    domain (OBJECT refused) is preserved, and BEFORE ``MakeSolveVariable()``, so a
+    refusal writes nothing.
+
+    ROUTE NOTE, newly load-bearing: the guard reads through the COLUMN route while this
+    writer acts through the PROPERTY route (``getattr(surf, _CELL_TO_PROP[token])``).
+    The live route-agreement falsifier is what makes that sound, and it is NON-WAIVABLE — a
+    disagreement re-anchors the catalog, it does not get patched here.
     """
     system = session.system
     lde = system.LDE
@@ -60,6 +115,34 @@ def set_variable(session, params):
     surface = _lc._require_int_index(params, "surface")
     _lc._require_geometry_index(surface, n)
     cell_token = _require_cell(params)
+    replace_solve = _require_replace_solve(params)
+
+    prior_solve = None
+    probe = _sc.refuse_if_driven(system, lde, surface, cell_token)
+    if probe.get("driven") is not False:
+        # THE OVERRIDE PERMITS REPLACING A **KNOWN** DRIVING SOLVE, AND ONLY THAT.
+        # ``driven is not False`` covers True AND None, and an earlier revision let
+        # ``replace_solve`` past BOTH — so an UNKNOWN cell (the solve could not be read)
+        # was WRITTEN, and because ``solve_type`` is ``None`` there the disclosure key was
+        # suppressed and the envelope came back BYTE-IDENTICAL to a clean undriven cell's:
+        #
+        #     {'ok': True, 'surface': 1, 'cell': 'radius', 'solve_type': 'Variable'}
+        #
+        # That is the measured silent-wrong restored one branch over, and it inverted
+        # the UNKNOWN-fails-CLOSED contract exactly at the point this guard enforces it:
+        # refuse by default BECAUSE a clean envelope over a destroyed relationship is the
+        # thing being fixed. An override may permit replacing a solve we CAN SEE and
+        # report; it must not permit writing through one we cannot.
+        #
+        # It also restores the promise ``replaced_solves`` makes: past this gate
+        # ``driven is True``, so ``solve_type`` is a real string and the key is emitted on
+        # EVERY override — "present and empty" now means "nothing was replaced" as a
+        # measured fact rather than as an artifact of a fail-open path.
+        if not (replace_solve and probe.get("driven") is True):
+            raise SolveDrivenError.from_probe(
+                probe, cell_token=cell_token, surface=surface, tool="set_variable",
+                intended="Variable")
+        prior_solve = probe.get("solve_type")
 
     variable_member = _oc._solve_type_variable_enum(system)
     surf = lde.GetSurfaceAt(surface)
@@ -80,6 +163,12 @@ def set_variable(session, params):
             surface=surface,
         )
     result = {"ok": True, "surface": surface, "cell": cell_token, "solve_type": "Variable"}
+    if prior_solve is not None:
+        # DISCLOSE what was destroyed. The reading is the PRE-write probe's, taken before
+        # ``MakeSolveVariable`` overwrote it — after the write it is unrecoverable, which
+        # is exactly why the silent version of this operation was undetectable.
+        result["replaced_solves"] = [
+            {"surface": surface, "cell": cell_token, "prior_type": prior_solve}]
     if cell_token == "conic":
         warning = _oc._check_conic_coeff_degeneracy(system, surf, surface, variable_member)
         if warning is not None:
@@ -194,12 +283,17 @@ SET_VARIABLE_SPEC = ToolSpec(
     name="set_variable",
     handler=set_variable,
     required_params=("surface", "cell"),
-    param_types={"surface": "number", "cell": "string"},
+    param_types={"surface": "number", "cell": "string",
+                 "replace_solve": "boolean"},
     description=(
         "Make a surface's radius/thickness/conic cell a Variable solve (an "
         "optimizer degree of freedom) with read-back proof of the solve type. "
         "cell='conic' varies the conic constant K — warns if asphere polynomial "
-        "coefficients are also variable (K and A4 are collinear in r^4)."
+        "coefficients are also variable (K and A4 are collinear in r^4). "
+        "REFUSES a cell already driven by a solve (error_family solve_driven): "
+        "making it a variable would DELETE that relationship. Read `solves` on "
+        "read_surface first; pass replace_solve=true to replace it deliberately "
+        "(the prior solve type is reported back in replaced_solves)."
     ),
 )
 

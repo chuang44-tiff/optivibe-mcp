@@ -29,6 +29,7 @@ from typing import Callable, Dict, Tuple
 
 from . import _io
 from .errors import (
+    PARTIAL_STATE_ATTR,
     HarnessError,
     SessionChannelDeadError,
     ToolParamError,
@@ -387,6 +388,8 @@ _MULTI_SPEC_MODULES = (
     "optivibe_harness.tools.asphere_surface",
     # GRIN authoring primitives (set_grin / set_grin_variable).
     "optivibe_harness.tools.grin_surface",
+    # Surface-solve authoring door (set_solve / clear_solve).
+    "optivibe_harness.tools.surface_solve",
     # MCE multi-configuration primitive (add_configuration / set_config_operand
     # / set_config_value / set_config_variable / set_current_configuration /
     # describe_configurations).
@@ -648,9 +651,42 @@ class Dispatcher:
         ``map_dotnet_exception`` result's family; anything else (Python builtins
         such as ``AttributeError`` / ``TypeError`` — pythonnet driven wrong) ->
         ``"internal"``.
+
+        THE ATTACHED-FINDING ARM IS FOR THE ABORT PATH ONLY, and it is narrow on
+        purpose. A handler that is interrupted
+        mid-rollback must let the abort travel UNCHANGED — converting a
+        ``KeyboardInterrupt`` into a return value is forbidden — so the only channel
+        left for its machine-readable finding is what the handler attaches
+        before re-raising. Without this arm that signal died here: ``dispatch``
+        caught the abort, classified the abort alone, and served
+        ``error_family: "internal"`` — so the population the rule was written for,
+        MCP callers, could not see the partial-state signal AT ALL, while a direct
+        Python caller reading ``__context__`` could.
+
+        **THE CHANNEL IS NOW EXPLICIT, AND THE OLD ONE COULD LIE.** It once
+        read ``__context__``. Python assigns ``__context__`` IMPLICITLY to whatever
+        exception is being handled when another is raised, so an abort raised
+        anywhere inside a ``HarnessError`` handler — nothing to do with a solve,
+        nothing to do with a rollback — acquired one for free and was RENAMED with
+        that family. A review reproduced exactly that: a ``ToolParamError``
+        being handled, an independent ``KeyboardInterrupt`` raised, ``_classify``
+        answering ``"tool_param"``. The arm now reads ``PARTIAL_STATE_ATTR``, which
+        only ``surface_solve.attach_partial_state`` ever writes, so a finding cannot
+        be acquired by accident. The three narrowing conditions are unchanged and
+        each still removes a way this could lie: it fires only when the outer
+        exception is NOT an ``Exception`` (a real abort), reads exactly ONE attached
+        object (no walking a chain for something quotable), and answers only for a
+        ``HarnessError`` (an attached ``AttributeError`` still reads ``internal``).
+        It does not make the abort terminal through this door — ``dispatch``'s
+        never-raise envelope owns that, and it is unchanged. It makes the family
+        TRUE instead of opaque.
         """
         if isinstance(exc, HarnessError):
             return exc.error_family
+        if not isinstance(exc, Exception):
+            attached = getattr(exc, PARTIAL_STATE_ATTR, None)
+            if isinstance(attached, HarnessError):
+                return attached.error_family
         mapped = map_dotnet_exception(exc)
         if mapped is not None:
             return mapped.error_family

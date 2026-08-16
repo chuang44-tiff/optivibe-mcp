@@ -15,11 +15,14 @@ wavefront, axial color) WITHOUT hand-driving operand rows or a thickness solve:
   + ``RWRE`` (RMS-to-chief), per wave, at both planes. ``samp`` density guard
   (>= 1; default 6; a value < 1 -> ``measurement_param``, never clamped). PV is
   unavailable (no PVCE/PVRE operand) — reported as such, never fabricated.
-- ``analyze_axial_color`` (locked D7/C) — ``AXCL`` scalar (F-C focus shift in mm)
-  with the F/C wavelength indices RESOLVED by matching the 0.4861/0.6563 µm values
-  in ``SystemData.Wavelengths`` (NOT hard-coded — AXCL sign-flips on swap). The
+- ``analyze_axial_color`` (locked D7/C) — ``AXCL`` scalar (shorter-minus-longer focus
+  shift in mm) over a wavelength pair RESOLVED BY VALUE from the system's own table:
+  the 0.4861/0.6563 µm F/C lines when BOTH are present, otherwise the system's own
+  shortest and longest wavelengths. Never by file order (AXCL sign-flips on swap).
+  The pair actually used is named in ``wavelengths_used`` / ``wavelength_basis``. The
   121-pt ``FocalShiftDiagram`` curve returns only on ``full=True``; when present,
-  AXCL<->curve agreement is asserted (else ``axial_color_inconsistent``).
+  scalar<->curve agreement is asserted AT THE RESOLVED WAVELENGTHS (else
+  ``axial_color_inconsistent``).
 
 Every tool returns the uniform ``{ok, tool, ...}`` envelope, NEVER raises past the
 handler (locked D10): an expected failure is an ``error_envelope`` family
@@ -345,7 +348,7 @@ def _never_raise(tool_name):
 
 # Default ring/sample density (locked D5): the probe's stable wavefront density.
 _DEFAULT_SAMP = 6
-# The F and C reference wavelengths (µm) the axial-color tool resolves by VALUE
+# The F and C reference wavelengths (µm) the colour tools PREFER, resolved by VALUE
 # against SystemData.Wavelengths (locked D7 — NOT a hard-coded file index; AXCL
 # sign-flips on swap). The standard hydrogen F / C lines.
 _WAVE_F_UM = 0.486133
@@ -356,6 +359,15 @@ _WAVE_C_UM = 0.656273
 _WAVE_MATCH_TOL_UM = 1e-3
 # AXCL<->curve agreement tolerance (mm) for the full-curve consistency assert (D7).
 _AXCL_CURVE_TOL_MM = 1e-3
+# The two colour-wavelength resolution bases.
+_BASIS_FC = "fc_by_value"          # both F and C present -> today's pair, unchanged
+_BASIS_BAND = "band_extremes"      # otherwise -> the system's own shortest/longest
+# NOTE: there is deliberately NO tolerance on the curve-range test. ``shift_at``
+# CLAMPS at ``um <= pts[0][0]`` / ``um >= pts[-1][0]``, so any slack would let a
+# wavelength just outside the grid pass the guard and then be clamped — the guard would
+# accept a set the executor cannot honour. Exact bounds keep the two acceptance sets
+# identical. The cost is only that float noise can skip a check; skipping a check is
+# safe, comparing a clamped value as if it were a reading is not.
 
 
 # --------------------------------------------------------------------------- #
@@ -1064,25 +1076,50 @@ def analyze_wavefront(session, params):
 # --------------------------------------------------------------------------- #
 # (C) analyze_axial_color — AXCL scalar + (full) FocalShiftDiagram curve.
 # --------------------------------------------------------------------------- #
-def _resolve_fc_waves(system):
-    """Resolve the F and C wavelength INDICES by matching µm values (locked D7).
+def _read_wavelength_rows(system):
+    """Read the wavelength table -> ``([(index, um), ...], n_unreadable, count_ok)``.
 
-    Reads each ``SystemData.Wavelengths.GetWavelength(i).Wavelength`` (µm) and
-    matches the closest to 0.4861 (F) / 0.6563 (C) within ``_WAVE_MATCH_TOL_UM``.
-    NOT hard-coded by file order (the file order is d,C,F and AXCL sign-flips on
-    swap). Returns ``(f_index, c_index)`` or ``(None, None)`` if either is absent
-    (the caller flags it).
+    A row is READABLE iff ``GetWavelength(i).Wavelength`` coerces to a FINITE float
+    ``> 0``. Anything else (a throw, nan, inf, <= 0) increments ``n_unreadable`` and is
+    dropped — an unreadable row is UNKNOWN, never silently treated as absent.
+
+    ``count_ok`` is False when ``NumberOfWavelengths`` ITSELF could not be read. That is
+    NOT the same as a table of zero wavelengths, and must never be reported as one: zero
+    would be a count nobody measured, and it would make a disconnected engine
+    indistinguishable from a verified-empty table (ABSENT != UNREADABLE).
     """
-    nwave = _wave_count(system)
+    try:
+        nwave = int(system.SystemData.Wavelengths.NumberOfWavelengths)
+    except Exception:  # noqa: BLE001 — the COUNT is unknown; the caller refuses on it
+        return [], 0, False
     if nwave <= 0:
-        return None, None
-    f_idx = c_idx = None
-    f_best = c_best = _WAVE_MATCH_TOL_UM
+        return [], 0, True
+    rows = []
+    n_unreadable = 0
     for i in range(1, nwave + 1):
         try:
             um = float(system.SystemData.Wavelengths.GetWavelength(i).Wavelength)
-        except Exception:  # noqa: BLE001 — an unreadable wave is skipped, not fatal
+        except Exception:  # noqa: BLE001 — an unreadable row is counted, not fatal here
+            n_unreadable += 1
             continue
+        if not math.isfinite(um) or um <= 0.0:
+            n_unreadable += 1
+            continue
+        rows.append((i, um))
+    return rows, n_unreadable, True
+
+
+def _match_fc(rows):
+    """Match the F / C lines BY VALUE -> ``(f_index|None, c_index|None)``.
+
+    Byte-identical to the long-shipped algorithm: the closest ``|um - F|`` / ``|um - C|``
+    within ``_WAVE_MATCH_TOL_UM``, scanned in INDEX order with ``<=`` so an exact tie keeps
+    the LATER index. Preserved verbatim — do NOT "improve" it; the back-compat pin depends
+    on it. NOT by file order (the doublet file order is d,C,F and AXCL sign-flips on swap).
+    """
+    f_idx = c_idx = None
+    f_best = c_best = _WAVE_MATCH_TOL_UM
+    for i, um in rows:
         df = abs(um - _WAVE_F_UM)
         dc = abs(um - _WAVE_C_UM)
         if df <= f_best:
@@ -1090,6 +1127,179 @@ def _resolve_fc_waves(system):
         if dc <= c_best:
             c_best, c_idx = dc, i
     return f_idx, c_idx
+
+
+def _resolve_color_waves(system):
+    """THE colour-wavelength authority -> ``(waves|None, problem|None)`` (exactly one None).
+
+    ONE resolver, consumed by ``analyze_axial_color`` (incl. its ``full=True`` curve
+    check) and ``analyze_lateral_color`` — deliberately NOT two, and deliberately NOT the
+    engine's own ``AXCL(0,0)`` band default: the lateral leg reads ``REAY`` per field and
+    needs explicit indices anyway, so delegating the axial leg would create a SECOND
+    resolution authority that can disagree with the first.
+
+    Order is the contract:
+
+    1. Both F and C present by value -> ``basis="fc_by_value"``, that pair. Reached
+       BEFORE any readability gate, so an unrelated unreadable wavelength cannot change
+       the long-shipped answer.
+    2. Otherwise the band extremes, after four refusals (all under ``analysis_empty``):
+       ``wavelengths_unreadable`` (the band is UNKNOWN — never report extremes over a
+       partial table), ``no_wavelengths``, ``single_wavelength`` (monochromatic) and
+       ``degenerate_band``. The last two are the fabricated-zero guard: probe-measured,
+       ``AXCL(w,w)`` and ``AXCL`` over two equal-µm indices both return **0.0**, which
+       reads as perfect colour correction. The distinctness test is therefore on µm
+       VALUES — an index-based test passes the degenerate case and ships the zero.
+    3. ``short`` = the shortest µm, ``long`` = the longest (lowest index on a µm tie).
+       ``short - long`` is the exact generalisation of ``F - C``, so the sign stays
+       physical and never depends on file order.
+    """
+    rows, n_unreadable, count_ok = _read_wavelength_rows(system)
+    f_idx, c_idx = _match_fc(rows)
+    by_index = dict(rows)
+    ums = [um for _i, um in rows]
+    n_distinct = len(set(ums))
+    band = (min(ums), max(ums)) if ums else None
+    # An unreadable COUNT means neither figure was measured -> report them as UNKNOWN
+    # (None), never as a fabricated 0.
+    n_wl = len(rows) if count_ok else None
+    n_dist = n_distinct if count_ok else None
+
+    def _waves(basis, short_i, long_i):
+        return {
+            "basis": basis,
+            "short_index": short_i, "short_um": by_index[short_i],
+            "long_index": long_i, "long_um": by_index[long_i],
+            # The min/max over the READABLE rows. On the F/C path a sibling row may have
+            # been unreadable, in which case this is NOT the system band — it is the range
+            # of what could be read, and ``band_complete`` says so. NOTHING downstream may
+            # publish it as the system's band unless ``band_complete`` is True.
+            "band_min_um": band[0], "band_max_um": band[1],
+            "band_complete": bool(count_ok and n_unreadable == 0),
+            "n_wavelengths": n_wl, "n_distinct": n_dist,
+            "n_unreadable": n_unreadable,
+            "f_index": f_idx, "c_index": c_idx,
+        }, None
+
+    def _problem(reason, message):
+        return None, {
+            "reason": reason, "message": message,
+            "f_index": f_idx, "c_index": c_idx,
+            "n_wavelengths": n_wl, "n_distinct": n_dist,
+            "band_um": [band[0], band[1]] if band else None,
+        }
+
+    # (1) The long-shipped path: both reference lines present -> unchanged behaviour.
+    if f_idx is not None and c_idx is not None:
+        return _waves(_BASIS_FC, f_idx, c_idx)
+
+    # (2) The band-extremes path, and its refusals.
+    if not count_ok:
+        return _problem(
+            "wavelengths_unreadable",
+            "the wavelength COUNT itself could not be read, so the band is unknown; no "
+            "colour reading is reported (an unreadable table is UNKNOWN, not empty — "
+            "n_wavelengths is null, never a fabricated 0)")
+    if n_unreadable > 0:
+        return _problem(
+            "wavelengths_unreadable",
+            f"{n_unreadable} of {len(rows) + n_unreadable} wavelengths could not be read, "
+            "and neither the F (0.4861 µm) nor the C (0.6563 µm) reference pair is fully "
+            "present; the wavelength band cannot be established, so no colour reading is "
+            "reported (an unreadable wavelength is UNKNOWN, not absent)")
+    if not rows:
+        return _problem(
+            "no_wavelengths",
+            "SystemData reports no readable wavelengths; a colour reading needs a band")
+    if len(rows) == 1:
+        return _problem(
+            "single_wavelength",
+            f"the system is monochromatic (one wavelength, {rows[0][1]:.6f} µm); there is "
+            "no chromatic span to measure. Reporting the operand here would return a "
+            "fabricated 0.0 that reads as perfect colour correction")
+    if n_distinct < 2:
+        return _problem(
+            "degenerate_band",
+            f"all {len(rows)} wavelengths hold the same value ({rows[0][1]:.6f} µm), so the "
+            "band is degenerate; the operand would return a fabricated 0.0 that reads as "
+            "perfect colour correction")
+
+    short_i = min(rows, key=lambda r: (r[1], r[0]))[0]
+    long_i = max(rows, key=lambda r: (r[1], -r[0]))[0]
+    return _waves(_BASIS_BAND, short_i, long_i)
+
+
+def _wave_disclosure(waves):
+    """The additive envelope block naming WHICH two wavelengths produced the number."""
+    return {
+        "wavelength_basis": waves["basis"],
+        "wavelengths_used": {
+            "short": {"index": waves["short_index"],
+                      "um": safe_float(waves["short_um"])},
+            "long": {"index": waves["long_index"],
+                     "um": safe_float(waves["long_um"])},
+        },
+    }
+
+
+def _coverage_flags(waves):
+    """Band-coverage disclosure for the F/C path -> a list of flag strings (often empty).
+
+    TWO distinct disclosures, because the ABSENCE of the first must not be readable as
+    proof of anything (a flag whose absence is treated as an oracle is worse than no
+    flag):
+
+    * **wider band** — the F/C pair demonstrably does NOT cover the readable band, so the
+      reading covers less than the system does;
+    * **coverage unknown** — one or more wavelengths could not be read, so whether the
+      band extends beyond F/C was never established. Without this, "no wider-band flag"
+      on a degraded system is indistinguishable from a PROVEN F/C-bounded system. The
+      F/C scalar itself is still valid — both reference lines were positively found.
+
+    On a fully-readable system whose band is exactly F..C (the canonical visible triplet)
+    neither fires, so those envelopes are unchanged.
+    """
+    if waves["basis"] != _BASIS_FC:
+        return []
+    out = []
+    # EXACT comparison, no tolerance. With a tolerance, a band extending BELOW F (or above
+    # C) by less than the match window fired no flag, so an empty flag list could not
+    # distinguish "the pair IS the band" from "wider by under a nanometre" — the absence
+    # would have been an oracle for something it never established. Both endpoints come
+    # from actual table rows, so an exact test cannot fire on float noise: band_min is
+    # below short_um only when some OTHER row really is shorter.
+    if (waves["band_min_um"] < waves["short_um"]
+            or waves["band_max_um"] > waves["long_um"]):
+        scope = "readable" if not waves.get("band_complete", True) else "system"
+        out.append(
+            f"wavelength_basis={_BASIS_FC}: measured over F/C "
+            f"({waves['short_um']:.6g}-{waves['long_um']:.6g} um); the {scope} band is "
+            f"WIDER ({waves['band_min_um']:.6g}-{waves['band_max_um']:.6g} um) and is NOT "
+            "covered by this reading")
+    n_bad = waves.get("n_unreadable") or 0
+    if n_bad:
+        out.append(
+            f"band coverage UNKNOWN: {n_bad} wavelength(s) could not be read. The F/C "
+            "reading is valid (both reference lines were found by value), but whether the "
+            "system band extends beyond F/C was NOT established")
+    return out
+
+
+def _color_wave_refusal(tool_name, problem):
+    """The shared refusal envelope for both colour tools (family: analysis_empty).
+
+    Keeps ``f_index`` / ``c_index`` with their long-shipped names and None-on-no-match
+    semantics, and adds the machine-readable ``refusal_reason`` plus the band evidence.
+    """
+    return _ac.error_envelope(
+        tool_name, "analysis_empty", problem["message"],
+        f_index=problem["f_index"], c_index=problem["c_index"],
+        wavelength_basis=None,
+        refusal_reason=problem["reason"],
+        n_wavelengths=problem["n_wavelengths"],
+        n_distinct_wavelengths=problem["n_distinct"],
+        band_um=problem["band_um"],
+    )
 
 
 def _focal_shift_curve(system):
@@ -1165,13 +1375,24 @@ def _single_config_selector(session, params, tool_name):
 
 @_never_raise("analyze_axial_color")
 def analyze_axial_color(session, params):
-    """Axial (longitudinal) color: AXCL F-C focus shift (mm) + optional curve (D7/C).
+    """Axial (longitudinal) color: the AXCL focus shift (mm) + optional curve (D7/C).
 
-    Headline ``f_minus_c_shift_mm`` = ``AXCL(wave1=F, wave2=C)`` with F/C resolved by
-    matching 0.4861/0.6563 µm in ``SystemData.Wavelengths`` (NOT a hard-coded index;
-    AXCL sign-flips on swap). ``full=True`` returns the 121-pt FocalShiftDiagram
-    curve and asserts AXCL<->curve agreement (else ``axial_color_inconsistent``).
-    ``secondary_spectrum_mm`` is a derived field. Never raises past the handler.
+    Headline ``f_minus_c_shift_mm`` = ``AXCL(wave1=short, wave2=long)`` — the SHORTER
+    minus the LONGER wavelength, a difference of focus positions (so it does not depend
+    on the curve's zero reference). The pair is resolved BY VALUE from the system's own
+    table: the F/C lines (0.4861/0.6563 µm) when both are present, otherwise the
+    system's shortest and longest wavelengths. Never by file order (AXCL sign-flips on
+    swap). ``wavelength_basis`` + ``wavelengths_used`` name the pair actually used.
+
+    Refuses (``analysis_empty``) when no honest pair exists: ``single_wavelength``,
+    ``degenerate_band`` (both would return a fabricated 0.0 reading as perfect colour
+    correction), ``wavelengths_unreadable``, ``no_wavelengths``.
+
+    ``full=True`` returns the 121-pt FocalShiftDiagram curve and asserts scalar<->curve
+    agreement AT THE RESOLVED WAVELENGTHS (else ``axial_color_inconsistent``); the
+    curve's Y is referenced to the analysis's own zero and its domain is echoed as
+    ``curve.domain_um``. ``secondary_spectrum_mm`` is a derived max over THAT domain, not
+    over ``wavelengths_used``. Never raises past the handler.
 
     ``config`` (None|int) selects the configuration — SINGLE-config only,
     ``config="all"`` is REFUSED (axial color is a per-wave F-C shift, not an obvious
@@ -1202,14 +1423,11 @@ def _analyze_axial_color_at(session, params):
     full = _bool_param(params, "full", False)
     flags = []
 
-    f_idx, c_idx = _resolve_fc_waves(system)
-    if f_idx is None or c_idx is None:
-        return _ac.error_envelope(
-            "analyze_axial_color", "analysis_empty",
-            "could not resolve the F (0.4861 µm) and/or C (0.6563 µm) wavelengths in "
-            "SystemData.Wavelengths by value; axial color needs both",
-            f_index=f_idx, c_index=c_idx,
-        )
+    waves, problem = _resolve_color_waves(system)
+    if problem is not None:
+        return _color_wave_refusal("analyze_axial_color", problem)
+    f_idx, c_idx = waves["short_index"], waves["long_index"]
+    flags.extend(_coverage_flags(waves))
 
     raw, suspicious = _mc.read_operand_slots(
         system, "AXCL", _axcl_slots(f_idx, c_idx)
@@ -1227,6 +1445,7 @@ def _analyze_axial_color_at(session, params):
         "secondary_spectrum_mm": None,
         "curve": None,
         "flags": flags,
+        **_wave_disclosure(waves),
     }
 
     if full:
@@ -1236,12 +1455,47 @@ def _analyze_axial_color_at(session, params):
         else:
             result["curve"] = {
                 "x_units": "um", "y_units": "mm", "points": points,
+                # The curve's own wavelength domain — the provenance of
+                # secondary_spectrum_mm, which is a max over THIS domain and NOT over the
+                # `wavelengths_used` pair. On a wide system carrying F and C the two
+                # differ, so the two quantities must carry their own bases.
+                "domain_um": [min(p[0] for p in points), max(p[0] for p in points)],
             }
-            # AXCL<->curve agreement: |shift(F) - shift(C)| should match |AXCL|.
-            try:
-                curve_fc = shift_at(_WAVE_F_UM) - shift_at(_WAVE_C_UM)
-            except Exception:  # noqa: BLE001 — interp failure -> skip the assert
+            # AXCL<->curve agreement: |shift(short) - shift(long)| should match |AXCL|.
+            # The interpolation points are the RESOLVED wavelengths, NOT the F/C literals.
+            # Probe-measured: on a 0.48-0.6438 band, interpolating at 0.6563 CLAMPS
+            # to the curve's last point and at 0.4861 lands 4 points INTO the band, giving
+            # an 87x disagreement -> a spurious axial_color_inconsistent refusal on exactly
+            # the band this resolution exists to enable.
+            x_lo = min(p[0] for p in points)
+            x_hi = max(p[0] for p in points)
+            s_um, l_um = waves["short_um"], waves["long_um"]
+            # EXACT bounds — the guard's acceptance set must equal the set shift_at can
+            # honour WITHOUT clamping (see the note on _CURVE_RANGE_TOL_UM's removal).
+            in_range = all(x_lo <= um <= x_hi for um in (s_um, l_um))
+            if not in_range:
+                # A clamped interpolation is NOT a reading — never compare it as if it
+                # were. Skip the assert, keep the curve, and say so.
+                flags.append(
+                    "axial_color_curve_out_of_range: the resolved wavelengths "
+                    f"({s_um:.4f}/{l_um:.4f} um) fall outside the FocalShiftDiagram X "
+                    f"range ({x_lo:.4f}-{x_hi:.4f} um); the scalar<->curve agreement "
+                    "check was NOT run")
                 curve_fc = None
+            else:
+                try:
+                    curve_fc = shift_at(s_um) - shift_at(l_um)
+                except Exception:  # noqa: BLE001 — interp failure -> skip the assert
+                    curve_fc = None
+                # A degraded curve (a non-finite endpoint reaches here as the STRING
+                # "nan" via safe_float) must not skip the agreement check SILENTLY — a
+                # silent skip is indistinguishable from a check that passed.
+                if not _finite_num(curve_fc):
+                    curve_fc = None
+                    flags.append(
+                        "axial_color_curve_degraded: the FocalShiftDiagram values at the "
+                        "resolved wavelengths are not finite numbers; the scalar<->curve "
+                        "agreement check was NOT run (the scalar itself is unaffected)")
             if curve_fc is not None and isinstance(raw, (int, float)):
                 if not math.isclose(
                     abs(curve_fc), abs(float(raw)), rel_tol=1e-2,
@@ -1250,14 +1504,17 @@ def _analyze_axial_color_at(session, params):
                     return _ac.error_envelope(
                         "analyze_axial_color", "axial_color_inconsistent",
                         f"AXCL scalar ({safe_float(raw)} mm) disagrees with the "
-                        f"FocalShiftDiagram F-C span ({safe_float(curve_fc)} mm) "
-                        "beyond tolerance",
+                        "FocalShiftDiagram short-long span "
+                        f"({safe_float(curve_fc)} mm) at the resolved wavelengths "
+                        f"({s_um:.6g}/{l_um:.6g} um) beyond tolerance",
                         f_minus_c_shift_mm=safe_float(raw),
                         curve_f_minus_c_mm=safe_float(curve_fc),
                         wave_slots_used={"wave1_F": f_idx, "wave2_C": c_idx},
+                        **_wave_disclosure(waves),
                     )
-            # Secondary spectrum: the curve's max |shift| over the band (the residual
-            # span d sits near the crossing of) — derived, labeled.
+            # Secondary spectrum: the curve's max |shift| over the CURVE's domain
+            # (result["curve"]["domain_um"]), NOT over the wavelengths_used pair — on a
+            # wide F/C system those differ. Derived, labeled.
             try:
                 result["secondary_spectrum_mm"] = safe_float(
                     max(abs(p[1]) for p in points)
@@ -1636,27 +1893,31 @@ def analyze_relative_illumination(session, params):
 # --------------------------------------------------------------------------- #
 @_never_raise("analyze_lateral_color")
 def analyze_lateral_color(session, params):
-    """Lateral (transverse) color: real chief-ray REAY(F)-REAY(C) per field, in um.
+    """Lateral (transverse) color: real chief-ray REAY(short)-REAY(long) per field, in um.
 
-    Headline max_lateral_color_um = the MAX over the CLEAN per-field |F-C| (the worst
-    field governs a <= X um acceptance). The image surface is resolved INTERNALLY so
-    the reading never depends on a surf default. F/C are resolved by their 0.4861/0.6563
-    um values (not file order; the sign is physical). Also reports the native Zemax LACL
-    as a LABELED cross-reference (a different paraxial/whole-system convention that
-    legitimately differs ~3.5x — disclosed, NOT asserted to agree). config
-    (None|int|'all') selects the configuration. Never raises.
+    Headline max_lateral_color_um = the MAX over the CLEAN per-field |short-long| (the
+    worst field governs a <= X um acceptance). The image surface is resolved INTERNALLY so
+    the reading never depends on a surf default. The wavelength pair is resolved BY VALUE
+    from the system's own table — the F/C lines (0.4861/0.6563 um) when both are present,
+    otherwise the system's shortest and longest — never by file order, so the sign stays
+    physical. ``wavelength_basis`` + ``wavelengths_used`` name the pair actually used;
+    the same four ``analysis_empty`` refusals as analyze_axial_color apply.
+
+    Also reports the native Zemax LACL as a LABELED cross-reference. LACL differs on TWO
+    axes and both are disclosed: a different paraxial/whole-system CONVENTION (~3.5x —
+    disclosed, NOT asserted to agree) and, whenever the headline used F/C on a wider
+    system, a different WAVELENGTH SPAN (``native_lacl_basis`` /
+    ``native_lacl_wavelengths_um`` — it always reads the engine's defined min/max band).
+    config (None|int|'all') selects the configuration. Never raises.
     """
     config = params.get("config") if isinstance(params, dict) else None
 
     def _grade(sess):
         system = sess.system
-        f_idx, c_idx = _resolve_fc_waves(system)
-        if f_idx is None or c_idx is None:
-            return _ac.error_envelope(
-                "analyze_lateral_color", "analysis_empty",
-                "could not resolve F (0.4861um) and/or C (0.6563um) in SystemData "
-                "(wavelengths by value); lateral color needs both",
-                f_index=f_idx, c_index=c_idx)
+        waves, problem = _resolve_color_waves(system)
+        if problem is not None:
+            return _color_wave_refusal("analyze_lateral_color", problem)
+        f_idx, c_idx = waves["short_index"], waves["long_index"]
 
         image = _mc.image_surface_index(system)
         if image is None:
@@ -1679,7 +1940,7 @@ def analyze_lateral_color(session, params):
                 "analyze_lateral_color", "analysis_empty",
                 "SystemData reports 0 fields; no lateral color to read")
 
-        flags = []
+        flags = list(_coverage_flags(waves))
         per_field = []
         for k, (_idx, _y, hy) in enumerate(fields, start=1):
             yF, sF = _mc.read_operand_slots(system, "REAY", _reay_chief_slots(image, f_idx, hy))
@@ -1719,9 +1980,25 @@ def analyze_lateral_color(session, params):
             "per_field": per_field,              # each: value=|um|, signed_um, hy, field, units, suspicious
             "native_lacl_um": native_lacl_um,
             "native_lacl_note": _LATERAL_COLOR_LACL_NOTE,
+            # LACL is read with Minw=Maxw=0, i.e. the engine's OWN defined min/max band —
+            # a DIFFERENT wavelength span from wavelengths_used whenever the headline used
+            # the F/C pair on a wider system. Disclosed per-quantity so the envelope never
+            # implies one basis produced both numbers.
+            #
+            # The endpoints are published ONLY when every wavelength was readable. The
+            # engine computes LACL over ALL defined wavelengths, including any this reader
+            # could not read, so a range derived from the readable subset would be an
+            # INFERRED endpoint presented as a measured one. Unreadable -> null, and the
+            # coverage-unknown flag above says why. A null here means "not established",
+            # never "the whole band".
+            "native_lacl_basis": _BASIS_BAND,
+            "native_lacl_wavelengths_um": (
+                [safe_float(waves["band_min_um"]), safe_float(waves["band_max_um"])]
+                if waves.get("band_complete") else None),
             "units": "um",
             "headline": {"max_lateral_color_um": max_um},
             "flags": flags,
+            **_wave_disclosure(waves),
         }
 
     return _cfg.evaluate_over_configs(session, config, _grade)
@@ -2055,11 +2332,21 @@ ANALYZE_AXIAL_COLOR_SPEC = ToolSpec(
     # config is SINGLE-config only (None|int); 'all' is refused. Advertised "number".
     param_types={"full": "boolean", "config": "number"},
     description=(
-        "Measure axial (longitudinal) color: the F-C focus shift in mm (AXCL), "
-        "referenced to the primary (d) focus, with the F/C wavelengths resolved by "
-        "their 0.4861/0.6563 µm values (not by file order — AXCL sign-flips on swap). "
-        "full=true also returns the FocalShiftDiagram curve and the derived secondary "
-        "spectrum, and asserts the scalar agrees with the curve."
+        "Measure axial (longitudinal) color: the focus shift in mm (AXCL) between the "
+        "SHORTER and the LONGER of two wavelengths resolved BY VALUE from the system's "
+        "own table — the F/C lines (0.4861/0.6563 µm) when both are present, otherwise "
+        "the system's shortest and longest wavelength. Works on any band, not just F/C. "
+        "Never by file order (AXCL sign-flips on swap). The scalar is a DIFFERENCE of "
+        "focus positions, so it does not depend on any reference wavelength; "
+        "wavelength_basis + wavelengths_used name the pair actually used. Refuses "
+        "(analysis_empty) a monochromatic or degenerate band rather than returning the "
+        "0.0 the operand gives there. If F and C were both READ, an unrelated unreadable "
+        "wavelength does not block the reading — it is answered and a flag says band "
+        "coverage is unknown; a refusal for unreadability happens only when there is no "
+        "F/C pair to fall back on. full=true also returns the FocalShiftDiagram curve (its own Y-zero "
+        "reference; domain echoed as curve.domain_um) plus the derived secondary "
+        "spectrum — a max over THAT domain, not over wavelengths_used — and asserts the "
+        "scalar agrees with the curve at the resolved wavelengths."
     ),
 )
 
@@ -2125,14 +2412,23 @@ ANALYZE_LATERAL_COLOR_SPEC = ToolSpec(
     param_types={"config": "number"},
     description=(
         "Measure LATERAL (transverse) color: the real chief-ray image-height "
-        "difference REAY(F)-REAY(C) per field, in micrometers, with the MAX-over-"
-        "fields |F-C| as the acceptance headline (max_lateral_color_um - grade "
-        "against e.g. <= 4 um). Returns the per-field SIGNED F-C vector and the "
-        "worst-field max; F/C are resolved by their 0.4861/0.6563 um values (not "
-        "file order). The image surface is resolved internally. Also reports the "
-        "native Zemax LACL as a labeled cross-reference (a different paraxial "
-        "convention that reads ~3.5x larger - disclosed, NOT asserted to agree). "
-        "config (None|int|'all') selects the configuration. See analyze_axial_color."
+        "difference REAY(short)-REAY(long) per field, in micrometers, with the MAX-over-"
+        "fields magnitude as the acceptance headline (max_lateral_color_um - grade "
+        "against e.g. <= 4 um). Returns the per-field SIGNED vector and the "
+        "worst-field max. The wavelength pair is resolved BY VALUE from the system's own "
+        "table - the F/C lines (0.4861/0.6563 um) when both are present, otherwise the "
+        "system's shortest and longest - so it works on any band, never by file order; "
+        "wavelength_basis + wavelengths_used name the pair used. The image surface is "
+        "resolved internally. Refuses (analysis_empty) a monochromatic band, a degenerate "
+        "band (every wavelength the same value), an empty table, or an unreadable table "
+        "with no F/C pair to fall back on — rather than returning the fabricated 0.0 the "
+        "operands give there. A readable F/C pair still answers when an unrelated "
+        "wavelength is unreadable, with a flag saying band coverage is unknown. "
+        "Also reports the native Zemax LACL "
+        "as a labeled cross-reference - a different paraxial convention that reads ~3.5x "
+        "larger AND, on a wider system, a different wavelength span "
+        "(native_lacl_basis / native_lacl_wavelengths_um); disclosed, NOT asserted to "
+        "agree. config (None|int|'all') selects the configuration. See analyze_axial_color."
     ),
 )
 

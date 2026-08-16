@@ -24,6 +24,7 @@ from ..server import ToolSpec
 from . import _asphere_cells as _asph
 from . import _config_common as _cfg
 from . import _layout_geometry as _geom
+from . import _solve_cells as _sc
 
 
 def _read_early_facts(lde, i, n):
@@ -164,6 +165,27 @@ def _describe_one_surface(
             out["grin_coefficients"] = None
             out["grin_coefficients_unreadable"] = True
 
+    # INSERTION POINT B (frozen: the blank line after the GRIN
+    # ``except`` closes, BEFORE ``if include_global:``). Same five statements as point A,
+    # against ``_describe_one_surface``'s own locals — ``system`` is ALREADY this
+    # function's first parameter, so NO signature threading is needed (recorded so nobody
+    # adds a phantom param to a byte-pinned file).
+    #
+    # THE WRAPPER SITS HERE, INSIDE ``_describe_one_surface``, and that placement is the
+    # whole point: OUTSIDE it the pre-existing per-row ``except BaseException`` in
+    # ``_describe_at`` wins and a HEALTHY row degrades to ``role:"unreadable"``, DELETING
+    # its radius/thickness/material/type_name — the information-LOSS failure. Contained
+    # here, an emit fault costs the solve keys only and the row keeps every fact it read.
+    #
+    # ``Exception``, NOT ``BaseException``: a KeyboardInterrupt must travel. Here it
+    # is then absorbed by the per-row guard and the scan continues — the OPPOSITE of
+    # read_surface's behaviour, which is why the KI contract is asserted PER CONSUMER
+    # rather than as one false uniform claim.
+    try:
+        out.update(_sc.emit_solves_block(system, lde, i))
+    except Exception:  # noqa: BLE001 — an emit fault DISCLOSES; it never sinks the row
+        out.update(_sc._unreadable_block())
+
     if include_global:
         # Trusted global vertex = TheSystem.LDE.GetGlobalMatrix(i)[10:13] (§0.4).
         # GetGlobalMatrix lives on the LDE (the live-proven receiver),
@@ -280,13 +302,55 @@ def _describe_at(session, include_global):
 
             surfaces.append(row_out)
 
-        return {
+        out = {
             "ok": True,
             "count": n,
             "stop_surface": stop_surface,
             "folded": folded,
             "surfaces": surfaces,
         }
+        # THE ENVELOPE-LEVEL MCE STAMP.
+        #
+        # WHY IT EXISTS AT ALL. A DEGRADED row is ``{"surface", "role", "error"}`` and
+        # nothing else, so it carries no ``mce_overrides_not_audited``. Without a
+        # top-level stamp that row is BYTE-IDENTICAL on a single-config system and on a
+        # three-config one — the configuration scope of the table it belongs to is
+        # unrecoverable from the envelope, and a reader cannot tell "single config" from
+        # "multi-config, and this row went unread". The stamp restores the fact the row
+        # itself cannot carry.
+        #
+        # ``any()``-DERIVED, NOT A SECOND ``_mce_overridden(system)`` CALL, and the
+        # difference is load-bearing twice over. (i) BUDGET: a second call is a
+        # SEVENTH engine read per describe, outside the +6/+5/+5 per-surface ceiling
+        # a probe pins. (ii) It is a summary of THE ROWS' OWN readings rather than a fresh,
+        # separately-timed claim, so it cannot assert a configuration scope no row
+        # observed.
+        #
+        # WHAT IT DOES **NOT** GUARANTEE — AN EARLIER REVISION CLAIMED IT DID, AND THAT
+        # WAS FALSE. That revision's analysis said the stamp "cannot contradict" the
+        # rows. It can, and the counterexample is two lines: on a SINGLE-config system
+        # let only the FIRST ``MCE.NumberOfConfigurations`` read throw and return 1
+        # thereafter. ``_mce_overridden`` fails OPEN, so row 0 gets the marker, every
+        # later HEALTHY row correctly omits it, and the envelope stamps True. MEASURED:
+        # ``top=True rows=[True, None, None]`` with all three rows healthy.
+        #
+        # THE BEHAVIOUR IS KEPT AND THE CLAIM IS NARROWED, deliberately. The union is the
+        # CONSERVATIVE direction: the marker means "overrides were not audited HERE", and
+        # a row whose MCE read failed genuinely did not audit them. Suppressing the stamp
+        # until every row agrees would trade a true-but-partial disclosure for a silent
+        # one, on a fail-open arm whose whole polarity is to disclose. So the honest
+        # sentence is "the union of what the rows observed", never "uniform across
+        # non-degraded rows" — that uniformity holds for the STEADY-STATE multi-config
+        # and single-config tables it was written for, not for a transient per-row MCE
+        # fault. A test pins the measured disagreement so the false claim cannot be
+        # re-asserted; a residual reading risk remains.
+        #
+        # CONSEQUENCE, STATED: on an ALL-degraded table nothing was observed, so nothing
+        # is stamped. That is the honest answer, not a fail-open one — a stamp there
+        # would be asserting a configuration scope for a table with no readings in it.
+        if any(r.get("mce_overrides_not_audited") is True for r in surfaces):
+            out["mce_overrides_not_audited"] = True
+        return out
     except BaseException as exc:  # noqa: BLE001 — describe never raises into dispatch
         return {
             "ok": False,

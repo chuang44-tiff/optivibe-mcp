@@ -149,6 +149,42 @@ def _require_int_index(params, key):
     )
 
 
+def _require_bool_param(params, name):
+    """Pull + validate an OPTIONAL strict-boolean param. Default ``False``. NO engine read.
+
+    The ``optimize_variable._require_replace_solve`` rule (itself the ``promote_best``
+    ``force`` precedent), parameterised by NAME so a second opt-in flag does not become a
+    second copy of the rule. ``1``, ``"true"``, ``"yes"`` and ``[]`` must NOT enable an
+    opt-in behaviour — a mode reached by truthiness is a mode nobody chose (the measured
+    ``force="no"`` defect measured on the save/promote clearance gate).
+
+    A non-bool is not silently read as "no" either: that would let a caller who meant to
+    enable strict mode believe they had, and then destroy a solve relationship on the very
+    call they were guarding against.
+
+    WHICH LINE DECIDES, stated because a mutation measured it on the original: the
+    ``isinstance`` REFUSAL enforces strictness — replacing the ``is True`` below with
+    ``bool(value)`` is INERT, because by then the domain is already exactly
+    ``{True, False}``. The ``is True`` is a redundant backstop.
+
+    ZERO ENGINE READS on every path, which is why a caller may hoist it above its first
+    engine call (``remove_surface`` does exactly that).
+
+    THE ``_require_replace_solve`` RE-POINT IS DEFERRED, not forgotten: that reader's
+    message is pinned byte-for-byte by a test owned elsewhere, so re-pointing it risks a
+    reddened pin
+    for zero behaviour change. Two readers with one ticket beats that.
+    """
+    value = params.get(name, False)
+    if not isinstance(value, bool):
+        raise ToolParamError(
+            f"{name} must be a boolean (true/false), got {type(value).__name__} "
+            f"{value!r}; it is refused rather than read as false, because a caller who "
+            "meant to enable it must not silently not have"
+        )
+    return value is True
+
+
 def _is_inf(value):
     """True if ``value`` is a float infinity (either sign)."""
     return isinstance(value, float) and math.isinf(value)

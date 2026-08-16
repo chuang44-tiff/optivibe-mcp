@@ -19,10 +19,11 @@ SurfaceSpec schema cannot carry surface type / Par cells):
 - ``add_return_cb`` — author the ATOMIC INVERSE of an entry CB: a ``SurfacePickup``
   (scale -1) on each of Par1-Par5 (decenter + tilt) that TRACKS the entry live, plus
   the return Order = ``1 - entry_order`` written as a LITERAL (NOT a pickup — Order is
-  the Integer cell). Discloses ``index_shift`` + a LOUD warning that a later upstream
-  ``InsertNewSurfaceAt`` desyncs the by-number pickup. Does NOT claim on-axis
-  restoration after a propagation gap (Q4 — the clean inverse is exact only for
-  co-located CBs).
+  the Integer cell). Discloses ``index_shift`` + a LOUD warning that removing the
+  ENTRY SURFACE ITSELF destroys the by-number pickups (a later insert or remove of
+  ANOTHER surface was measured to leave the reference and the driven value on the
+  original source row). Does NOT claim on-axis restoration after a propagation gap
+  (Q4 — the clean inverse is exact only for co-located CBs).
 
 Every handler returns the uniform never-raise envelope and NEVER raises past its
 boundary (the L26 firewall): an EXPECTED failure (bad param / out-of-range / a
@@ -32,7 +33,7 @@ caught broad and resolved to the ``surface_write`` family.
 Live ZOS-API integration: exercised by the live CB test; unit-tested
 against the fixture-seeded fake LDE/cell doubles.
 """
-from ..errors import SurfaceWriteError, ToolParamError
+from ..errors import CbPartialStateError, SurfaceWriteError, ToolParamError
 from ..server import ToolSpec
 from . import _cb_cells as _cb
 from . import _lens_common as _lc
@@ -43,6 +44,25 @@ _CB_AUTHOR = "cb_author"          # ChangeType / Par-write firewall family
 _CB_PROOF = "cb_proof"            # the global-frame gate family
 _CB_PARAM = "cb_param"            # a bad param value family
 _CB_VARIABLE_INT = "cb_variable_integer_cell"  # §3 refusal family
+
+# The retype's solve-loss guard, and the shared retype ledger label.
+# Both live in ``_cb_solve_guard`` (that module's docstring carries the measurement that
+# decided the design and the reason preservation is NOT built); they are re-exported by
+# name here because both are consumed at BOTH doors and by the guard suites.
+from ._cb_solve_guard import (  # noqa: E402 — after the family constants it sits beside
+    CB_SOLVE_LOSS as _CB_SOLVE_LOSS,
+    CHANGETYPE_ATTEMPTED as _CHANGETYPE_ATTEMPTED,
+    abort_finding as _cb_abort_finding,
+    disclosure as _solve_loss_disclosure,
+    failure_disclosure as _solve_loss_on_failure,
+    precheck as _solve_loss_precheck_impl,
+)
+
+
+def _solve_loss_precheck(system, lde, surface, replace_solve, tool, audit=None):
+    """The shared guard, bound to THIS module's ledger shape. See ``_cb_solve_guard``."""
+    return _solve_loss_precheck_impl(system, lde, surface, replace_solve, tool,
+                                     _partial_state_fields, audit)
 
 # The recovery text for a PART-WAY ``add_coordinate_break``.
 #
@@ -81,7 +101,19 @@ _CB_RECOVERY_TAIL = (
     "(this fixes the coordinate break; it does NOT restore the surface's pre-call "
     "optical role), OR load_design your saved baseline, which DISCARDS every edit made "
     "since that save. If this design was never saved, neither route restores the "
-    "pre-call state — save_snapshot before authoring coordinate breaks."
+    "pre-call state — save_snapshot before authoring coordinate breaks. "
+    # The re-drive route now has a REACHABLE condition that refuses it, and the text
+    # that recommends the route has to say so or it is a dead end. MEASURED live: a
+    # re-drive on an ALREADY-CoordinateBreak row PRESERVES a thickness SurfacePickup
+    # (replaced: none, preserved: ['thickness']) — so this is a FALSE refusal, which is
+    # the accepted cost of refusing on "carries any non-default solve" rather than on a
+    # per-cell prediction over 39 solve types. Loud, zero-mutation, one flag away, and
+    # the opt-in path then reports honestly that nothing was lost.
+    "If the re-drive REFUSES with cb_solve_loss, that surface carries an authored solve "
+    "and this tool cannot restore one it discards: pass replace_solve=true to re-drive "
+    "deliberately — the call then reports which solves were lost and which survived, "
+    "measured after the retype (a re-drive on a surface that is ALREADY a coordinate "
+    "break was measured to PRESERVE them)."
 )
 _CB_RECOVERY = _CB_RECOVERY_PARTWAY + _CB_RECOVERY_TAIL
 
@@ -196,12 +228,18 @@ def add_coordinate_break(session, params):
     # HONEST disclosure of what was left behind, with the CERTAINTY split across the
     # two ledgers: ``committed`` holds only read-back-CONFIRMED sub-steps, ``attempted``
     # holds a sub-step whose outcome is unknown because the call threw during it.
-    committed, attempted = [], []
+    # ``solve_audit`` is the failure-path carrier: the impl fills it in at the moment it
+    # decides to PROCEED through a solve-bearing retype, so every failure arm below can
+    # emit the same MEASURED diff the success return does. Empty on every path that never
+    # reached the retype, which is the ordinary case and costs nothing.
+    committed, attempted, solve_audit = [], [], {}
     try:
-        return _add_coordinate_break_impl(session, params, committed, attempted)
+        return _add_coordinate_break_impl(session, params, committed, attempted,
+                                          solve_audit)
     except ToolParamError as exc:
         return error_envelope(
             "add_coordinate_break", _CB_PARAM, str(exc),
+            **_solve_loss_on_failure(session, solve_audit),
             **_partial_state_fields(
                 committed, _cb_recovery(committed, attempted), attempted),
         )
@@ -210,6 +248,7 @@ def add_coordinate_break(session, params):
             "add_coordinate_break", getattr(exc, "error_family", "surface_write"),
             str(exc), field=getattr(exc, "field", None),
             surface=getattr(exc, "surface", None),
+            **_solve_loss_on_failure(session, solve_audit),
             **_partial_state_fields(
                 committed, _cb_recovery(committed, attempted), attempted),
         )
@@ -218,12 +257,18 @@ def add_coordinate_break(session, params):
             "add_coordinate_break", "surface_write",
             f"unexpected engine fault authoring the coordinate break ({exc!r}); "
             "refusing rather than shipping an unverified surface",
+            **_solve_loss_on_failure(session, solve_audit),
             **_partial_state_fields(
                 committed, _cb_recovery(committed, attempted), attempted),
         )
+    except BaseException as exc:  # noqa: BLE001 — the ledger, then the abort, UNCHANGED
+        _emit_cb_abort_signal(session, "add_coordinate_break", exc, committed, attempted,
+                              solve_audit)
+        raise
 
 
-def _add_coordinate_break_impl(session, params, committed, attempted):
+def _add_coordinate_break_impl(session, params, committed, attempted,
+                               solve_audit):
     system = session.system
     lde = system.LDE
 
@@ -267,6 +312,20 @@ def _add_coordinate_break_impl(session, params, committed, attempted):
         "tilt_z": _finite_number(params.get("tilt_z", 0.0), "tilt_z"),
         "order": _require_order(params.get("order", 0)),
     }
+    # Validated UNCONDITIONALLY (before the risk is even read) so a
+    # caller who spelled the override wrong is told so instead of silently not having
+    # overridden — the reason ``_require_replace_solve`` refuses a non-bool rather than
+    # reading it as false. Reused, never re-implemented: ONE definition of what
+    # counts as a deliberate destructive opt-in across every door that has one.
+    from .optimize_variable import _require_replace_solve
+    # ``solve_audit`` is filled BY the guard, at the point it permits the
+    # retype to proceed — see ``_cb_solve_guard.precheck``.
+    risk = _solve_loss_precheck(system, lde, surface,
+                                _require_replace_solve(params), "add_coordinate_break",
+                                solve_audit)
+    if risk["refuse"]:
+        return risk["envelope"]
+    solves_before = risk["before"]
 
     # ChangeType -> CoordinateBreak (THROW-guarded -> surface_write) + read-back proof.
     cb_member = _cb._surface_type_coordinate_break(system)
@@ -292,9 +351,7 @@ def _add_coordinate_break_impl(session, params, committed, attempted):
     # unknown — a ChangeType that threw may or may not have mutated the row — and a bare
     # ``partial_state: False`` there would be a fresh false-clean. It is filed under
     # ``attempted``, NEVER ``committed``: nothing has read back yet.
-    attempted.append(
-        f"changetype(surface={surface}) — outcome UNKNOWN if this call threw"
-    )
+    attempted.append(_CHANGETYPE_ATTEMPTED % surface)
     try:
         row.ChangeType(settings)
     except Exception as exc:  # noqa: BLE001 — a ChangeType THROW -> surface_write
@@ -320,7 +377,14 @@ def _add_coordinate_break_impl(session, params, committed, attempted):
     # promote it to ``committed`` and CLEAR ``attempted``. Without the clear, every
     # later failure envelope (a cell write, the frame gate) would carry a permanent
     # false "outcome unknown" for a retype that provably took (T37b).
-    committed.append(f"changetype(surface={surface}) CONFIRMED")
+    #
+    # Routed through ``_promote`` rather than appending here, so ``_promote`` is
+    # the SOLE writer of ``committed`` in this module and an AST guard can say so.
+    # The two labels genuinely differ ("outcome UNKNOWN if this call threw" vs
+    # "CONFIRMED") and both are SERVED strings, so the promotion carries the committed
+    # spelling explicitly rather than the served text being bent to fit the helper.
+    _promote(attempted, committed, _CHANGETYPE_ATTEMPTED % surface,
+             f"changetype(surface={surface}) CONFIRMED")
     attempted.clear()
 
     # (a) write the six Par cells type-aware, each read-back-proven (write_cb_cell).
@@ -340,8 +404,11 @@ def _add_coordinate_break_impl(session, params, committed, attempted):
         entry = f"cell {param}={value!r}"
         attempted.append(entry)
         _cb.write_cb_cell(system, row, param, value)
-        committed.append(entry)
-        attempted.remove(entry)
+        # This was ``committed.append`` + ``attempted.remove``, which is exactly what
+        # ``_promote`` does — routed through it so the sole-writer invariant holds
+        # module-wide. Byte-identical ledger contents; the order of the two list
+        # operations is reversed and neither is observable between them.
+        _promote(attempted, committed, entry)
 
     # (b) THE DECISIVE global-frame gate (§2): the POST-CB surface's measured rotation
     # block must equal the authored tilt+order matrix PRODUCT within 1e-9 (element-wise).
@@ -357,6 +424,10 @@ def _add_coordinate_break_impl(session, params, committed, attempted):
         "written": written,
         "global_frame": global_frame,
         "proof_ok": True,
+        # Additive, and ABSENT ENTIRELY when the row carried nothing non-default —
+        # the ordinary workflow's envelope is byte-identical to the shipped one, which
+        # is what the no-false-refusal control measures.
+        **_solve_loss_disclosure(system, lde, surface, solves_before),
     }
 
 
@@ -513,25 +584,54 @@ def set_cb_variable(session, params):
     NEVER raises past the boundary.
     """
     params = _require_dict(params)
+    # THE THIRD MUTATING CALL IN THIS MODULE, and the enumeration is what found it.
+    # The CRIT was that one of two ``ChangeType`` sites had a ledger; the standing
+    # instruction was to enumerate EVERY mutating call rather than fix the instance. This
+    # one had NO ledger at all: ``cell.MakeSolveVariable()`` can land and then have its
+    # read-back or its opt-count re-read throw, and both failure envelopes said nothing
+    # about the cell possibly being Variable now. It is a LOUD failure rather than a false
+    # clean, which is why it is filed here rather than as a second CRIT — but it is the
+    # same class, and a guard claiming "every mutating call is ledgered" with this one
+    # exempted would be the proxy/target gap again.
+    committed, attempted = [], []
     try:
-        return _set_cb_variable_impl(session, params)
+        # The prior-solve DISCLOSE stamp, at the PUBLIC entry, so no
+        # success return inside the impl can be added later and quietly miss it.
+        # Function-local import, the house style already used in this module for
+        # ``_optimize_common`` (it imports these tool modules back).
+        from . import _optimize_common as _oc_stamp
+        return _oc_stamp._stamp_prior_solve_unchecked(
+            _set_cb_variable_impl(session, params, committed, attempted),
+            "coordinate-break (Par)")
     except ToolParamError as exc:
-        return error_envelope("set_cb_variable", _CB_PARAM, str(exc))
+        return error_envelope("set_cb_variable", _CB_PARAM, str(exc),
+                              **_partial_state_fields(committed, attempted=attempted))
     except SurfaceWriteError as exc:
         return error_envelope(
             "set_cb_variable", getattr(exc, "error_family", "surface_write"),
             str(exc), field=getattr(exc, "field", None),
             surface=getattr(exc, "surface", None),
+            **_partial_state_fields(committed, attempted=attempted),
         )
     except Exception as exc:  # noqa: BLE001 — a raw engine throw -> surface_write (L26)
         return error_envelope(
             "set_cb_variable", "surface_write",
             f"unexpected engine fault setting the coordinate-break variable ({exc!r}); "
             "refusing rather than shipping an unverified DOF",
+            **_partial_state_fields(committed, attempted=attempted),
         )
+    except BaseException as exc:  # noqa: BLE001 — the ledger, then the abort, UNCHANGED
+        # EXPLICIT None, not an omitted default. This door performs NO retype
+        # — it never calls ``_solve_loss_precheck``, so there is no solve-bearing window
+        # to measure and nothing to disclose. Written out so the absence is a decision on
+        # the record rather than the silent omission that produced next door; the
+        # AST guard's coverage clause re-derives this from the call graph and would
+        # redden if this door ever DID acquire a retype while still passing None.
+        _emit_cb_abort_signal(session, "set_cb_variable", exc, committed, attempted, None)
+        raise
 
 
-def _set_cb_variable_impl(session, params):
+def _set_cb_variable_impl(session, params, committed, attempted):
     system = session.system
     lde = system.LDE
 
@@ -604,6 +704,12 @@ def _set_cb_variable_impl(session, params):
     # (Q5 — opt.Variables is the authority, NOT the cell read-back; ``NumberOfVariables``
     # does NOT exist on this build).
     before = _open_count_close_variables(system)
+    # Filed as ATTEMPTED before the call that can mutate, on the SAME two-ledger
+    # discipline the retype and the cell writes use. ``MakeSolveVariable`` may land and
+    # then the read-back below (or the post opt-count read) may throw; without this the
+    # envelope reported nothing at all about a cell that is now Variable.
+    _label = f"make_variable(surface={surface}, param={param!r})"
+    attempted.append(_label)
     try:
         cell.MakeSolveVariable()
     except Exception as exc:  # noqa: BLE001 — a solve THROW -> surface_write
@@ -624,6 +730,11 @@ def _set_cb_variable_impl(session, params):
             field="cb_variable", intended="Variable", actual=solve_name,
             surface=surface,
         )
+    # The solve READ BACK as Variable, so its outcome is no longer unknown. Promoted
+    # HERE and not one line earlier: the DOF-count re-read below can still throw, and on
+    # that path the caller must be told the cell IS Variable (committed), not that it
+    # might be (attempted). This is the same boundary the retype's promotion sits on.
+    _promote(attempted, committed, _label)
     # ... AND confirm the optimizer's own DOF count incremented (the Q5 falsification:
     # a flag that only reads back Variable is NOT a real DOF). A None/ambiguous before/
     # after count degrades to a non-fatal warning (the optimizer may be unavailable);
@@ -746,7 +857,7 @@ def add_return_cb(session, params):
     a LITERAL (NOT a pickup — Order is the Integer cell, §4 nit 3). Pickup-is-live
     proof: each return cell tracks ``-entry`` (the CELL pickup value == -entry CELL
     value, §4 nit 4 — NOT the global frame). Discloses ``index_shift`` + a LOUD
-    warning that a later upstream ``InsertNewSurfaceAt`` desyncs the by-number pickup.
+    warning that removing the ENTRY SURFACE ITSELF destroys the by-number pickups.
     Does NOT claim on-axis restoration after a propagation gap (Q4). NEVER raises.
     """
     params = _require_dict(params)
@@ -757,29 +868,125 @@ def add_return_cb(session, params):
     # a low-level building block the agent re-drives, so an honest partial disclosure is
     # the proportionate fix (vs the full SaveAs/LoadFile checkpoint apply_lens_spec uses).
     committed = []
+    # THE IN-FLIGHT LEDGER (the CRIT). ``committed`` only ever grows AFTER a
+    # sub-step returns, so a mutation that LANDED and then reported a non-``Success``
+    # status — or threw inside ``SetSolveData`` — left BOTH ledgers empty and the envelope
+    # certified ``partial_state: false`` over a real, installed pickup. A mutation reported
+    # as no mutation is precisely the defect this whole cycle exists to prevent, and the
+    # subsumption manufactured it by moving the invoke behind a seam this module can no
+    # longer see. ``attempted`` is written by the seam's ``on_mutate`` callback the
+    # instant before the engine call is entered, so the window between "we are about to
+    # mutate" and "we know what happened" is never unwitnessed.
+    attempted = []
+    # The failure-path carrier — see ``add_coordinate_break``'s wrapper for the reasoning.
+    solve_audit = {}
     try:
-        return _add_return_cb_impl(session, params, committed)
+        return _add_return_cb_impl(session, params, committed, attempted, solve_audit)
     except ToolParamError as exc:
-        # A param/validation failure fires BEFORE any mutation (committed is empty), so
+        # A param/validation failure fires BEFORE any mutation (both ledgers empty), so
         # no partial-state disclosure is needed; if somehow non-empty, disclose it.
         return error_envelope(
             "add_return_cb", _CB_PARAM, str(exc),
-            **_partial_state_fields(committed),
+            **_solve_loss_on_failure(session, solve_audit),
+            **_partial_state_fields(committed, attempted=attempted),
         )
     except SurfaceWriteError as exc:
         return error_envelope(
             "add_return_cb", getattr(exc, "error_family", "surface_write"),
             str(exc), field=getattr(exc, "field", None),
             surface=getattr(exc, "surface", None),
-            **_partial_state_fields(committed),
+            **_solve_loss_on_failure(session, solve_audit),
+            **_partial_state_fields(committed, attempted=attempted),
         )
     except Exception as exc:  # noqa: BLE001 — a raw engine throw -> surface_write (L26)
         return error_envelope(
             "add_return_cb", "surface_write",
             f"unexpected engine fault authoring the return coordinate break ({exc!r}); "
             "refusing rather than shipping an unverified return CB",
-            **_partial_state_fields(committed),
+            **_solve_loss_on_failure(session, solve_audit),
+            **_partial_state_fields(committed, attempted=attempted),
         )
+    except BaseException as exc:  # noqa: BLE001 — the ledger, then the abort, UNCHANGED
+        _emit_cb_abort_signal(session, "add_return_cb", exc, committed, attempted,
+                              solve_audit)
+        raise
+
+
+def _emit_cb_abort_signal(session, tool, exc, committed, attempted, solve_audit):
+    """Carry a CB ledger past an ABORT without converting it. NEVER raises.
+
+    ``solve_audit`` is REQUIRED and has NO DEFAULT, deliberately. It is the
+    failure-path carrier, and it reached every ordinary failure arm of both retype doors
+    while missing this one — so an opted-in retype that DESTROYED a solve and then hit a
+    ``KeyboardInterrupt`` carried no measured diff, while the identical destruction
+    reported through a returned envelope carried a full one. That is the recurring
+    signature defect (a fix landing at one site and not its sibling) for the SIXTH time,
+    and the sixth instance is not fixed by threading one more argument.
+
+    A default of ``None`` would be the same defect wearing a different shape: a future
+    fourth door would acquire the omission SILENTLY, exactly as this one did. Required
+    means a new call site cannot be written without DECIDING. ``set_cb_variable`` passes
+    an explicit ``None`` because it performs no retype and therefore has nothing to
+    measure — that ``None`` is a recorded decision, not an omission, and the difference
+    is the entire point. The completeness of the threading is enforced mechanically
+    rather than by this docstring: a guard test whose two clauses are derived from THIS
+    module's AST — every wrapper that can reach
+    the retype guard must bind a carrier, and every wrapper that binds one must reference
+    it in EVERY ``except`` handler it has. A new failure exit reddens it.
+
+    Both CB wrappers catch ``Exception``, so a ``KeyboardInterrupt``/``SystemExit``
+    arriving AFTER a sub-step has been entered on the engine bypasses every envelope
+    builder: the ledgers die with the frame and dispatch serves its five generic fields
+    with ``error_family: "internal"``. The mutation may have landed; the one signal that
+    would say so is exactly what is lost.
+
+    THE ABORT IS NEVER CONVERTED. This is ``_restore``'s pattern applied to the
+    CB doors: build the finding, emit it DURABLY to the interaction log, attach it on the
+    EXPLICIT channel, and let the abort travel untouched. Nothing here changes what the
+    caller receives; it changes what the caller can find out about the editor.
+
+    Every step is guarded, and the catch is ``BaseException`` for the reason
+    ``_emit_partial_signal`` records: this is not the travel path (the abort is caught,
+    in a local, and re-raised by the caller two statements below), so swallowing a
+    SECOND abort raised by the breadcrumb machinery loses nothing and preserves the one
+    thing that matters — that the exception reaching the caller is the one that happened.
+
+    IT EMITS NOTHING WHEN BOTH LEDGERS ARE EMPTY. It once ran unconditionally,
+    so an abort arriving BEFORE any mutation — a param refusal, a pre-mutation guard, an
+    interrupt on the first engine read — still produced ``cb_partial_state`` and a
+    breadcrumb asserting "sub-steps already entered on the engine". Reproduced offline:
+    a KeyboardInterrupt on the very first ``GetSurfaceAt`` gave that family with
+    ``committed=[]`` and ``attempted=[]``. That is the same over-claim as certifying a
+    landed retype ``partial_state: False``, pointed the other way, and it contradicts
+    ``_partial_state_fields``' own ``if not committed and not attempted`` rule two
+    functions below. The abort still travels UNCHANGED either way; what the gate decides
+    is only whether a partial-state SIGNAL is manufactured for a zero-mutation abort.
+    """
+    if not committed and not attempted:
+        return
+    try:
+        # The finding, INCLUDING the measured solve diff, is built by the guard module —
+        # the same module that owns the diff for the success return and for the ordinary
+        # failure arms (three consumers, one reader, so the abort path cannot drift
+        # from the other two). It is folded into the MESSAGE as well as attached, because
+        # the durable log is the only channel an abort leaves behind and the message is
+        # what a human reads there. See ``_cb_solve_guard.abort_finding`` for why it lives
+        # there rather than here: this module is at its statement ceiling, and the ceiling
+        # exists to force that question rather than to be re-baselined by whoever meets it.
+        err = _cb_abort_finding(session, solve_audit, tool, exc, committed, attempted,
+                                _cb_recovery(committed, attempted))
+        try:
+            session._log("%s: %s" % (tool, err))
+        except BaseException:  # noqa: BLE001 — a breadcrumb NEVER displaces the abort
+            pass
+        from .surface_solve import attach_partial_state
+        attach_partial_state(exc, err)
+        try:
+            exc.__context__ = err
+        except BaseException:  # noqa: BLE001 — as above
+            pass
+    except BaseException:  # noqa: BLE001 — as above; the abort is re-raised by the caller
+        pass
 
 
 def _partial_state_fields(committed, recovery=None, attempted=None):
@@ -801,9 +1008,11 @@ def _partial_state_fields(committed, recovery=None, attempted=None):
     non-empty. Filing an attempt under ``committed`` would be the tool certifying more
     than it measured, which is the whole defect class this fix exists to close.
 
-    ``add_return_cb`` passes NEITHER new argument, so its envelope keeps the same keys in
-    the same order with the same text — byte-identical (pinned by the shipped adversarial
-    test assertions).
+    ``add_return_cb`` now passes ``attempted`` (the CRIT) and still passes no
+    ``recovery``: on a clean pre-mutation refusal BOTH ledgers are empty, so the envelope
+    is byte-identical to the shipped one (pinned by test assertions). It stops
+    being byte-identical exactly when a mutation was entered and its outcome is unknown,
+    which is the case that was previously reported as no mutation at all.
     """
     if not committed and not attempted:
         return {"partial_state": False}
@@ -813,13 +1022,52 @@ def _partial_state_fields(committed, recovery=None, attempted=None):
     out["recovery"] = recovery or (
         "the return CB authoring failed PART-WAY — the editor retains the committed "
         "sub-steps above (a ChangeType and/or some Par-cell pickups/the Order "
-        "literal). Re-author the return CB after correcting the fault, or reload "
-        "your design .zmx to discard the partial state."
+        "literal), and any `attempted` sub-step was ENTERED on the engine with its "
+        "outcome UNKNOWN (it may or may not have landed). Re-author the return CB "
+        "after correcting the fault, or reload your design .zmx to discard the "
+        "partial state."
     )
     return out
 
 
-def _add_return_cb_impl(session, params, committed):
+def _promote(attempted, committed, label, committed_label=None):
+    """Move ``label`` from the in-flight ledger to the committed one. NEVER raises.
+
+    The two ledgers answer different questions — ``committed`` is "this landed",
+    ``attempted`` is "this was entered and we do not know" — so a sub-step must appear in
+    exactly one of them. Promotion is the only writer of ``committed`` on a mutating step,
+    which is what keeps the pair disjoint by construction rather than by discipline: there
+    is no code path that appends to ``committed`` without first removing the same label
+    from ``attempted``. A label that is somehow absent is still promoted, because the
+    certainty we are recording comes from the caller's PROOF, not from this bookkeeping.
+
+    "PROOF", NOT "RETURN" — corrected later, and the distinction is load-bearing.
+    This paragraph used to say the certainty came from *"the CALLER having returned"*,
+    which described an earlier shape and stopped being true. Both shapes now exist in
+    this module and only one of them is a return: ``write_cb_cell`` READS BACK INSIDE
+    itself, so promoting on its return promotes on a proof (`:409`); ``_author_pickup``
+    explicitly does NOT, so its caller promotes only after a separate type-and-value
+    read-back. Reading this docstring as "returned cleanly ⇒ committed" would license
+    exactly the over-claim that was removed.
+
+    THAT SENTENCE IS TRUE ONLY NOW. It was FALSE when written —
+    ``_add_return_cb_impl`` appended to ``committed`` directly, and a reviewer
+    quoted the line. Every mutating step in this module now promotes, and an adversarial
+    test enforces it by AST: ``committed.append`` outside this function is a RED test,
+    not a review comment.
+
+    ``committed_label`` exists because two of the promotions carry genuinely different
+    served text on the two sides (the retype's "outcome UNKNOWN if this call threw"
+    becomes "CONFIRMED"). Bending the served strings to fit one label would have changed
+    the wire to satisfy a helper; carrying the spelling explicitly does not.
+    """
+    if label in attempted:
+        attempted.remove(label)
+    committed.append(label if committed_label is None else committed_label)
+
+
+def _add_return_cb_impl(session, params, committed, attempted,
+                        solve_audit):
     system = session.system
     lde = system.LDE
 
@@ -865,10 +1113,46 @@ def _add_return_cb_impl(session, params, committed):
     # entry path) + read-back-proven (is_coordinate_break after).
     return_row = lde.GetSurfaceAt(return_surface)
     changed_type = False
+    solves_before = None
     if not _cb.is_coordinate_break(return_row):
+        # THE SOLVE-LOSS GUARD — the same guard as the entry door, from the SAME shared
+        # decision function. This arm retypes in place exactly as ``add_coordinate_break``
+        # does, and the probe measured it destroying a radius SurfacePickup on the return
+        # surface with ``ok:true`` and ``changed_type:true``.
+        from .optimize_variable import _require_replace_solve
+        risk = _solve_loss_precheck(system, lde, return_surface,
+                                    _require_replace_solve(params), "add_return_cb",
+                                    solve_audit)
+        if risk["refuse"]:
+            return risk["envelope"]
+        solves_before = risk["before"]
+
         cb_member = _cb._surface_type_coordinate_break(system)
+        # THE CRIT. THE READ AND THE MUTATION ARE SPLIT, and the
+        # retype is filed as ATTEMPTED before the call that can mutate. Shipped, these
+        # two lived in ONE ``try`` with no ledger entry at all: a ``ChangeType`` that
+        # LANDED and was then followed by a throwing refetch or a failing type proof
+        # exited with BOTH ledgers empty, so ``_partial_state_fields`` certified
+        # ``partial_state: False`` over a row that IS retyped — a destructive retype
+        # reported as no mutation. The entry door had already carried this shape; this
+        # sibling in the same module did not, which is the fourth consecutive round in
+        # which a fix landed on one path and left the other.
+        #
+        # ``GetSurfaceTypeSettings`` is a READ and keeps NO ledger entry: if it throws,
+        # ``ChangeType`` provably never ran, and filing it as "outcome UNKNOWN" would
+        # claim uncertainty we do not have.
         try:
             settings = return_row.GetSurfaceTypeSettings(cb_member)
+        except Exception as exc:  # noqa: BLE001 — a settings READ throw, zero mutation
+            raise SurfaceWriteError(
+                f"could not read the CoordinateBreak surface-type settings for the "
+                f"return surface {return_surface} ({exc!r}); the retype was NEVER "
+                "attempted — refusing rather than authoring on an un-retyped surface",
+                field="surface_type_settings", intended="CoordinateBreak", actual=None,
+                surface=return_surface,
+            ) from exc
+        attempted.append(_CHANGETYPE_ATTEMPTED % return_surface)
+        try:
             return_row.ChangeType(settings)
         except Exception as exc:  # noqa: BLE001 — a ChangeType THROW -> surface_write (nit 2)
             raise SurfaceWriteError(
@@ -890,21 +1174,50 @@ def _add_return_cb_impl(session, params, committed):
         changed_type = True
         # LOW: the ChangeType COMMITTED (the editor now holds a retyped CB row). Record
         # it so a later mid-authoring throw discloses this committed sub-step honestly.
-        committed.append(f"changed_type(surface={return_surface})")
+        # Promoted, never appended — the served ``changed_type(...)`` spelling is
+        # preserved exactly while the sole-writer invariant now holds here too.
+        _promote(attempted, committed, _CHANGETYPE_ATTEMPTED % return_surface,
+                 f"changed_type(surface={return_surface})")
 
     # Author the pickup (-1) on each of Par1-Par5 (decenter + tilt), referencing the
-    # entry surface NUMBER. The pickup tracks the entry live (P3 / Q4). Each authored
-    # pickup is recorded the instant it lands (LOW: a throw on the Nth pickup discloses
-    # the prior N-1 as committed).
+    # entry surface NUMBER. The pickup tracks the entry live (measured).
+    #
+    # THIS COMMENT USED TO DESCRIBE AN EARLIER PLACEMENT AND OUTLIVED IT. It read
+    # "each authored pickup is recorded the instant it lands"; a later fix moved
+    # promotion to AFTER both the type and value read-backs (see the ``_promote`` call in
+    # the proof loop below), because "it landed" was never something ``_author_pickup``
+    # established. A pickup is IN-FLIGHT (``attempted``) from the ``on_mutate`` callback
+    # until that proof; a throw anywhere before it leaves the pickup in ``attempted``,
+    # NOT ``committed``. The old text described the exact over-claim that was removed,
+    # sitting 22 lines above the code that removed it — which is why the rule that no
+    # in-source comment is admissible without re-derivation exists.
     pickups = []
     for param in _cb._DOUBLE_PARAMS:
-        _author_pickup(system, return_row, param, entry_surface)
-        committed.append(f"pickup({param})")
+        # THE CRIT: the label is placed in ``attempted`` by the seam's ``on_mutate``,
+        # which fires between the ``SetSolveData`` BIND and its invocation. It STAYS
+        # there until the read-back proof below.
+        #
+        # AN EARLIER SHAPE PROMOTED RIGHT HERE, on return from ``_author_pickup``,
+        # whose own docstring says it "does NOT read back" — so ``committed`` named a
+        # pickup that nothing had yet established. That contradicts this module's stated
+        # certainty split ("``committed`` carries ONLY sub-steps that READ BACK as done")
+        # and it is REACHABLE by the very mechanism the probe measured: on a retyped
+        # row ``SetSolveData`` "returns without complaint — and the cell reads back
+        # Fixed". Reproduced offline before this fix: all five pickups in ``committed``,
+        # ``attempted`` absent, every cell actually ``Fixed``. The promotion now happens
+        # in the proof loop, once the cell reads back a live SurfacePickup tracking the
+        # negated entry value — the FIRST point at which "this landed" is a measurement.
+        _author_pickup(system, return_row, param, entry_surface,
+                       return_surface=return_surface, attempted=attempted)
 
     # Set the return Order = 1 - entry_order DIRECTLY (a literal Integer write,
-    # read-back-proven via write_cb_cell — NOT a pickup; §4 nit 3).
+    # read-back-proven via write_cb_cell — NOT a pickup). A sibling of the
+    # CRIT, in the same function: ``write_cb_cell`` assigns the typed accessor and only
+    # then reads back, so a THROW out of the assignment is a mutation of unknown outcome
+    # exactly as the pickup invoke is. Marked before, promoted after.
+    attempted.append(f"order={return_order}")
     _cb.write_cb_cell(system, return_row, "order", return_order)
-    committed.append(f"order={return_order}")
+    _promote(attempted, committed, f"order={return_order}")
 
     # Pickup-is-live proof (§4 nit 4): each return CELL value reads back == -entry CELL
     # value (the CELL pickup value, NOT the global frame — do not conflate with the Q4
@@ -916,7 +1229,14 @@ def _add_return_cb_impl(session, params, committed):
         # The solve is a SurfacePickup (proves it is a live tracking solve, not a
         # hand-written value).
         solve_name = _pickup_solve_type_name(return_cell)
-        if "SurfacePickup" not in solve_name:
+        # EXACT-token, not a substring ``in``. THIS IS NOT A BUG FIX AND MUST NOT BE
+        # DESCRIBED AS ONE: computed over all 39 live members the ONLY containment pair
+        # is ("Position", "PupilPosition"), and "SurfacePickup" is contained in nothing,
+        # so the substring form was correct BY CONSTRUCTION for the current roster. This
+        # is structural hygiene — an exact token cannot become wrong when a 40th
+        # member arrives. (The ``mce_config.py:927`` sibling is left as it is for now;
+        # that asymmetry is deliberate and is recorded.)
+        if solve_name != "SurfacePickup":
             raise SurfaceWriteError(
                 f"return CB {param!r} (surface {return_surface}) is not a "
                 f"SurfacePickup solve after authoring (reads {solve_name!r}); the "
@@ -934,6 +1254,12 @@ def _add_return_cb_impl(session, params, committed):
                 field="cb_pickup", intended=-entry_val, actual=return_val,
                 surface=return_surface,
             )
+        # PROMOTION HAPPENS HERE, and not one line earlier. Both read-backs have now
+        # passed — the cell reports a live ``SurfacePickup`` AND it tracks the negated
+        # entry value — so "this landed" is something the tool MEASURED rather than
+        # something it inferred from a call returning. A pickup whose proof throws or
+        # fails stays in ``attempted``, where the outcome genuinely is unknown.
+        _promote(attempted, committed, f"pickup({param})")
         pickups.append({
             "param": param, "from_surface": entry_surface, "scale": -1.0,
             "entry_value": _cb_safe(entry_val), "return_value": _cb_safe(return_val),
@@ -952,12 +1278,22 @@ def _add_return_cb_impl(session, params, committed):
         # off-axis residual (Q4); the tool authors the inverse TRANSFORM, the user owns
         # whether a gap sits between.
         "restores_on_axis_only_if_colocated": True,
-        # The by-number pickup desync hazard (P5 / the insert-renumbering gotcha).
+        # The by-number pickup hazard that IS real (measured): removing the ENTRY SURFACE.
+        # The renumber half of the old warning was MEASURED FALSE and its prescribed
+        # remedy was additionally impossible to execute for the one case that needs one
+        # -- you cannot re-author a return CB against an entry surface that no longer
+        # exists -- so it is deleted rather than softened.
         "warning": (
             f"the return CB's Par1-Par5 pickups reference the entry surface by NUMBER "
-            f"({entry_surface}); a later upstream InsertNewSurfaceAt renumbers indices "
-            "and SILENTLY desyncs the pickup target — re-author the return CB after any "
-            "upstream insert/remove. The inverse restores the frame to the input axis "
+            f"({entry_surface}). A pickup's surface reference was measured to TRACK a "
+            "later insert or remove of ANOTHER surface, so no re-authoring is needed "
+            "after one: measured on Par1/Par3 of this CB pair and on the thickness cell, "
+            "OpticStudio 2025 R1; Par2/Par4/Par5 are INFERRED from that agreement, not "
+            "separately measured. The REAL hazard is removing the ENTRY SURFACE itself, "
+            "which destroys these pickups -- they revert to Fixed, frozen at their last "
+            "values, and the inverse transform is gone. remove_surface reports it in its "
+            "solve_refs block, and refuse_on_solve_refs=true refuses such a removal "
+            "before anything is mutated. The inverse restores the frame to the input axis "
             "ONLY for co-located (gap=0) CBs; a propagation gap leaves a correct "
             "off-axis residual (this tool authors the transform, not an on-axis "
             "guarantee)."
@@ -967,27 +1303,100 @@ def _add_return_cb_impl(session, params, committed):
         # place), so no index shifted — disclosed as the no-shift convention so a caller
         # holding indices knows nothing moved.
         "index_shift": {"from": return_surface, "delta": 0},
+        # The MEASURED post-retype solve diff, additive and ABSENT ENTIRELY when the
+        # return surface was already a CB or carried nothing non-default (``solves_before``
+        # stays ``None`` on both of those paths, so the ordinary envelope is unchanged).
+        **_solve_loss_disclosure(system, lde, return_surface, solves_before),
     }
 
 
-def _author_pickup(system, return_row, param, entry_surface):
+def _author_pickup(system, return_row, param, entry_surface, return_surface=None,
+                   attempted=None):
     """Author a SurfacePickup (scale -1, .Surface=entry, .Column=ParN) on ``param``.
 
-    Composes the live CB-cell + the SurfacePickup solve enum. THROW-guarded -> a
-    structured ``SurfaceWriteError`` (the read-back-proof of the pickup happens in the
-    caller's nit-4 loop). The pickup-data object surface varies live (some builds wrap
-    it in ``solve._S_SurfacePickup``); both shapes are handled (the probe idiom).
+    SUBSUMED INTO THE SHARED SEAM. The hand-rolled create / null-check / unwrap
+    field-write / ``SetSolveData`` block that used to live here is DELETED: it is now the
+    shared ``surface_solve.author_solve`` primitive, so the ``CreateSolveType`` null
+    check and the fail-closed unwrap exist ONCE rather than once per authoring site. Two
+    copies of a fail-closed rule is how one of them drifts, and this module is where BOTH
+    of those defects were originally found.
+
+    WHAT THIS FUNCTION STILL OWNS, and why it is not an alias: the two CB-side resolvers
+    (``_cb._surface_pickup_solve_enum``, ``_resolve_par_column``) and the CB cell fetch.
+    The seam takes a CELL OBJECT and RESOLVED MEMBERS precisely so the CB column map never
+    has to cross into ``surface_solve``. The read-back proof of the pickup stays in the
+    caller's nit-4 loop — ``author_solve`` does not read back, its callers do.
+
+    THE FIELD-WRITE ORDER IS PRESERVED (``Surface``, ``ScaleFactor``, ``Column``): the
+    dict is insertion-ordered and the seam iterates it in order. Order-sensitivity here is
+    UNMEASURED, so it is held constant rather than assumed irrelevant.
+
+    ``none_create_error`` reproduces the declared null-check message VERBATIM — same text,
+    same ``field="cb_pickup"``, same family — so that pin stays green with ZERO catch-and-remap
+    across the seam. It has no default on purpose: the three callers classify a ``None``
+    factory differently and a default would let this one INHERIT a family instead of
+    deciding it.
+
+    BEHAVIOUR DELTA, DISCLOSED: the CB path now also gets the seam's STATUS-TOKEN net —
+    ``SetSolveData``'s return was previously ignored here, so a non-``Success`` token was
+    silently accepted. It is now a typed raise. ``return_surface`` remains DIAGNOSTIC ONLY.
+
+    ``attempted`` IS THE MISSING HALF OF THAT DELTA (the CRIT). Adding the status net
+    created an exit that raises with the mutation ALREADY APPLIED — the engine took the
+    solve and then reported ``Failure`` — and the caller's ledger, which is only written
+    after this function returns, could not see it. Passing the seam's ``on_mutate`` gives
+    the caller the one observation point that exists on the far side of the seam: the
+    label is filed as IN-FLIGHT immediately before the invoke.
+
+    IT STAYS IN-FLIGHT UNTIL THE CALLER PROVES IT, and this text was corrected to say
+    so. This docstring used to end "and the caller promotes it on return", which
+    was once true and became FALSE when promotion moved behind the type-and-value
+    read-back proof. THIS FUNCTION DOES NOT READ BACK — that is stated three paragraphs
+    above and is precisely why returning from it cannot promote anything. The caller
+    promotes only after ``read_solve_type`` reports ``SurfacePickup`` AND the value
+    tracks. A stale comment claiming otherwise is how a reader concludes ``committed``
+    means "returned cleanly" when it means "measured".
+
+    It stays OPTIONAL because the third caller (a future non-transactional one) must be
+    able to decline it explicitly rather than inherit a ledger it does not maintain.
     """
+    from . import _solve_cells as _sc
+    from .surface_solve import author_solve
+
     pickup_member = _cb._surface_pickup_solve_enum(system)
     col_member = _resolve_par_column(system, param)
     cell = _cb._cb_cell(system, return_row, param)
+
+    def _none_create_error():
+        return SurfaceWriteError(
+            f"the engine refused to create a SurfacePickup solve on return CB "
+            f"{param!r} (cell column {col_member!r}, surface {return_surface}): "
+            f"CreateSolveType returned None, which means this cell does not offer "
+            f"that solve type. Its live legal set is "
+            f"{_sc._deduped_available_names(cell)}. Refusing rather than writing "
+            "the pickup fields onto nothing",
+            field="cb_pickup", intended="SurfacePickup", actual=None,
+            surface=return_surface,
+        )
+
+    on_mutate = None
+    if attempted is not None:
+        on_mutate = lambda: attempted.append(f"pickup({param})")  # noqa: E731
+
     try:
-        solve = cell.CreateSolveType(pickup_member)
-        sp = getattr(solve, "_S_SurfacePickup", solve)
-        sp.Surface = entry_surface
-        sp.ScaleFactor = -1.0
-        sp.Column = col_member
-        cell.SetSolveData(solve)
+        author_solve(
+            system, cell, pickup_member,
+            {"Surface": entry_surface, "ScaleFactor": -1.0, "Column": col_member},
+            surface=return_surface, cell_label=param, on_mutate=on_mutate,
+            none_create_error=_none_create_error)
+    except SurfaceWriteError:
+        # MANDATORY (the freeze_semi.py:151 ``except ToolParamError: raise`` precedent).
+        # The seam raises PRECISE typed errors — the null-check message, the unwrap
+        # refusal, and the write and invoke arms — and without this the
+        # broad ``except`` below would catch every one of them and re-wrap it in the
+        # generic "could not author" text. The diagnosis would never reach the envelope,
+        # and the null-check's test would green against the OLD message with no signal at all.
+        raise
     except Exception as exc:  # noqa: BLE001 — a pickup-author THROW -> surface_write
         raise SurfaceWriteError(
             f"could not author the scale -1 SurfacePickup on return CB {param!r} "
@@ -1031,6 +1440,7 @@ ADD_COORDINATE_BREAK_SPEC = ToolSpec(
         "tilt_y": "number",
         "tilt_z": "number",
         "order": "number",
+        "replace_solve": "boolean",
     },
     description=(
         "Make a surface a coordinate break: tilt/decenter the local frame "
@@ -1039,7 +1449,13 @@ ADD_COORDINATE_BREAK_SPEC = ToolSpec(
         "change took via the post-CB global frame geometry, not just the cell "
         "read-back. Gotcha: the typed tilt/decenter property setter is a SILENT no-op — "
         "this tool writes the editor cells and verifies the global frame, never that "
-        "property. See add_return_cb, set_cb_variable, describe_surfaces."
+        "property. Gotcha: this RETYPES the surface in place and a retype DISCARDS an "
+        "authored solve on it (measured: a radius/conic SurfacePickup becomes Fixed, a "
+        "thickness one survives) and cannot put it back — so a surface carrying any "
+        "non-default solve is REFUSED with zero mutation; read_surface it first, then "
+        "pass replace_solve=true to proceed, which reports which solves were lost and "
+        "which survived, measured after the retype. "
+        "See add_return_cb, set_cb_variable, describe_surfaces."
     ),
 )
 
@@ -1062,15 +1478,20 @@ ADD_RETURN_CB_SPEC = ToolSpec(
     name="add_return_cb",
     handler=add_return_cb,
     required_params=("entry_surface", "return_surface"),
-    param_types={"entry_surface": "number", "return_surface": "number"},
+    param_types={"entry_surface": "number", "return_surface": "number",
+                 "replace_solve": "boolean"},
     description=(
         "Author a return coordinate break that undoes an entry CB: a scale -1 "
         "SurfacePickup on each decenter/tilt cell (tracks the entry live) plus the "
         "return Order flipped to 1-entry_order. Retypes return_surface to a CB if "
-        "needed (disclosed). Gotcha: the inverse restores the input axis ONLY for "
+        "needed (disclosed) — and that retype DISCARDS an authored solve on that "
+        "surface irrecoverably, so a non-CB return surface carrying any non-default "
+        "solve is REFUSED with zero mutation until you pass replace_solve=true. "
+        "Gotcha: the inverse restores the input axis ONLY for "
         "co-located (gap=0) CBs — a propagation gap leaves a correct off-axis residual; "
-        "and an upstream insert_surface renumbers and desyncs the by-number pickup "
-        "(re-author after any upstream insert). See add_coordinate_break."
+        "and the Par1-Par5 pickups reference the entry surface by NUMBER, so removing "
+        "THAT surface destroys them (remove_surface reports it; refuse_on_solve_refs=true "
+        "refuses it). See add_coordinate_break."
     ),
 )
 

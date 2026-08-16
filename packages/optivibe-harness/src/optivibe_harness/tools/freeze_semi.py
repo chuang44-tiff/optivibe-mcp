@@ -55,36 +55,36 @@ def _safe(value):
 
 
 # --------------------------------------------------------------------------- #
-# Editor-enum resolvers (the _aperture_cells / _cb_cells seam; fake-injectable).
+# Editor-enum resolvers — PROMOTED to the solve substrate.
+#
+# The two BODIES moved VERBATIM into ``tools/_solve_cells.py``; what remains here are
+# two DELEGATES. They are defs that CALL THROUGH, never module-level aliases: an alias
+# binds at import time, so a test monkeypatching the substrate would not be seen by this
+# module and the two would silently split. Every in-module call site below
+# (``:146/:172``, ``:149/:175``, ``:192``) is byte-unchanged.
+#
+# The direction is freeze_semi -> _solve_cells, i.e. tool -> substrate, which is the
+# right way round: freeze_semi is a TOOL module (it imports ``ToolSpec`` above) and the
+# substrate imports no tool module at all.
+#
+# THERE WAS NO CYCLE TO BREAK, and the text that stood here until recently said there
+# was — it asserted a live FUNCTION-LOCAL
+# ``from .freeze_semi import _surface_column_enum`` in
+# ``_clearance_common``, and called the re-point a deferred follow-up. Both
+# have since gone false: that import is now a MODULE-level
+# ``from . import _solve_cells as _sc``, and the harness rebuilt to prove it measured the
+# documented freeze -> clearance cycle NEVER BINDING at module level.
 # --------------------------------------------------------------------------- #
 def _surface_column_enum(system):
-    """Resolve the live ``SurfaceColumn`` enum TYPE (ZOSAPI.Editors.LDE; fake-injectable)."""
-    injected = getattr(system, "_enum_types", None)
-    if injected is not None and "SurfaceColumn" in injected:
-        return injected["SurfaceColumn"]
-    try:  # pragma: no cover - live backend path
-        import ZOSAPI.Editors.LDE as _lde  # type: ignore
-
-        return _lde.SurfaceColumn
-    except Exception as exc:  # noqa: BLE001 — surface as a param error, not internal
-        raise ToolParamError(
-            f"could not resolve SurfaceColumn from ZOSAPI.Editors.LDE: {exc}"
-        )
+    """Resolve the live ``SurfaceColumn`` enum TYPE (delegates to ``_solve_cells``)."""
+    from . import _solve_cells as _sc
+    return _sc.surface_column_enum(system)
 
 
 def _solve_type_enum(system):
-    """Resolve the live ``SolveType`` enum TYPE (ZOSAPI.Editors; fake-injectable)."""
-    injected = getattr(system, "_enum_types", None)
-    if injected is not None and "SolveType" in injected:
-        return injected["SolveType"]
-    try:  # pragma: no cover - live backend path
-        import ZOSAPI.Editors as _ed  # type: ignore
-
-        return _ed.SolveType
-    except Exception as exc:  # noqa: BLE001 — surface as a param error, not internal
-        raise ToolParamError(
-            f"could not resolve SolveType from ZOSAPI.Editors: {exc}"
-        )
+    """Resolve the live ``SolveType`` enum TYPE (delegates to ``_solve_cells``)."""
+    from . import _solve_cells as _sc
+    return _sc.solve_type_enum(system)
 
 
 # --------------------------------------------------------------------------- #

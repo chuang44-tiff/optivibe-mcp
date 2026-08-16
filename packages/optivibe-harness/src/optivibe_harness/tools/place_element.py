@@ -70,6 +70,7 @@ from ..errors import SurfaceWriteError, ToolParamError
 from ..server import ToolSpec
 from . import _beam_reach
 from . import _cb_cells as _cb
+from . import _cb_solve_guard as _guard
 from . import _lens_common as _lc
 from ._analysis_common import error_envelope
 
@@ -78,6 +79,35 @@ _ELEMENT_PARAM = "element_param"                  # a bad param value (pre-mutat
 _ELEMENT_FRAME_UNRESTORED = "element_frame_unrestored"  # orientation falsifier reject
 _ELEMENT_UNREACHED = "element_placement_unreached"      # rays-reach oracle reject
 _ELEMENT_WRITE = "element_write"                  # an authoring / checkpoint fault
+_ELEMENT_SOLVE_LOSS = "element_solve_loss"        # the native wrap lost a solve
+
+#: What ``solves_audited: true`` actually decided. SERVED, next to the boolean, because
+#: the boolean over-claims and the gap is MEASURED rather than hypothetical
+#: (a filed, still-open gap; serving this scope is the first remedy).
+#:
+#: The two named blind spots are not the same shape and are named separately:
+#:
+#:   * the RE-POINTED-to-a-valid-row mode, already disclosed and decidable but
+#:     unimplemented (the piecewise map is now measured to hold — 14 of 15 pickups across
+#:     five span shapes, measured live);
+#:   * the MASKED-DESTRUCTION mode, which is NEW and which defeats the one claim the type
+#:     census says it CAN make. ``_cb_solve_guard.census`` decides "did an authored solve
+#:     of this kind go missing" from a multiset DECREASE — but the native generator
+#:     authors its OWN solves, and when it authors one of the SAME ``(cell, type)`` kind
+#:     on the same call the count does not fall. Measured (live): a user
+#:     ``thickness`` SurfacePickup INSIDE the span is destroyed (reads back ``Fixed``)
+#:     while the native's own thickness pickup on the back-up spacer holds the count at 1,
+#:     ``losses()`` returns ``[]``, and the placement returns ``ok: true``. ``radius`` and
+#:     ``conic`` pickups inside the same span survive and re-point correctly.
+_SOLVE_AUDIT_SCOPE = (
+    "solve-type COUNTS were conserved and every pickup still has a readable source. That "
+    "is NOT a guarantee that each solve survived on the RIGHT row, and it is NOT a "
+    "guarantee that none was destroyed: the native generator authors solves of its own, "
+    "so a destroyed solve can be MASKED by one of the same kind it created. MEASURED: a "
+    "thickness SurfacePickup on a surface INSIDE the placed span is destroyed by the "
+    "native wrap and this audit does not see it (radius and conic survive and re-point "
+    "correctly). Re-read read_surface `solves` on the wrapped rows before relying on them."
+)
 
 # The orientation-restored gate: reuse the CB primitive's machine-epsilon gate (the
 # observed return-CB compose residual was 4.26e-13; downstream-vs-OBJECT 0.0). 1e-9 is
@@ -398,10 +428,20 @@ def _place_element_impl(session, first, last, tilt_x, tilt_y, tilt_z, decenter_x
             extra={"window_cbs": list(window_cbs)},
         )
 
+    # ---- Inventory the authored solves BEFORE the native wrap. ----
+    # ``place_element`` is a PUBLIC tool that hands a whole span to a native generator and
+    # then proves ORIENTATION and RAYS-REACH — neither of which can see a destroyed solve.
+    # The consequence a review stated, verbatim: "native solve destruction could satisfy
+    # every existing orientation/ray proof and return ok: True". The census + the pickup
+    # source map are read here and re-read after; see ``_audit_solve_survival``.
+    solves_before = _guard.census(system, lde)
+    sources_before = _guard.pickup_sources(system, lde)
+
     # ---- WRAP the native TiltDecenterElements generator. ----
     _run_tilt_decenter(
         system, lde, first, last, tilt_x, tilt_y, tilt_z, decenter_x, decenter_y, order,
     )
+    _audit_solve_survival(system, lde, solves_before, sources_before)
 
     # ---- Identify the wrap's CB PAIR by SET-DIFF (post − pre, renumber-adjusted). ----
     n_post = int(lde.NumberOfSurfaces)
@@ -505,6 +545,17 @@ def _place_element_impl(session, first, last, tilt_x, tilt_y, tilt_z, decenter_x
         "colocated_axial_residual": _safe(colocated_axial_residual),
         "downstream_lateral_shift": _safe(downstream_lateral_shift),
         "rays_reach": True,
+        # The placement was AUDITED for solve loss, and it is stated
+        # rather than left to be inferred from the absence of a failure. The claim is
+        # kept the size of the check — see ``_audit_solve_survival`` for what a count
+        # multiset can and cannot decide.
+        "solves_audited": True,
+        # AND THE SIZE OF THE CHECK IS NOW ON THE WIRE, because the audit is MEASURED to
+        # miss a real destruction (a filed, still-open gap; serving this scope
+        # is the first remedy). ``solves_audited: true`` reads to a caller as "the solves came
+        # through this placement intact"; what was decided is narrower, and the gap is
+        # no longer hypothetical — a live end-run probe drove it.
+        "solves_audit_scope": _SOLVE_AUDIT_SCOPE,
         "span": span,
         "restores_on_axis_only_if_colocated": True,
         "warning": (
@@ -514,9 +565,11 @@ def _place_element_impl(session, first, last, tilt_x, tilt_y, tilt_z, decenter_x
             "position is NOT restored (the native return CB inverts the tilt, not the "
             "decenter). The native tool always co-locates the return CB with the entry CB "
             "(via a −Σ back-up spacer), so the orientation inverse is exact. The "
-            "entry/return CBs reference surfaces by NUMBER; a later "
-            "upstream insert_surface renumbers and desyncs them — re-author after any "
-            "upstream insert."
+            "entry/return CBs reference surfaces by NUMBER. A pickup authored "
+            "through the shipped door was measured to TRACK a later insert or remove of "
+            "another surface; THIS pair is authored by the native element tool and has "
+            "NOT been measured across one, so neither tracking nor loss is claimed for "
+            "it."
         ),
     }
 
@@ -533,6 +586,120 @@ def _place_element_impl(session, first, last, tilt_x, tilt_y, tilt_z, decenter_x
 # --------------------------------------------------------------------------- #
 # The native TiltDecenterElements drive (the probe idiom; enum-injection seam).
 # --------------------------------------------------------------------------- #
+def _audit_solve_survival(system, lde, solves_before, sources_before):
+    """Did the native wrap LOSE an authored solve? Raises into the checkpoint.
+
+    ─── WHAT WAS MEASURED, BEFORE ANYTHING WAS BUILT ────────────────────────────────
+    Measured by a live probe, 0 own-spawned leftovers. The native path
+    was NOT assumed to match the earlier direct-retype measurement, and that caution
+    was right: the native generator preserved every authored solve in that probe AND
+    re-pointed the pickup source across the renumber. A ``radius`` SurfacePickup on
+    surface 2 naming source 1 became surface 3 naming source **2**; a ``thickness`` one
+    likewise; a DOWNSTREAM pickup on surface 4 naming source 2 became surface 7 naming
+    source **3**. Through the shipped ``place_element``: ``ok:true``,
+    ``orientation_restored:true``, ``rays_reach:true``, and the solves intact.
+
+    ─── AND THAT GENERALISATION IS NOW FALSIFIED. READ THIS BEFORE TRUSTING THE PARAGRAPH
+        ABOVE ─────────────────────────────────────────────────────────────────────────
+    An earlier review wrote "**the native generator PRESERVES every authored solve**". It does
+    not. A live end-run probe measured a
+    ``thickness`` SurfacePickup on a surface INSIDE the placed span being **DESTROYED**
+    (it reads back ``Fixed``), on the ordinary single-surface span, through the shipped
+    tool, with ``ok: true`` returned. ``radius`` and ``conic`` pickups on the SAME row in
+    the SAME call survive and re-point correctly, so — for the fourth time in this
+    programme — a structural mutation is not one behaviour even within a single row.
+
+    That earlier probe did not see it because its pickups sat on ``radius``/``thickness`` rows
+    whose thickness pickup was OUTSIDE the wrapped span; the destruction is specific to a
+    thickness cell the native generator takes over to build its −Σ back-up spacer.
+
+    WORSE, AND THIS IS THE PART THAT MATTERS HERE: the audit below does not fire on it.
+    ``_guard.census`` decides destruction from a multiset DECREASE, and the native
+    generator authors its OWN ``thickness`` SurfacePickup on that spacer — so the count
+    goes 1 -> 1, ``losses()`` returns ``[]``, and the one claim the census documents
+    itself as able to make is defeated by the very machinery ``losses`` deliberately
+    ignores ("counts that ROSE are ignored on purpose"). Ignoring the rise is right; what
+    is missing is that a rise and a fall of the same kind CANCEL. The residual is
+    disclosed on the wire (``_SOLVE_AUDIT_SCOPE``) and ticketed; it is NOT fixed here,
+    because making the census index-aware changes what a shipped guard rolls back and
+    that is its own piece of work, not a follow-up.
+
+    So this function is a REGRESSION GUARD that is known to be INCOMPLETE, not a bug fix
+    and not a proof. The audit's REASONING was correct and is why the guard ships anyway:
+    ``place_element``
+    is a public tool that hands a whole span to a native generator and proves only
+    ORIENTATION and RAYS-REACH, neither of which can see a lost solve; four probe arms on
+    one engine is not a proof over 39 solve types, five cells and every span shape; and
+    the checkpoint that makes the guard cheap already exists. UNKNOWN resolves toward
+    ALARM, so the call ROLLS BACK rather than disclosing.
+
+    IT IS NOT A ``precheck``-STYLE REFUSAL, and that is a measurement too. The CB doors
+    refuse BEFORE mutating because their retype was measured to destroy; refusing here
+    would refuse every solve-bearing placement the probe showed working — a false refusal
+    on the ordinary case, which is the loud-but-wrong direction this design has been
+    careful about. Audit-then-rollback keeps the zero-mutation outcome without predicting.
+
+    TWO INDEPENDENT FINDINGS, because the two destruction modes are different:
+
+      * a COUNT that fell — an authored solve of some ``(cell, type)`` is gone;
+      * a pickup that lost a READABLE SOURCE — the solve survives with a healthy
+        ``SurfacePickup`` type while its reference is destroyed or unreadable. A type
+        census is structurally blind to that.
+
+    BOTH ARE INDEX-FREE, and the second one was NOT on the first cut — the LIVE GATE
+    refused two CORRECT placements before this docstring was true. The census was made
+    index-free (the operation RENUMBERS: 5 surfaces -> 8, a row at 2 lands at 3, a row at
+    4 lands at **7**) and its companion arm was left keyed on the pickup's SOURCE NUMBER,
+    which the same renumber shifts — so it fired on every correct placement carrying a
+    pickup. Offline it passed, because the fake did not model the engine re-pointing.
+
+    WHAT THE NARROWED ARM NO LONGER DECIDES, stated rather than implied: a pickup
+    RE-POINTED to a DIFFERENT, READABLE row reads as intact here. Deciding that needs an
+    index map across the insert, and the index map is exactly what the renumber makes
+    unreliable — which is why this is disclosed as a residual rather than guarded by a
+    check that cannot be right. See ``_cb_solve_guard.pickup_sources``.
+
+    THE "UNRELIABLE" HALF OF THAT SENTENCE IS NOW MEASURED, and it points the other way.
+    A live end-run probe ran the piecewise map (before ``first``:
+    unchanged; inside ``first..last``: +1; after ``last``: +(n_post − n_pre)) over FIVE
+    span shapes — leading, two interior depths, a MULTI-element span and a trailing span
+    — and it held for **14 of 15** pickups on both the row AND the source. The one miss
+    is the ``thickness``-inside-the-span destruction above, i.e. not a map failure. So the
+    map is available if someone wants to implement it; what is missing is the measurement
+    across all 39 solve types and multi-element wraps, not the map's shape. The residual
+    stays open (filed, with a further remedy still to come)
+    with that measurement attached rather than half-built here.
+    """
+    findings = _guard.losses(solves_before, _guard.census(system, lde))
+    sources_after = _guard.pickup_sources(system, lde)
+    # ONLY the readable half falls-through as a finding: a pickup moving from a readable
+    # source to an unreadable one drops the ``readable`` count, which is the destruction
+    # this arm decides. A rise in ``unreadable`` is the same event seen from the other
+    # side and is not counted twice.
+    dropped = sorted(
+        ("%s (%d readable source(s) -> %d)"
+         % (token, n, sources_after.get((token, state), 0)))
+        for (token, state), n in sources_before.items()
+        if state == "readable" and sources_after.get((token, state), 0) < n
+    )
+    if not findings and not dropped:
+        return
+    raise _PlaceUnverified(
+        "the native tilt/decenter wrap did not preserve every authored solve on this "
+        "system: %s%s. A solve is a design relationship the caller authored deliberately "
+        "and this tool cannot put one back, so the placement is ROLLED BACK rather than "
+        "returned as a success whose orientation and ray proofs would both have passed. "
+        "Re-point or clear the affected solve (clear_solve), place the element, then "
+        "re-author it against the new surface numbers (index_shift is disclosed on a "
+        "successful placement)."
+        % (findings or "no count changed",
+           ("; pickup source relationships lost: " + ", ".join(dropped)) if dropped
+           else ""),
+        family=_ELEMENT_SOLVE_LOSS,
+        extra={"solves_lost": findings, "pickup_sources_lost": dropped},
+    )
+
+
 def _run_tilt_decenter(system, lde, first, last, tilt_x, tilt_y, tilt_z, decenter_x,
                        decenter_y, order):
     """GetTool_TiltDecenterElements -> set props (Order = ENUM MEMBER) -> RunTool.

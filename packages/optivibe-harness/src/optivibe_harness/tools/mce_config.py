@@ -560,7 +560,13 @@ def set_config_variable(session, params):
     """
     params = _require_dict(params)
     try:
-        return _set_config_variable_impl(session, params)
+        # The prior-solve DISCLOSE stamp, at the PUBLIC entry, so no
+        # success return inside the impl can be added later and quietly miss it.
+        # Function-local import, the house style already used in this module for
+        # ``_optimize_common`` (it imports these tool modules back).
+        from . import _optimize_common as _oc_stamp
+        return _oc_stamp._stamp_prior_solve_unchecked(
+            _set_config_variable_impl(session, params), "per-configuration MCE")
     except ToolParamError as exc:
         return error_envelope("set_config_variable", _MCE_PARAM, str(exc))
     except SurfaceWriteError as exc:
@@ -920,10 +926,29 @@ def _read_cell_safe(system, op, cfg, value_datatype):
         cell = _mc.operand_cell(system, op, cfg)
     except Exception:  # noqa: BLE001 — an unreadable cell handle
         return (None, False, False)
-    # The variable flag (THROW-guarded — a missing solve reads as not-variable).
+    # The variable flag (THROW-GUARDED — an unreadable solve reads as not-variable; the
+    # guard and its fail-open semantics are UNCHANGED, because ``_read_cell_safe``'s whole
+    # contract is to degrade per cell rather than raise).
+    #
+    # EXACT TOKEN, NOT ``"Variable" in str(...)``.
+    # This is NOT a bug fix and must not be described as one: computed over
+    # the LIVE roster (a live probe, 37 distinct rendered member names)
+    # the ONLY name containing ``"Variable"`` as a substring IS ``"Variable"``, so the
+    # substring form was correct BY CONSTRUCTION for the current engine build. It is
+    # structural hygiene: a containment test is a PROXY for member identity, and the
+    # roster is engine-version data, so a 38th member named e.g. ``"VariablePickup"`` or
+    # ``"NotVariable"`` would silently start counting as an optimizer DOF it is not.
+    #
+    # ``== "Variable"`` IS THE RIGHT COMPARISON AND THAT IS MEASURED, not assumed: the
+    # live ``str()`` of an MCE cell's solve object renders the BARE TOKEN (``"Variable"``
+    # on a ``MakeSolveVariable``'d Double cell, ``"Fixed"`` on its sibling config) — not a
+    # ``SolveType.Variable``-style qualified render an equality test would miss. The
+    # identical exact-token fix already shipped one module over
+    # (``cb_surface.py``'s ``_pickup_solve_type_name`` check); this closes the asymmetry
+    # that was created deliberately and ticketed.
     is_var = False
     try:
-        is_var = "Variable" in str(cell.GetSolveData().Type)
+        is_var = str(cell.GetSolveData().Type) == "Variable"
     except Exception:  # noqa: BLE001 — no readable solve -> not a variable
         is_var = False
     try:

@@ -797,9 +797,8 @@ def fold_beam(session, params):
     """
     params = _require_dict(params)
     try:
-        surface, angle, axis, direction, restore_axis = _validate_fold_params(
-            session, params
-        )
+        (surface, angle, axis, direction, restore_axis,
+         replace_solve) = _validate_fold_params(session, params)
     except ToolParamError as exc:
         return error_envelope("fold_beam", _FOLD_PARAM, str(exc))
     except Exception as exc:  # noqa: BLE001 — a pre-mutation read fault -> fold_param
@@ -821,7 +820,7 @@ def fold_beam(session, params):
     # (the heavier apply_lens_spec atomicity model — nit 4b): the delegated tools'
     # own partial-state ledgers become irrelevant once the outer LoadFile rolls back.
     return _fold_beam_checkpointed(
-        session, surface, angle, axis, direction, restore_axis
+        session, surface, angle, axis, direction, restore_axis, replace_solve
     )
 
 
@@ -877,8 +876,19 @@ def _validate_fold_params(session, params):
 
     direction = _require_direction(params.get("direction", 1))
     restore_axis = _require_bool(params.get("restore_axis", False), "restore_axis")
+    # THE SOLVE-LOSS OPT-IN, half 1. The fold
+    # delegates every retype to the CB doors, so the ``cb_solve_loss`` refusal reached
+    # a ``fold_beam`` caller with a remedy — "pass replace_solve=true" — naming a
+    # parameter ``fold_beam`` did not accept. A refusal with no route out is how a user
+    # reaches for something worse.
+    #
+    # THE SAME VALIDATOR THE DOORS USE, not a second reading of what a deliberate
+    # override is. A truthy-but-non-bool must refuse identically here and there; two
+    # readings of "did the caller opt in" is how one of them starts accepting ``"no"``.
+    from .optimize_variable import _require_replace_solve
+    replace_solve = _require_replace_solve(params)
 
-    return surface, angle, axis, direction, restore_axis
+    return surface, angle, axis, direction, restore_axis, replace_solve
 
 
 def _require_fold_angle(value):
@@ -944,7 +954,8 @@ def _require_bool(value, label):
 # --------------------------------------------------------------------------- #
 # The atomic checkpointed body.
 # --------------------------------------------------------------------------- #
-def _fold_beam_checkpointed(session, surface, angle, axis, direction, restore_axis):
+def _fold_beam_checkpointed(session, surface, angle, axis, direction, restore_axis,
+                            replace_solve=False):
     """Run the fold inside ONE SaveAs/LoadFile checkpoint (nit 4b). Never raises.
 
     On ANY fault inside the boundary — a delegated-tool refusal, an engine throw, OR
@@ -989,7 +1000,7 @@ def _fold_beam_checkpointed(session, surface, angle, axis, direction, restore_ax
 
         try:
             result = _fold_beam_impl(
-                session, surface, angle, axis, direction, restore_axis
+                session, surface, angle, axis, direction, restore_axis, replace_solve
             )
             return result
         except _FoldUnverified as exc:
@@ -1035,7 +1046,8 @@ class _FoldUnverified(Exception):
         self.family = family
 
 
-def _fold_beam_impl(session, surface, angle, axis, direction, restore_axis):
+def _fold_beam_impl(session, surface, angle, axis, direction, restore_axis,
+                    replace_solve=False):
     """Insert + author + falsify (raises into the checkpointed caller on any fault).
 
     ─── THE SURFACE-ALLOCATION INDEX MAP (nit 4a) ────────────────────────────────
@@ -1082,6 +1094,10 @@ def _fold_beam_impl(session, surface, angle, axis, direction, restore_axis):
     # 7a is already done in _validate_fold_params; each insert_surface ALSO re-guards
     # bounds before InsertNewSurfaceAt, so an out-of-range insert never reaches the
     # engine). Insert front-to-back at s, s+1[, s+2].
+    # The composer's carrier for each delegate's MEASURED post-retype diff. It stays
+    # EMPTY on the ordinary fold (a freshly inserted surface carries no non-default
+    # solve, measured), so it costs the common case zero envelope keys.
+    solve_loss = []
     inserted = []
     for offset in range(n_inserts):
         at = s + offset
@@ -1115,9 +1131,11 @@ def _fold_beam_impl(session, surface, angle, axis, direction, restore_axis):
     # Author the entry CB EXACTLY ONCE and check ITS never-raise envelope; a refusal
     # converts to a structured raise so the checkpointed caller rolls back.
     cb_res = _cbs.add_coordinate_break(
-        session, {"surface": entry_surface, tilt_param: tilt_value, "order": 0}
+        session, {"surface": entry_surface, tilt_param: tilt_value, "order": 0,
+                  "replace_solve": replace_solve}
     )
     _raise_on_delegate_fail(cb_res, "add_coordinate_break (entry CB)")
+    _collect_solve_loss(solve_loss, cb_res, "entry_cb")
 
     # ---- Step 5: set the mirror (honest primitive; signed thickness kept).
     mir_res = set_mirror(session, {"surface": mirror_surface})
@@ -1143,9 +1161,11 @@ def _fold_beam_impl(session, surface, angle, axis, direction, restore_axis):
     if restore_axis:
         ret_res = _cbs.add_return_cb(
             session,
-            {"entry_surface": entry_surface, "return_surface": return_surface},
+            {"entry_surface": entry_surface, "return_surface": return_surface,
+             "replace_solve": replace_solve},
         )
         _raise_on_delegate_fail(ret_res, "add_return_cb (return CB)")
+        _collect_solve_loss(solve_loss, ret_res, "return_cb")
 
     # ---- FALSIFY the achieved global chief-ray deviation across the mirror (L28). --
     # The MAGNITUDE gate (the unsigned acos deviation == φ).
@@ -1207,7 +1227,8 @@ def _fold_beam_impl(session, surface, angle, axis, direction, restore_axis):
     reach_span = None
     if not restore_axis:
         frame_axis_residual, frame_corrections = _correct_downstream_frame(
-            session, mirror_surface, correction_cb_surface, axis, direction
+            session, mirror_surface, correction_cb_surface, axis, direction,
+            replace_solve, solve_loss
         )
         # ---- The expensive rays-reach span commit gate (LAST — §A.5 ordering). The
         # span is [mirror, IMAGE]; an in-span optical surface the corrected fold does not
@@ -1288,6 +1309,12 @@ def _fold_beam_impl(session, surface, angle, axis, direction, restore_axis):
         out["frame_corrections"] = frame_corrections
         out["downstream_reaches"] = downstream_reaches
         out["reach_span"] = reach_span
+    # ADDITIVE, and ABSENT when nothing was at risk (never an empty list). The ordinary
+    # fold onto freshly inserted surfaces produces no entry at all, so every shipped
+    # assertion over this envelope's key set is unchanged; the key appears exactly when a
+    # caller opted a solve-bearing retype in and there is something MEASURED to report.
+    if solve_loss:
+        out["delegate_solve_loss"] = solve_loss
     return out
 
 
@@ -1474,7 +1501,7 @@ def _solve_extra(angle, achieved, iterations):
 # The bounded direct-residual downstream-frame correction.
 # --------------------------------------------------------------------------- #
 def _correct_downstream_frame(session, mirror_surface, correction_cb_surface, axis,
-                              direction):
+                              direction, replace_solve=False, solve_loss=None):
     """Rotate the downstream LOCAL frame onto the reflected ray (the §0 fix). Raises.
 
     The fold deviates the chief RAY by φ but rotates the downstream LOCAL coordinate
@@ -1523,9 +1550,11 @@ def _correct_downstream_frame(session, mirror_surface, correction_cb_surface, ax
     seed_tilt = float(direction) * r0
     cb_res = _cbs.add_coordinate_break(
         session,
-        {"surface": correction_cb_surface, tilt_param: seed_tilt, "order": 0},
+        {"surface": correction_cb_surface, tilt_param: seed_tilt, "order": 0,
+         "replace_solve": replace_solve},
     )
     _raise_on_delegate_fail(cb_res, "add_coordinate_break (correction CB)")
+    _collect_solve_loss(solve_loss, cb_res, "correction_cb")
     corrections = 1
 
     # ---- Falsify: re-measure r. If converged, DONE. Else ONE bounded Newton step.
@@ -1692,6 +1721,33 @@ def _rewrite_entry_tilt(session, entry_surface, tilt_param, tilt_value):
     lde = session.system.LDE
     row = lde.GetSurfaceAt(entry_surface)
     _cb.write_cb_cell(session.system, row, tilt_param, float(tilt_value))
+
+
+def _collect_solve_loss(sink, envelope, where):
+    """Carry a delegate's MEASURED solve-loss diff up to the composer's envelope.
+
+    Item 3. The CB doors
+    report ``replaced_solves`` / ``preserved_solves`` — read from the row AFTER the retype,
+    so a MEASUREMENT rather than a prediction — and the composition boundary was DROPPING
+    it. A caller who opts a fold in to a destructive retype was therefore told nothing
+    about what it destroyed, which is worse than the refusal it replaced.
+
+    NEVER raises and is never a gate: it decorates. ``sink`` is ``None`` on any path that
+    does not accumulate, and a delegate that reports nothing contributes nothing — so the
+    ordinary fold onto a freshly inserted surface adds ZERO keys, which is the behaviour
+    every existing assertion pins.
+    """
+    if sink is None or not isinstance(envelope, dict):
+        return
+    try:
+        entry = {k: envelope[k] for k in
+                 ("replaced_solves", "preserved_solves", "solves_unreadable_before")
+                 if envelope.get(k)}
+        if entry:
+            entry["at"] = where
+            sink.append(entry)
+    except Exception:  # noqa: BLE001 — a decoration NEVER displaces the fold
+        pass
 
 
 def _raise_on_delegate_fail(envelope, what):
@@ -2247,6 +2303,7 @@ FOLD_BEAM_SPEC = ToolSpec(
         "axis": "string",
         "direction": "number",
         "restore_axis": "boolean",
+        "replace_solve": "boolean",
     },
     description=(
         "Fold the beam by angle φ at a surface: inserts an entry coordinate break "
@@ -2266,7 +2323,12 @@ FOLD_BEAM_SPEC = ToolSpec(
         "OUT of the second fold's plane; its in-plane direction is unverifiable, so it is "
         "REFUSED early (fold_skew_entry) — fold in the plane the entry beam lies in, or "
         "restore_axis upstream first. Gotcha: inserting surfaces RENUMBERS everything from "
-        "the fold surface up — see index_shift in the result. See set_mirror, "
+        "the fold surface up — see index_shift in the result. Gotcha: if a surface the "
+        "fold retypes carries an authored solve, the coordinate-break door REFUSES "
+        "(error_family cb_solve_loss) because a retype can DISCARD that relationship and "
+        "nothing can put it back; pass replace_solve=true to proceed deliberately, and the "
+        "result then carries delegate_solve_loss naming which solves were lost and which "
+        "survived, MEASURED after the retype. See set_mirror, "
         "add_coordinate_break, describe_surfaces, render_layout."
     ),
 )

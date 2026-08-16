@@ -24,12 +24,14 @@ a FakeLDE/FakeRow double (no backend).
 import math
 
 from .._io import safe_float
-from ..errors import SurfaceWriteError, ToolParamError
+from ..errors import SolveDrivenError, SurfaceWriteError, ToolParamError
 from ..server import ToolSpec
 from . import _asphere_cells as _asph
 from . import _lens_common as _c
 from . import _measurement_common as _mc
 from . import _optimize_common as _oc
+from . import _solve_cells as _sc
+from . import _solve_refs as _refs
 
 # Geometry fields set_surface accepts and the typed property each writes to.
 _GEOMETRY_FIELDS = ("radius", "thickness", "conic", "semi_diameter")
@@ -198,6 +200,27 @@ def _read_surface_dict(system, lde, surface, n):
         except Exception:  # noqa: BLE001 — a drifted/wedged coeff cell -> graceful degrade
             out["grin_coefficients"] = None
             out["grin_coefficients_unreadable"] = True
+
+    # INSERTION POINT A (frozen): the surface-SOLVE disclosure
+    # patch, additive, 0..4 top-level keys, appended LAST so the PRIOR key ORDER of every
+    # base/asphere/GRIN field is byte-unchanged. On a freshly-built untouched system the
+    # emit returns ``{}`` BY CONSTRUCTION (defaults suppressed, Standard row, one config),
+    # so ``out.update({})`` is the identity and that no-op holds STRUCTURALLY, not by measurement.
+    #
+    # CONTAINMENT: an emit fault DISCLOSES, it never sinks the read. ``Exception``, NOT
+    # ``BaseException`` — a KeyboardInterrupt travelling this path MUST propagate,
+    # and the read_surface consumer has no per-row guard to absorb it, so the KI row is
+    # asserted PER CONSUMER (it propagates here; the describe row-guard absorbs it there).
+    #
+    # THE UNREADABLE BLOCK HAS TWO PROVENANCES and they are indistinguishable BY DESIGN:
+    # a per-cell fetch fault (emitted from INSIDE ``emit_solves_block``) and a
+    # whole-block assembly fault (partition/wire-safety, raised AFTER the cells were read
+    # and landing here). It freezes 0..4 top-level keys; a fifth key to tell them apart is
+    # refused on the record. No consumer may infer a per-cell read failure from it.
+    try:
+        out.update(_sc.emit_solves_block(system, lde, surface))
+    except Exception:  # noqa: BLE001 — an emit fault DISCLOSES; it never sinks the read
+        out.update(_sc._unreadable_block())
     return out
 
 
@@ -278,7 +301,8 @@ def _set_object_surface(session, params, n):
     # avoid the lens_spec <-> lens_surface import cycle).
     from . import lens_spec
     lde = session.system.LDE
-    lens_spec.LensSpec._apply_object_fields(lde, {"thickness": float(value)})
+    lens_spec.LensSpec._apply_object_fields(
+        session.system, lde, {"thickness": float(value)})
     return _read_surface_dict(session.system, lde, 0, n)
 
 
@@ -334,6 +358,32 @@ def set_surface(session, params):
             "set_surface requires at least one writable field "
             f"(any of {list(_FIELD_TO_PROP.keys())})"
         )
+
+    # REFUSAL SITE 1: the driven-cell PROBE PRE-PASS.
+    #
+    # AFTER collection, BEFORE the FIRST setattr. A multi-field call carrying ONE driven
+    # cell must mutate NOTHING — a guard inside the write loop would leave the earlier
+    # fields written and the design half-mutated by a call that reports failure.
+    #
+    # SCOPE: ``_GEOMETRY_FIELDS`` — the module's own tuple, which IS the
+    # ``CELL_TOKENS`` n writable intersection. ``comment`` is excluded by construction (it
+    # is not a solve-bearing cell) and ``material`` never reaches here (refused above,
+    # routed to substitute_glass).
+    #
+    # THE TRI-STATE IS TESTED BY IDENTITY, NEVER TRUTHINESS. ``if probe["driven"]:`` reads
+    # UNKNOWN (``None``) as PERMISSION — a two-character fail-open on a WRITE predicate.
+    # UNKNOWN fails CLOSED here, the OPPOSITE polarity to the emit's fail-OPEN
+    # ``_par_cell_row``; the two are deliberately different and a tidy-up sweep must not
+    # "unify" them. A read that cannot see the solve is exactly the case where writing
+    # through it is unsafe.
+    for field in _GEOMETRY_FIELDS:
+        if field not in writes:
+            continue
+        probe = _sc.refuse_if_driven(system, lde, surface, field)
+        if probe.get("driven") is not False:
+            raise SolveDrivenError.from_probe(
+                probe, cell_token=field, surface=surface, tool="set_surface",
+                intended=writes[field])
 
     # Write each field, then immediately re-fetch the row and read it back.
     warnings = []
@@ -431,7 +481,52 @@ def remove_surface(session, params):
     surface (``ToolParamError`` pointing to ``set_stop_surface`` — reassign the
     stop first). ``RemoveSurfaceAt`` returns ``bool``; ``False`` -> read-back
     count check -> ``SurfaceWriteError``.
+
+    THE SOLVE-REFERENCE DISCLOSURE. Removing a row that a live
+    ``SurfacePickup`` names as its SOURCE silently DELETES that solve (measured: a
+    ``thickness`` pickup; a coordinate-break ``Par1``/``Par3`` pickup — each measured
+    reverting to ``Fixed``, frozen at its last driven value). The
+    shipped tool returned ``{"at": 2, "count": 7}`` and disclosed none of it. Every
+    success return now carries an additive ``solve_refs`` block (``_solve_refs.SCOPE``
+    states what it does and does not audit), and ``refuse_on_solve_refs=true`` turns the
+    disclosure into a ZERO-MUTATION refusal.
+
+    DISCLOSE BY DEFAULT, and this is the WEAKER of the two safety postures — recorded
+    rather than glossed. An agent that does not read the key still destroys the
+    relationship under ``ok: true``. The default is nonetheless disclose, for two
+    reasons: ``lens_spec._reconcile_count``'s shrink loop calls this as a BARE STATEMENT
+    with the returned dict discarded and no channel to pass an override down, so
+    refuse-by-default would break a shipped MCP door with no escape hatch; and under
+    refuse-by-default a ``could_not_scan`` must resolve either to a refusal (a
+    denial-of-service on a structural tool via any one wedged cell anywhere) or to a
+    proceed (a FORBIDDEN ABSENT-vs-UNREADABLE collapse). Under disclose-by-default
+    only the OPT-IN strict mode has to decide it — and there refusing is correct,
+    because a caller who passed the flag asked for UNKNOWN to be treated as alarm.
+
+    THE ORDER OF THE FIRST FIVE STEPS IS LOAD-BEARING:
+
+    * the flag read is the FIRST executable statement, so a malformed flag costs ZERO
+      engine reads — the standard ``_require_remove_at``'s own docstring sets ("raises
+      BEFORE any engine call"). It could not be met further down, because the shipped
+      body reads ``lde.NumberOfSurfaces`` before validating anything;
+    * the STOP GUARD runs BEFORE the scan. Cheap refusals first: a row that is both the
+      stop AND a pickup source costs the agent one recoverable extra round-trip (move
+      the stop, re-call), whereas scanning first would make EVERY stop-row removal pay
+      an O(N) scan. The stop+source engine behaviour is therefore never reached and
+      stays unmeasured; this design does not depend on the answer;
+    * the strict gate is strictly BEFORE ``RemoveSurfaceAt``, so a refusal is
+      zero-mutation, and it reads the PRE-MUTATION scan VERDICT — never the wire
+      ``state``. That is the one normative strict rule: a disclosure failure discovered
+      AFTER the removal cannot un-remove the row (there is no inverse), so the gate
+      reads the verdict, the wire reports the outcome, and a post-mutation degradation
+      is REPORTED, never refused;
+    * the confirm runs AFTER the count read-back and is skipped entirely (zero engine
+      reads) when nothing was at risk.
+
+    THE FAILURE PATH DISCARDS THE SCAN: a removal that mutates and then fails its count
+    read-back raises ``SurfaceWriteError`` and the scan result is lost. A known gap.
     """
+    refuse = _c._require_bool_param(params, "refuse_on_solve_refs")  # zero engine reads
     system = session.system
     lde = system.LDE
     n = int(lde.NumberOfSurfaces)
@@ -446,6 +541,14 @@ def remove_surface(session, params):
             "set_stop_surface first"
         )
 
+    scan = _refs.scan_removal(system, lde, at)
+    # ``_refs.VERDICTS[0]``, never the literal ``"none_affected"`` (a review finding).
+    # The vocabulary is FROZEN and ORDERED in ONE place precisely so a consumer cannot
+    # acquire a private copy -- the single-locus rule forbids one module over, and
+    # the strict gate is the highest-consequence consumer of it there is.
+    if refuse and scan["verdict"] != _refs.VERDICTS[0]:
+        raise ToolParamError(_refs.refusal_message(at, scan))
+
     removed = lde.RemoveSurfaceAt(at)
     new_count = int(lde.NumberOfSurfaces)
     if not bool(removed) or new_count != n - 1:
@@ -457,7 +560,8 @@ def remove_surface(session, params):
             actual=new_count,
             surface=at,
         )
-    return {"at": at, "count": new_count}
+    confirmed = _refs.confirm_after(system, lde, at, scan)
+    return {"at": at, "count": new_count, **_refs.disclosure(scan, confirmed)}
 
 
 def set_stop_surface(session, params):
@@ -652,7 +756,12 @@ INSERT_SURFACE_SPEC = ToolSpec(
     param_types={"at": "number"},
     description=(
         "Insert a new surface before position 'at' (1..N-1). Out-of-range is "
-        "refused BEFORE the engine call (an out-of-range insert crashes the engine)."
+        "refused BEFORE the engine call (an out-of-range insert crashes the engine). "
+        "A pickup solve's surface reference was measured to track an insert or remove "
+        "of another surface, so no re-authoring is needed after one: measured for "
+        "SurfacePickup on the thickness cell and on coordinate-break Par1/Par3, "
+        "OpticStudio 2025 R1. Removing the row a pickup names as its SOURCE is the "
+        "case that does destroy it -- see remove_surface."
     ),
 )
 
@@ -660,10 +769,22 @@ REMOVE_SURFACE_SPEC = ToolSpec(
     name="remove_surface",
     handler=remove_surface,
     required_params=("at",),
-    param_types={"at": "number"},
+    param_types={"at": "number", "refuse_on_solve_refs": "boolean"},
     description=(
         "Remove an interior surface (1..N-2). Refuses OBJECT/IMAGE and refuses "
-        "removing the stop (reassign via set_stop_surface first)."
+        "removing the stop (reassign via set_stop_surface first). Returns an additive "
+        "'solve_refs' block on every success: state is none_affected, affected or "
+        "could_not_scan, and 'affected' lists each solve on a SURVIVING row that "
+        "references the removed row, with what it became. Removing the row a "
+        "SurfacePickup names as its SOURCE was measured to destroy that solve for the "
+        "thickness cell and for coordinate-break Par1-Par5, OpticStudio 2025 R1; on "
+        "any other cell or solve family the reference is reported as a FACT and the "
+        "consequence is measured per call, never predicted. Set "
+        "refuse_on_solve_refs=true to "
+        "refuse such a removal instead, before anything is mutated. Limitation: this "
+        "reports solve references only, from this call only -- not merit-function, "
+        "tolerance or multi-configuration surface references, and the shrink path "
+        "inside apply_lens_spec does not report them at all."
     ),
 )
 

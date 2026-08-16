@@ -25,6 +25,7 @@ import math
 
 from ..enums import _resolve_enum
 from . import _layout_geometry as _geom
+from . import _solve_cells as _sc
 
 
 def semi_solve_type_name(system, lde, i):
@@ -39,13 +40,18 @@ def semi_solve_type_name(system, lde, i):
     a fake clearance system may not expose ``.LDE`` identically; ``freeze`` passes ``system.LDE``
     too. The SHARED solve-type read consumed by BOTH ``freeze_semi._unfreeze_impl`` (the Delta-1
     pre/post gate) and ``clearance._read_rows`` (the Delta-2 frozen flag) — ONE primitive so the
-    two readouts can never drift (L30). The ``SurfaceColumn`` enum is resolved via the freeze
-    module's fake-injectable resolver (a function-local import to avoid the freeze->clearance
-    import cycle).
+    two readouts can never drift. The ``SurfaceColumn`` enum is resolved via
+    ``_solve_cells.surface_column_enum`` — the SAME fake-injectable resolver
+    (``system._enum_types["SurfaceColumn"]``) ``freeze_semi`` delegates to, so the two callers
+    cannot resolve the column differently either. The import is MODULE-level: the substrate
+    imports no tool module (asserted by a test that the substrate imports neither
+    ``freeze_semi`` nor ``lens_surface``),
+    so there is no cycle to break. It binds the MODULE, never the function — a from-import
+    would bind at import time and a test monkeypatching the substrate would stop being seen
+    here, which is the same reason ``freeze_semi``'s own resolvers are call-through defs.
     """
-    from .freeze_semi import _surface_column_enum  # fake-injectable; local to break the cycle
     try:
-        col = _resolve_enum(_surface_column_enum(system), "SemiDiameter")
+        col = _resolve_enum(_sc.surface_column_enum(system), "SemiDiameter")
         cell = lde.GetSurfaceAt(i).GetSurfaceCell(col)
         return str(cell.GetSolveData().Type)
     except Exception:  # noqa: BLE001 — a degraded solve read -> None (fail-open / fail-closed)
