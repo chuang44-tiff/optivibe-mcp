@@ -45,32 +45,69 @@ inherited from every cell read in this family (a known limit).
 ------------------------------------------------------------------------------------
 WHY THIS MODULE IS AS LARGE AS IT IS
 ------------------------------------------------------------------------------------
-The measurement is **246** ``ast.stmt``, and the size is deliberate rather than
+The measurement is **258** ``ast.stmt``, and the size is deliberate rather than
 incidental. The table below is EXCLUSIVE (every function in exactly one bucket) and
 EXHAUSTIVE (the buckets sum to the module total):
 
-* **121 — the scan and its readers.** ``_scan_cells`` 33, ``cb_par_refs`` 18,
-  ``scan_removal`` 16, ``_hit`` 11, ``_ref_outcome`` 9, ``geometry_refs`` 7,
+* **124 — the scan and its readers.** ``_scan_cells`` 33, ``cb_par_refs`` 20,
+  ``scan_removal`` 17, ``_hit`` 11, ``_ref_outcome`` 9, ``geometry_refs`` 7,
   ``_verdict`` 6, ``_par_fields`` 6, ``_geometry_fields`` 5, ``_field`` 4, ``_cause`` 4,
-  ``_gap`` 2. The bulk is the fault taxonomy, enumerated line by line — per cell, five
-  distinct geometry gap reasons and five Par ones (cell unreadable / solve type unreadable
-  / fields unmeasured / view unresolvable / ref field unreadable / not an exact integer /
-  out of range / par table unmeasured / par solve type unmeasured / surface type
-  unrenderable). Every distinct reason costs an ``if`` plus an ``append`` plus a
-  ``continue``. Collapsing them is the ABSENT-vs-UNREADABLE merge the taxonomy exists to
-  prevent, so they were not collapsed.
-* **39 — the wire contract** (the per-entry shape, the three-state partition, the
-  per-value wire rules): ``_block`` 13, ``disclosure`` 13, ``_entry`` 7,
+  ``_gap`` 2. The bulk is the fault taxonomy, enumerated line by line.
+
+  THE NUMBER OF DISTINCT GAP REASONS IS NOT WRITTEN HERE, AND THAT IS THE THIRD ANSWER TO
+  A QUESTION THAT GOT THE FIRST TWO WRONG. The original wording ("five … and five" = 10)
+  was already incomplete by four when it was written, and went arithmetically FALSE the
+  moment one reason moved off the fault channel. The replacement asserted "**measured by
+  AST**: 13" — which was a HAND COUNT wearing the word "measured", off by one, in the
+  paragraph explaining why hand counts rot. Both were caught by a later review pass, not
+  by a reader. So the number now lives in a test that re-derives it from the AST on every
+  run; a stale literal cannot survive there.
+
+  WHAT THE EXTRACTION COVERS, since the two wrong answers disagreed about the BOUNDARY and
+  not only the total: the ``reason`` argument of every ``_gap()`` call plus the two field
+  readers that return one indirectly. ``pickup column unreadable`` is deliberately OUTSIDE
+  it — it is a DEGRADATION recorded on a hit entry, not a gap, and a taxonomy that mixes
+  the two is the ABSENT-vs-UNREADABLE merge one level up. "par table not audited" is
+  outside it too: it left this taxonomy when the coverage channel was added and travels on
+  the third return slot as a COVERAGE record. Every distinct reason costs an ``if`` plus an
+  ``append`` plus a ``continue``. Collapsing them is the ABSENT-vs-UNREADABLE merge the
+  taxonomy exists to prevent, so they were not collapsed.
+* **42 — the wire contract** (the per-entry shape, the three-state partition, the
+  per-value wire rules): ``_block`` 16, ``disclosure`` 13, ``_entry`` 7,
   ``_wire_num`` 2, ``_plain`` 2, ``_established`` 2.
 * **29 — the confirm** (both halves, ``type_after`` AND the re-read ``ref_after``, plus
   the ORDERED TOTAL four-row consequence partition):
   ``_confirm_one`` 12, ``confirm_after`` 11, ``_consequence`` 6.
-* **40 — the refusal prose** and its ordered three-tier ``(table, solve_type)`` routing:
-  ``refusal_message`` 26, ``_remedy`` 10, ``_replay`` 4.
-* **17 — module-level**: the docstring, four imports, the two frozen vocabularies and the
-  nine constants the wire and the prose share.
+* **45 — the refusal prose** and its ordered three-tier ``(table, solve_type)`` routing:
+  ``refusal_message`` 31, ``_remedy`` 10, ``_replay`` 4.
+* **18 — module-level**: the docstring, four imports, the three frozen vocabularies and
+  the nine constants the wire and the prose share.
 
-121 + 39 + 29 + 40 + 17 = **246**.
+124 + 42 + 29 + 45 + 18 = **258**.
+
+THE LAST THREE CHANGES MOVED IT 246 -> 250 -> 255 -> 258, AND EACH WAS REVIEWED BEFORE IT
+WAS MADE: (+4) the policy channel; (+5) the refusal channel; (+3) the positive allow-list.
+The first two are recorded below with what they bought; the third is recorded at
+``_UNAUDITED_PAR_TYPES``.
+
+THE POLICY CHANNEL (+4). The non-CB/non-Standard branch reported a POLICY exclusion
+through the FAULT channel, so one asphere row made ``none_affected`` unreachable and
+``refuse_on_solve_refs`` refuse every removal on an advertised design class. The +4 is the
+third return slot (``scan_removal``'s accumulator, **+1**) and its wire key (``_block``,
+**+3**); the arms' five widened returns and the record's reuse of ``_gap`` cost **0**, and
+the prose is free. The alternatives were refused on CORRECTNESS: a fourth ``VERDICTS``
+token cannot exist (the tuple unpack at the vocabulary is a 3-way), and suppressing the
+record — the shape the ``_PAR_DEFAULTS`` sibling used — would certify an unaudited table
+clean on a premise that is UNMEASURED for these surface types.
+
+THE REFUSAL CHANNEL (+5). ``refusal_message`` never read the new channel, so a design
+carrying BOTH a hit and an unaudited table produced a refusal naming neither — and a
+refused caller has no wire block to fall back on. That is the class this module had
+already closed once (*"IT CARRIES THE HITS AND THE UNKNOWNS"*) reappearing one channel
+over, and the sibling was created by the policy-channel fix itself. The +5 is one
+accumulator step in the shape the other four already use. The alternative — document that
+it deliberately does not — was refused: it would record a defect rather than close one.
+Bucket ``refusal`` 40 -> 45.
 
 WHAT THE GUARDS BOUGHT. Nearly every statement added to this module after its first
 working version closes one instance of a single class — a fault arriving AFTER a fact was
@@ -83,7 +120,9 @@ established, converting that fact into ignorance:
   entire finding.
 * ``geometry_refs`` and ``cb_par_refs``: the per-arm guard that makes each docstring's
   "NEVER raises" DECIDED rather than claimed, returning the accumulated hits rather than
-  ``([], [])``, which would certify a clean audit of cells nobody read.
+  ``([], [])``, which would certify a clean audit of cells nobody read. The guard first
+  covered ``_scan_cells`` and not the non-CB branch above it, so a second ``Type`` read
+  that could not RENDER still raised out of a function documented NEVER to.
 * ``_confirm_one``: the reference read in its OWN ``try``, so a wedge on the second
   ``GetSolveData()`` stops discarding a SUCCESSFUL type read.
 * ``confirm_after``: the per-ENTRY guard, so one malformed entry cannot discard the
@@ -102,11 +141,20 @@ established, converting that fact into ignorance:
 * ``_cause``: ONE guarded exception render for BOTH never-raise handlers that had an
   unguarded ``%r``, written once rather than twice, per the standing veto on a duplicated
   fault contract.
+* ``_remedy``: the geometry-pickup tier NAMED ``set_solve`` and then withheld three of the
+  four values ``set_solve`` takes, though ``column``, ``scale_factor`` and ``offset`` were
+  already in the hit dict. They are rendered now, inside their OWN ``try``, because
+  rendering a hostile parameter in the same expression as ``where`` would let a decorative
+  field destroy an established identity.
 * ``refusal_message``: the hits AND the unknowns together, plus the per-hit remedy loop —
   one undescribable hit inside a ``join`` generator used to drop every hit — with each
-  piece appended by its own step, so "one erases the other" is not constructible.
+  piece appended by its own step, so "one erases the other" is not constructible. The
+  steps read no other step's output; the count step got NO handler, because its input is a
+  list this function built and a handler that cannot be reached cannot be falsified.
 * ``_REPLAY_NULL`` / ``_replay``: a pickup parameter this scan could not put a number on
-  is rendered as an instruction rather than as a value the re-author door would reject.
+  is rendered as an instruction rather than as a value the re-author door would reject —
+  ``set_solve`` REJECTS a non-finite offset, so a remedy printing ``Offset=None`` named a
+  door the caller could not walk through.
 
 NONE of it is new capability, and none of it is padding: each is the difference between a
 report that discloses what it knows and one that throws it away. Every PRIVATE helper is
@@ -178,6 +226,38 @@ _PICKUP = "SurfacePickup"
 #: ``Automatic`` Par cell therefore still GAPS, and stays a measurement to make.
 _PAR_DEFAULTS = frozenset({"Fixed", "None", "Variable"})
 
+
+#: Surface types whose Par table this package RECOGNISES and does not audit. A POSITIVE
+#: ALLOW-LIST, and the polarity is the whole point.
+#:
+#: A REVIEW PASS PROVED THE DENYLIST FAILED OPEN, in two ways with one root.
+#: The first cut sent EVERY non-CB, non-Standard type to the coverage channel, so the
+#: branch could not tell "a type we chose not to audit" from "a coordinate break we failed
+#: to recognise" or "a Type read that FAILED" -- and both of those now reached a channel
+#: that does not alarm. Measured: a CB row whose Type renders ``"Coordinate Break"``
+#: (spaced) misses ``is_coordinate_break``'s substring test, falls through with TWO LIVE
+#: Par pickups naming the row being removed, and reads ``none_affected`` with strict mode
+#: proceeding. And ``_field(row, "Type")`` defaults to ``None`` on a throw, which renders
+#: as the string ``"None"`` -- a read FAULT wearing a coverage note.
+#:
+#: Under the allow-list both land in the ``else``: unrecognised -> GAP -> ``could_not_scan``
+#: -> strict refuses. An unrecognised token costs a false refusal; an unrecognised token
+#: waved through costs a destroyed relationship reported as clean. Only the first is
+#: recoverable, and the ABSENT-vs-UNREADABLE rule governs the direction.
+#:
+#: NOT TRANSCRIBED -- ``test_the_unaudited_par_types_are_DERIVED_from_the_authoring_modules``
+#: rebuilds this set from ``_asphere_cells.ASPHERE_TYPE_INFO`` and
+#: ``_grin_cells.GRIN_TYPE_INFO`` and asserts equality, so a family this package learns to
+#: author cannot silently stay outside it. The derivation lives in the test because this
+#: module is at its declared ceiling and a comprehension here would cost statements the
+#: test can spend for free.
+_UNAUDITED_PAR_TYPES = frozenset({
+    "EvenAspheric", "EvenAsphere", "OddAsphere", "ExtendedAsphere", "ExtendedOddAsphere",
+    "Gradient1", "Gradient2", "Gradient3", "Gradient4", "Gradient5", "Gradient6",
+    "Gradient7", "Gradient9", "Gradient10", "Gradient12",
+    "DiffractionGrating",
+})
+
 #: ``unscanned`` is capped; ``unscanned_count`` reports the TRUE total, never this length.
 _UNSCANNED_CAP = 20
 
@@ -215,7 +295,12 @@ SCOPE = (
     "(catalog-driven: pickup and the five index-field solve types) plus coordinate-break "
     "parameter cells, current configuration only. Solves ON the removed row are not "
     "reported. NOT audited: merit-function, tolerance and multi-configuration surface "
-    "references; asphere/grating/GRIN parameter cells. Consequence is measured per entry "
+    "references; asphere/grating/GRIN parameter cells -- those surfaces are named in "
+    "par_refs_not_audited, which is a COVERAGE statement and not a fault; a surface "
+    "whose type could not be read or recognised is a FAULT and appears in unscanned "
+    "instead. Strict mode (refuse_on_solve_refs) refuses on the fault, NOT on the "
+    "coverage record. "
+    "Consequence is measured per entry "
     "(type_after plus the re-read reference); the deletion hazard is measured for "
     "SurfacePickup on the thickness cell and on coordinate-break Par1-Par5. A "
     "GEOMETRY-cell pickup entry carries what set_solve needs to re-author it; a "
@@ -435,7 +520,11 @@ def _par_fields(_name, solve_type):
 
 
 def geometry_refs(system, lde, surface, at, n):
-    """The five-cell CATALOG-DRIVEN arm for one surface. ``(hits, gaps)``. NEVER raises.
+    """The five-cell CATALOG-DRIVEN arm for one surface. ``(hits, gaps, not_audited)``.
+
+    NEVER raises. The third slot is always empty here: this arm's catalog covers all five
+    geometry cells, so it has no by-policy exclusion to report. It exists so both arms
+    share ONE shape and ``scan_removal``'s loop cannot special-case them apart.
 
     ``n`` IS A PARAMETER RATHER THAN A PER-SURFACE RE-READ. The range gate takes the
     surface count "from the count already in hand", i.e. the one ``scan_removal`` read
@@ -450,7 +539,7 @@ def geometry_refs(system, lde, surface, at, n):
                     _geometry_fields)
     except Exception:  # noqa: BLE001 — the docstring's NEVER-RAISES, DECIDED not claimed
         gaps.append(_gap(surface, None, _GEOMETRY, "geometry scan faulted"))
-    return hits, gaps
+    return hits, gaps, []
 
 
 def cb_par_refs(system, lde, surface, at, n):
@@ -461,10 +550,38 @@ def cb_par_refs(system, lde, surface, at, n):
     'String'")``), so an ungated sweep would put EVERY Standard row in
     ``gaps`` and flip the verdict of a clean 8-surface system to ``could_not_scan``.
 
-    THE STANDARD / NON-STANDARD SPLIT HAS NO THIRD OPTION, and it inherits
-    ``emit_solves_block``'s polarity exactly: CB -> scanned; Standard -> nothing to scan
-    and nothing to disclose; anything else (asphere / grating / GRIN / unreadable) -> a
-    GAP, never a pass.
+    THE SPLIT HAS THREE OUTCOMES, NOT TWO, AND THE THIRD IS A POLICY RECORD — NOT A GAP.
+    CB -> scanned; Standard -> nothing to scan and nothing to disclose; anything else
+    (asphere / grating / GRIN) -> ``not_audited``; unreadable/unrenderable -> a GAP.
+
+    THE PARAGRAPH THIS REPLACES WAS FALSE IN BOTH DIRECTIONS AND SHIPPED THAT WAY. It
+    claimed the split "has no third option" and "inherits ``emit_solves_block``'s polarity
+    exactly". Neither held: ``emit_solves_block`` does not gap at all — it emits a
+    fail-OPEN boolean ``par_cell_solves_not_audited`` (a DIFFERENT key from this door's
+    ``par_refs_not_audited`` — see ``_block``) — and its
+    ``_FULLY_COVERED_TYPE_TOKENS`` is ``{"Standard"}``, so it discloses for a CB row too.
+    The polarity is Standard-only-clean, not CB-scanned/Standard-clean. A sentence that
+    names another module's behaviour is a claim about THAT module and has to be re-derived
+    from it, never carried across by analogy.
+
+    WHY THE POLICY RECORD LEFT THE GAP CHANNEL (a defect reproduced and measured
+    live before it was believed). A gap makes ``_verdict`` return ``could_not_scan``, so ONE
+    asphere row — an ordinary case this package ships tools to author — made
+    ``none_affected`` STRUCTURALLY UNREACHABLE and ``refuse_on_solve_refs=true`` refuse
+    EVERY removal on that design, with no override. Measured on the same Cooke triplet:
+    all-Standard -> ``none_affected``, strict removal succeeds; one ``EvenAspheric`` ->
+    ``could_not_scan``, strict removal refuses. It also inverted this module's own
+    taxonomy at the top level: ``could_not_scan`` means WE TRIED AND COULD NOT READ, and
+    "this package has no Par catalog for this surface type" is a POLICY statement about
+    coverage — the ABSENT-vs-UNREADABLE distinction.
+
+    IT IS NOT SUPPRESSED, AND THAT IS THE WHOLE POINT. The sibling fix at ``_PAR_DEFAULTS``
+    made a ``Variable`` Par cell clean OUTRIGHT, licensed by a live measurement that such a
+    view exposes no index field and so STRUCTURALLY cannot name a surface. No equivalent
+    measurement exists for an asphere/grating/GRIN Par table — whether one can carry a
+    pickup at all is UNMEASURED — so ruling it clean would be the inference-as-measurement
+    error ``_PAR_DEFAULTS``'s own comment forbids. The table is still not audited; the
+    caller is now TOLD so on a channel that does not claim a fault.
 
     ALL SIX PAR CELLS ARE SWEPT, Par6/``order`` included. Reading its solve type is
     benign — a default read is suppressed at zero wire cost and a throw is a gap — and
@@ -475,7 +592,7 @@ def cb_par_refs(system, lde, surface, at, n):
         row = lde.GetSurfaceAt(surface)
         is_cb = _cb.is_coordinate_break(row)
     except Exception:  # noqa: BLE001 — is_coordinate_break RAISES on a Type read throw
-        return [], [_gap(surface, None, _CB_PAR, "surface type unreadable")]
+        return [], [_gap(surface, None, _CB_PAR, "surface type unreadable")], []
     if not is_cb:
         # THE NON-CB BRANCH IS INSIDE A GUARD TOO — the second half of the partial-state
         # finding. An earlier fix guarded ``_scan_cells`` and left this
@@ -486,17 +603,29 @@ def cb_par_refs(system, lde, surface, at, n):
         try:
             kind = "%s" % (_field(row, "Type"),)
         except Exception:  # noqa: BLE001 — an unrenderable Type is a GAP, never a raise
-            return [], [_gap(surface, None, _CB_PAR, "surface type unrenderable")]
+            return [], [_gap(surface, None, _CB_PAR, "surface type unrenderable")], []
         if kind == "Standard":
-            return [], []
-        return [], [_gap(surface, None, _CB_PAR, "par table unmeasured (%s)" % (kind,))]
+            return [], [], []
+        if kind not in _UNAUDITED_PAR_TYPES:
+            # UNRECOGNISED -> FAULT, never coverage. See _UNAUDITED_PAR_TYPES: this is the
+            # arm that catches a mis-detected coordinate break and a Type read that failed,
+            # both of which the first cut waved through as a coverage note.
+            return [], [_gap(surface, None, _CB_PAR,
+                             "surface type not recognised (%s)" % (kind,))], []
+        # SLOT 3, NOT ``gaps`` -- see the docstring. The RECORD SHAPE is deliberately
+        # ``_gap``'s: same four keys, so the wire-safety assert, the ``_plain`` projection
+        # and every renderer keep working unchanged, and the only thing that moved is
+        # WHICH channel it travels on. Reusing it also costs zero statements against a
+        # module at its ceiling.
+        return [], [], [_gap(surface, None, _CB_PAR,
+                             "par table not audited for surface type %s" % (kind,))]
     hits, gaps = [], []
     try:
         _scan_cells(hits, gaps, surface, at, n, _CB_PAR, _cb._PARAM_NAMES,
                     lambda param: _cb._cb_cell(system, row, param), _par_fields)
     except Exception:  # noqa: BLE001 — the docstring's NEVER-RAISES, DECIDED not claimed
         gaps.append(_gap(surface, None, _CB_PAR, "par scan faulted"))
-    return hits, gaps
+    return hits, gaps, []
 
 
 # THE VERDICT, DERIVED ONCE, FOR **BOTH** OF ``scan_removal``'S RETURNS — the other half
@@ -545,7 +674,14 @@ def scan_removal(system, lde, at):
         {"verdict": <one of VERDICTS>,
          "hits":    [{surface, surface_after, cell, table, solve_type, ref_field, source,
                       column, scale_factor, offset}, ...],
-         "gaps":    [{surface|None, cell|None, table, reason}, ...]}
+         "gaps":    [{surface|None, cell|None, table, reason}, ...],
+         "not_audited": [{surface, cell|None, table, reason}, ...]}
+
+    ``not_audited`` IS NOT A FAULT AND ``_verdict`` DOES NOT CONSUME IT. It carries the
+    surfaces whose Par table this package has no catalog for (asphere / grating / GRIN),
+    which is a statement about COVERAGE, not about a failed read. It shares ``_gap``'s
+    four keys so every renderer and the wire-safety assert keep working unchanged; the
+    channel, not the shape, is what distinguishes it.
 
     ``verdict`` is ``"affected"`` whenever ``hits`` is non-empty EVEN IF ``gaps`` is
     non-empty — AFFECTED DOMINATES, because a token that understated a known hit because
@@ -588,7 +724,7 @@ def scan_removal(system, lde, at):
     added later" is a property of the current call graph, not of this function; the
     sibling above is what it cost to learn that the second time.
     """
-    hits, gaps = [], []
+    hits, gaps, unaudited = [], [], []
     try:
         n = int(lde.NumberOfSurfaces)
         if n < 2:
@@ -597,13 +733,16 @@ def scan_removal(system, lde, at):
             if surface == at:
                 continue
             for arm in (geometry_refs, cb_par_refs):
-                arm_hits, arm_gaps = arm(system, lde, surface, at, n)
+                arm_hits, arm_gaps, arm_na = arm(system, lde, surface, at, n)
                 hits.extend(arm_hits)
                 gaps.extend(arm_gaps)
+                unaudited.extend(arm_na)
     except Exception as exc:  # noqa: BLE001 — a total scan failure is a VERDICT, not a raise
         return {"verdict": _verdict(hits, gaps, False), "hits": hits, "gaps": gaps,
+                "not_audited": unaudited,
                 "reason": "the pre-mutation scan could not run (%s)" % (_cause(exc),)}
-    return {"verdict": _verdict(hits, gaps, True), "hits": hits, "gaps": gaps}
+    return {"verdict": _verdict(hits, gaps, True), "hits": hits, "gaps": gaps,
+            "not_audited": unaudited}
 
 
 # Re-read ONE hit's cell at its POST-remove index. ``(type_after, ref_after)``.
@@ -733,6 +872,10 @@ def _entry(hit, confirmed):
 #   hits empty     | no gaps   -> "none_affected"   affected ABSENT, unscanned ABSENT
 #   hits empty     | gaps      -> "could_not_scan"  affected ABSENT, unscanned + reason
 #
+# ``par_refs_not_audited`` is ORTHOGONAL to all three rows and may appear beside
+# any of them: it records coverage, not a finding, so it neither creates a state nor is
+# excluded by one. It is absent when empty, like ``affected`` and unlike a falsy ``[]``.
+#
 # ``reason`` IS EMITTED WHENEVER THE SCAN CARRIES ONE, NOT ONLY IN THE ``could_not_scan``
 # STATE. This is the THIRD site of that same class and it was found by asking what
 # the ``_verdict`` fix PERMITS rather than by a report: once a scan that FAULTED can
@@ -751,12 +894,33 @@ def _entry(hit, confirmed):
 # reached by a truthiness test at all — and no prose may promote absence past that.
 def _block(scan, confirmed):
     hits, gaps = scan["hits"], scan["gaps"]
+    # ``.get``, not ``[...]``: a caller may hand ``_block`` a scan dict built before this
+    # key existed (more than one producer is planned), and a KeyError here would
+    # convert a disclosure gap into a wire failure.
+    unaudited = scan.get("not_audited") or []
     block = {"state": scan["verdict"], "scope": SCOPE}
     if hits:
         block["affected"] = [_entry(h, confirmed) for h in hits]
     if gaps:
         block["unscanned"] = gaps[:_UNSCANNED_CAP]
         block["unscanned_count"] = len(gaps)
+    if unaudited:
+        # A DISTINCT NAME FROM THE READ DOOR'S ``par_cell_solves_not_audited``, and the
+        # first cut got this wrong. It reused that spelling, arguing "an agent meets one
+        # concept under one name" -- but they are not one concept, and two review
+        # passes said so independently. The read door asks "was this surface's Par SOLVE
+        # STATE inspected?"; this door asks "was this surface's Par table SEARCHED FOR
+        # REFERENCES to the row being removed?". Measured on one system, the two make
+        # OPPOSITE claims under the shared name for a coordinate break: the read door says
+        # not-audited (True) while this door DID audit it and emits nothing. A shared name
+        # whose two emitters disagree about the same surface is worse than two names.
+        # Same defect as the docstring three functions up: a sentence about another
+        # module's behaviour, carried across by analogy instead of re-derived.
+        #
+        # The SHAPE follows the door -- a list, because ``affected`` and ``unscanned`` are
+        # lists and this scan is system-scope. NOT capped: it is bounded by the surface
+        # count, unlike a fault channel a wedged engine could flood.
+        block["par_refs_not_audited"] = unaudited
     if scan["verdict"] == _COULD_NOT_SCAN:
         block["reason"] = scan.get("reason") or (
             "the pre-mutation scan could not read %d cell(s); nothing can be concluded "
@@ -1012,7 +1176,7 @@ def refusal_message(at, scan):
     derived from a list THIS function built, so it needs no handler at all and does not get
     a decorative one (an unfalsifiable guard reads as INERT).
     """
-    parts, told, hits, gaps = [], [], [], []
+    parts, told, hits, gaps, unaudited = [], [], [], [], []
     # STEP 1 — the hits. A fault here costs the hits, and says so.
     try:
         hits = list(scan["hits"] or ())
@@ -1043,6 +1207,23 @@ def refusal_message(at, scan):
     # all -- an understatement in exactly the direction this tool exists to avoid.
     if gaps:
         told.append("%d cell(s) could not be scanned" % (len(gaps),))
+    # STEP 5 — THE COVERAGE RECORDS, ADDED ONE REVIEW AFTER THE CHANNEL ITSELF.
+    # A REFUSED CALLER HAS NO WIRE BLOCK TO FALL BACK ON — this string is the whole of
+    # what they get — so omitting the channel meant the one caller who explicitly asked
+    # for unknowns to be surfaced was the only caller told nothing about the unaudited
+    # tables. That is the class this function's own docstring says it closed ("IT CARRIES
+    # THE HITS **AND** THE UNKNOWNS, NEVER ONE INSTEAD OF THE OTHER"), reappearing one
+    # channel over the moment a third channel existed.
+    #
+    # ITS OWN STEP, reading no other step's output, exactly like steps 1-3: a fault here
+    # costs this clause and cannot unwind one already appended.
+    try:
+        unaudited = list(scan.get("not_audited") or ())
+    except Exception:  # noqa: BLE001
+        told.append("the not-audited records could not be read from the scan")
+    if unaudited:
+        told.append("%d surface(s) carry a parameter table this package does not audit, "
+                    "so whether THEY reference the row is not known" % (len(unaudited),))
     # Every element was appended as a rendered ``str``, so the join cannot raise either.
     unknown = "; ".join(told) or None
     for hit in hits:

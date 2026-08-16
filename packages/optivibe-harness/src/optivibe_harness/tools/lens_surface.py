@@ -503,6 +503,25 @@ def remove_surface(session, params):
     only the OPT-IN strict mode has to decide it — and there refusing is correct,
     because a caller who passed the flag asked for UNKNOWN to be treated as alarm.
 
+    AND SINCE 0.1.6 STRICT MODE NO LONGER ALARMS ON *EVERY* UNKNOWN. THIS IS A REAL
+    WEAKENING OF THE SENTENCE ABOVE, AND IT IS STATED RATHER THAN LEFT TO BE DISCOVERED.
+    A surface whose parameter table this package does not audit (asphere / GRIN /
+    grating) is now a COVERAGE record — ``par_refs_not_audited`` — and does not make the
+    verdict ``could_not_scan``, so ``refuse_on_solve_refs=true`` PROCEEDS on it. A fault
+    (a type that could not be read, or one this package does not recognise) still lands
+    in ``unscanned`` and still refuses.
+
+    WHY THE TRADE WAS TAKEN (a review finding; a deliberate ruling). Before it, ONE
+    asphere row — an ordinary case this package ships tools to author — made
+    ``none_affected`` structurally unreachable, so strict mode refused EVERY removal on
+    that design with no override. Measured live: all-Standard reached ``none_affected``
+    and removed; the same design with one ``EvenAspheric`` refused. A flag that cannot be
+    satisfied on a whole design class is not a safety posture, it is an outage. The cost
+    is that a caller who wanted alarm-on-any-unknown no longer gets it for this ONE
+    category, and the richer signal — a strictness level that alarms on coverage too — is
+    ticketed rather than improvised. What must NOT happen is this paragraph quietly
+    disappearing: the served description carries the same statement, and both are pinned.
+
     THE ORDER OF THE FIRST FIVE STEPS IS LOAD-BEARING:
 
     * the flag read is the FIRST executable statement, so a malformed flag costs ZERO
@@ -781,7 +800,12 @@ REMOVE_SURFACE_SPEC = ToolSpec(
         "any other cell or solve family the reference is reported as a FACT and the "
         "consequence is measured per call, never predicted. Set "
         "refuse_on_solve_refs=true to "
-        "refuse such a removal instead, before anything is mutated. Limitation: this "
+        "refuse such a removal instead, before anything is mutated. A surface whose "
+        "parameter table this package does not audit (asphere, GRIN, grating) is named "
+        "in 'par_refs_not_audited' -- a COVERAGE statement, not a fault, so it does not "
+        "make the state could_not_scan and refuse_on_solve_refs=true does NOT refuse on "
+        "it; a surface whose type could not be READ or recognised is a fault and lands "
+        "in 'unscanned', which does refuse. Limitation: this "
         "reports solve references only, from this call only -- not merit-function, "
         "tolerance or multi-configuration surface references, and the shrink path "
         "inside apply_lens_spec does not report them at all."

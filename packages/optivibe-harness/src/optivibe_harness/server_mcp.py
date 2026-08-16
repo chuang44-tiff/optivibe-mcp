@@ -319,9 +319,14 @@ HARNESS_INSTRUCTIONS = (
     "- \"None\" is a REAL solve type meaning 'no solve' — a positive finding, never a\n"
     "  failed read. It is suppressed like a default, so you will not normally see it\n"
     "  under `solves`; if you do, it is not driving and the cell is writable.\n"
-    "- `par_cell_solves_not_audited` = this surface carries parameter cells outside\n"
-    "  those five and they were NOT inspected (it derives from an independent type\n"
-    "  read, so it can disagree with the row's own type on a degraded read).\n"
+    "- `par_cell_solves_not_audited` (read_surface / describe_surfaces; per surface, a\n"
+    "  boolean) = this surface carries parameter cells outside those five and their\n"
+    "  SOLVE STATE was NOT inspected (it derives from an independent type read, so it\n"
+    "  can disagree with the row's own type on a degraded read). Do NOT confuse it with\n"
+    "  remove_surface's `par_refs_not_audited`, which is a LIST and answers a different\n"
+    "  question: was that table searched for REFERENCES to the row being removed. For a\n"
+    "  coordinate break the two legitimately disagree — the read door says not-audited,\n"
+    "  the remove door DID audit it.\n"
     "  `mce_overrides_not_audited` = multi-configuration system, only the CURRENT\n"
     "  configuration was read.\n"
     "- Material writes flow through substitute_glass and are NOT covered by the solve\n"
@@ -695,7 +700,7 @@ _BASE_INSTRUCTION_TOOL_NAMES = frozenset({
     # SAME change as the prose (a mandatory obligation). Without the curated
     # entries the runtime absent-tool sweep is "a no-op for exactly the tools it
     # guards"; without the prose the sweep would excise the naming lines. Both ship, or
-    # neither does — the bidirectional g1 row decides it.
+    # neither does — the bidirectional curated-vs-prose pin decides it.
     "set_solve",
     "clear_solve",
     "set_asphere_variable",
