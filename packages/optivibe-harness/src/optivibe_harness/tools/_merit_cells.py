@@ -315,15 +315,16 @@ class ParamCoercionError(ValueError):
 
 #: The reason vocabulary of the TWO shared numeric resolvers below.
 #:
-#: **ONE token set, consumed by BOTH the range DOOR (``_optimize_common``) and the
-#: WRITER (``coerce_param_value``, below) — that is 's whole content.** The
-#: two sides answer the same question ("is this an integral surface index, and what
-#: exactly is it?") and used to answer it with two bodies; a shared reason token is what
-#: lets ONE classification feed TWO different error channels without either side
-#: re-deriving the other's rule (the door maps it to ``None`` / a verdict code, the
-#: writer to a ``ParamCoercionError``). explicitly REJECTS merging them into
-#: one unbounded acceptor — the *magnitude policy* stays with each caller — so what is
-#: shared is the CLASSIFICATION and nothing else (its option (b)).
+#: **ONE token set, so that a range/authoring DOOR and the WRITER (``coerce_param_value``,
+#: below) can share one CLASSIFICATION — that sharing is the whole point of the governing
+#: ticket.** The two sides answer the same question ("is this an integral
+#: surface index, and what exactly is it?") and used to answer it with two bodies; a
+#: shared reason token is what lets ONE classification feed TWO different error channels
+#: without either side re-deriving the other's rule (a door maps it to ``None`` / a
+#: verdict code, the writer to a ``ParamCoercionError``). Merging them into one unbounded
+#: acceptor was explicitly REJECTED — the *magnitude policy* stays with
+#: each caller — so what is shared is the CLASSIFICATION and nothing else (the ticket's
+#: option (b)).
 NUMERIC_OK = "ok"
 #: Not a number at all: a ``bool`` (an ``int`` subclass, and a client bug), a ``str``,
 #: ``None``, a list — anything that is not an ``int``/``float`` instance.
@@ -379,18 +380,20 @@ def _same_number(a, b):
 def resolve_integral(value):
     """``(int, NUMERIC_OK)`` iff ``value`` is an integral index; else ``(None, reason)``.
 
-    **THE ONE BODY behind "is this an integral surface index?".** Both the
-    authoring DOOR (``_optimize_common._range_cell_int`` / ``check_authoring_range``) and
-    the WRITER (``coerce_param_value``'s ``int`` arm) call THIS — they do not each
-    implement it. The pair had already drifted once, and the consequence was a
-    ``{"Surf1": 2**53 + 1, "Surf2": 3}`` DESCENDING range authored under ``ok: true``:
-    the door deferred to a writer refusal that never came, because the magnitude guard
+    **THE ONE BODY behind "is this an integral surface index?".** The WRITER
+    (``coerce_param_value``'s ``int`` arm, below) calls THIS rather than implementing the
+    rule, and any range/authoring door built over this module is required to do the same:
+    the question gets ONE body, not one per caller. That is a RULE this file states, not a
+    guarantee it can enforce — nothing here can see its callers, so a door that keeps its
+    own copy breaks it silently, and one already did. The consequence was a
+    ``{"Surf1": 2**53 + 1, "Surf2": 3}`` DESCENDING range authored under ``ok: true``: the
+    door deferred to a writer refusal that never came, because the magnitude guard
     lived in the ``double`` arm only. The two bodies were brought back into agreement at
     an earlier round and nothing pinned the agreement, which is the drift surface this closes.
 
     **NEVER raises.** Every branch that can run user code is inside the outer catch, and
     an unclassifiable value is reported as ``NUMERIC_CONVERSION_FAILED`` — fail-CLOSED
-    for both callers (the door resolves ``None`` and refuses/defers; the writer raises
+    for every caller (a door resolves ``None`` and refuses/defers; the writer raises
     ``ParamCoercionError``).
 
     An ``int`` resolves **EXACTLY at any magnitude** and that is deliberate, not an
@@ -402,7 +405,7 @@ def resolve_integral(value):
     store — and it stays with the writer; this function does not answer it.
 
     ``int(first)`` / ``int(value)`` and never ``value``: this STRIPS an ``int`` SUBCLASS,
-    so a hostile ``__le__`` / ``__eq__`` cannot reach the door's ``0 <= surf1 <= surf2``
+    so a hostile ``__le__`` / ``__eq__`` cannot reach a range door's ``0 <= surf1 <= surf2``
     comparison or a refusal message's ``.format()``.
 
     **THE STABILITY PROBE, and why it exists.** MEASURED on this
@@ -411,7 +414,7 @@ def resolve_integral(value):
     adjacent calls. The door judged conversion #1 (2, admitted) and the writer performed
     conversion #2 (9, authored) — cells ``[9, 3]``, DESCENDING and out of domain, with
     ``ok: True`` and no disclosure. So a value whose conversion does not REPEAT is
-    refused here, by the one body both sides consume.
+    refused here, in the one body rather than at any caller.
 
     **The probe reads the OVERRIDE and does not bypass it, and that distinction is
     load-bearing.** Reading ``int.__int__(value)`` to get the underlying value was
@@ -423,7 +426,7 @@ def resolve_integral(value):
 
     ``type(value) is int`` SKIPS the probe. That is not an optimisation for its own sake:
     an exact ``int`` has NO user code on its conversion path, so the second call cannot
-    differ, and the door reads live cells (exact marshalled numbers) on its hot path.
+    differ, and a range door reads live cells (exact marshalled numbers) on its hot path.
 
     **What this does NOT establish, stated rather than implied.** The probe converts
     TWICE. An adversary whose conversion is constant for the first *k* calls and differs
@@ -444,7 +447,7 @@ def resolve_integral(value):
         # rather than from the underlying value: MEASURED, ``int(float_subclass)`` does
         # NOT dispatch to ``__float__`` while ``float(float_subclass)`` does, so the two
         # can disagree. Deriving both the ordering decision and the integer from ONE
-        # conversion is what makes the door and the writer agree by construction.
+        # conversion is what makes a door and the writer agree by construction.
         first = float(value)
         if type(value) is not float and not _same_number(float(value), first):
             return None, NUMERIC_UNSTABLE
@@ -488,10 +491,11 @@ def resolve_double(value):
     a subclass, which is why it is applied to the already-converted ``first`` and never
     to ``value``.
 
-    The magnitude policy is NOT shared with ``resolve_integral`` and that is deliberate
-   : an ``int`` resolves exactly at any magnitude as an INDEX, while as a
-    DOUBLE it must survive a float round-trip or the read-back firewall compares against
-    an already-rounded value and passes while emitting numerically-different data.
+    The magnitude policy is NOT shared with ``resolve_integral``, and that split is
+    deliberate: an ``int`` resolves exactly at any magnitude as an INDEX,
+    while as a DOUBLE it must survive a float round-trip or the read-back firewall
+    compares against an already-rounded value and passes while emitting
+    numerically-different data.
     """
     try:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -539,16 +543,17 @@ def coerce_param_value(header, kind, value):
     cell). Raises ``ParamCoercionError`` on any mismatch (caller -> ``merit_param``).
 
     **This function no longer implements either numeric rule — it CONSUMES
-    ``resolve_integral`` / ``resolve_double`` and maps their reason to a message
-   .** The range door consumes the SAME two bodies, so the two sides cannot
-    drift; what lives here is the ERROR CHANNEL (a ``ParamCoercionError`` naming the
-    cell), which is the one thing only this function knows how to write.
+    ``resolve_integral`` / ``resolve_double`` and maps their reason to a message.** A
+    range door consuming the same two bodies is what keeps the two sides from drifting,
+    and honouring that is the DOOR's obligation — not something this function can
+    establish from here. What lives here is the ERROR CHANNEL (a ``ParamCoercionError``
+    naming the cell), which is the one thing only this function knows how to write.
 
-    **It raises ``ParamCoercionError`` and NOTHING ELSE for any input** — 's
-    ``OverflowError`` at ``10**400`` is now the ``NUMERIC_UNREPRESENTABLE`` refusal
-    below. The one residual raise is a hostile ``__repr__`` on a value interpolated into
-    a message; the two NEW arms therefore name the value's TYPE rather than its ``repr``,
-    and the pre-existing arms keep their ``{value!r}`` byte-identical.
+    **It raises ``ParamCoercionError`` and NOTHING ELSE, with ONE named escape** — the
+    ``OverflowError`` at ``10**400`` is now the ``NUMERIC_UNREPRESENTABLE``
+    refusal below. The one residual raise is a hostile ``__repr__`` on a value
+    interpolated into a message; the two NEW arms therefore name the value's TYPE rather
+    than its ``repr``, and the pre-existing arms keep their ``{value!r}`` byte-identical.
     """
     if isinstance(value, bool):
         raise ParamCoercionError(
@@ -877,8 +882,8 @@ __all__ = [
     "_VALUELESS_CONTROL_OPERANDS",
     "write_verified_cell",
     "coerce_param_value",
-    # The ONE body per numeric question, consumed by the range door as well as by
-    # ``coerce_param_value``. Exported because ``_optimize_common`` is a
+    # The ONE body per numeric question, consumed by ``coerce_param_value``
+    # in this module. Exported because a range/authoring door in this package would be a
     # legitimate consumer, not because anything outside this package should call them.
     "resolve_integral",
     "resolve_double",

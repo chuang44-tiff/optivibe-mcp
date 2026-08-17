@@ -1227,7 +1227,8 @@ def _replay(hit, name):
     coupling decision, so it is deferred rather than taken here.
 
     **``column`` IS THE THIRD SIBLING, AND THE FIX LANDED ON TWO OF THREE (0.1.7 internal
-    , finding 4 — the SIXTH instance of this class in this lineage).** ``_remedy``
+    review, finding 4 — the SIXTH instance of this class in this
+    lineage).** ``_remedy``
     applied this helper to ``scale_factor`` and ``offset`` and printed ``hit.get("column")``
     RAW, so a null column rendered ``Column=None`` and ``set_solve`` REJECTS it:
     *"Column takes a SurfaceColumn member name or a cell token; got None"*

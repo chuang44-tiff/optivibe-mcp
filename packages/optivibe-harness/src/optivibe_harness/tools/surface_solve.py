@@ -753,13 +753,13 @@ def _capture(cell, row, token, surface, door="set_solve"):
     if value is None and prior_type in ("Fixed", "Variable"):
         # THE MESSAGE SAYS "reads as null", NOT "could not be read", AND THE DIFFERENCE IS
         # A FACT ABOUT THE ENGINE. This arm keys on `value is None`, not on
-        # `not value_readable` — the tag is unpacked one line up and this arm ignores it —
-        # so it fires on a SUCCESSFUL read that returned null as much as on a failed one.
-        # `_read_value_tagged`'s own docstring names that as legitimate on this seam ("a
-        # material cell can read empty"), and the material path is where it is reachable:
-        # `set_solve(cell="material")` calls `_capture` unconditionally and an un-solved
-        # material cell arrives with `prior_type == "Fixed"`. The old wording asserted a
-        # read FAULT the harness had not observed (0.1.6 external review).
+        # `not value_readable` — the tag is unpacked immediately above and this arm ignores
+        # it — so it fires on a SUCCESSFUL read that returned null as much as on a failed
+        # one, and the message must not assert a read FAULT the harness has not observed
+        # (0.1.6 external review). The material path was the standing candidate, and the
+        # route measured under it is FALSIFIED: an air surface's `Material` reads the empty
+        # STRING, so `value is None` is False and this arm does not fire (measured live,
+        # with a glass control proving the read was clean).
         #
         # WHAT THE REVIEW GOT WRONG, recorded so it is not "fixed" back: it also reported
         # this message as pointing the caller at `solves_unreadable`. It does not, and it
@@ -770,8 +770,8 @@ def _capture(cell, row, token, surface, door="set_solve"):
         # legitimate-empty case as "(a material cell on an air surface)". This tree's
         # MEASURED convention is that air material reads `""` — an EMPTY STRING, not null —
         # so the parenthetical names a reading nothing here has observed, and it is worse
-        # than idle: the deferral three lines below says in terms that no probe or fixture
-        # in this tree has `Material` returning null and that it must be measured first,
+        # than idle: the deferral below says in terms that a null route must be MEASURED
+        # first, and `Material` on an air surface has since been measured NOT to be one,
         # while the SERVED text was answering that question with an example. A concrete
         # instance SOFTENS an alarm — an agent reading it concludes "ah, the ordinary air
         # case" and stops looking. The honest half ("either way there is no token to
@@ -780,8 +780,8 @@ def _capture(cell, row, token, surface, door="set_solve"):
         # STILL REFUSES, and the direction is deliberate: a non-driving solve OWNS its
         # number, so a null gives the transaction nothing to restore. Whether a legitimate
         # null should be PERMITTED here rather than refused is a behaviour question that
-        # needs a live measurement of `Material` returning null — no probe or fixture in
-        # this tree has one — and is ticketed rather than guessed at.
+        # needs a live measurement of SOME cell reading null first — the route measured for
+        # `Material` on an air surface read the empty string, not null.
         raise SurfaceWriteError(
             "the '%s' cell of surface %s carries a non-driving %s solve whose VALUE "
             "reads as null — a non-driving solve OWNS its number, so a null one is an "
@@ -925,19 +925,25 @@ def attach_partial_state(exc, err):
     CONSEQUENCE FOR THE OTHER CALLER — AND THE FIRST WORDING OF THIS PARAGRAPH WAS FALSE,
     WHICH IS WHY THE CORRECTION IS RECORDED RATHER THAN THE CONCLUSION. It claimed
     ``cb_surface``'s abort arm "NOW chains the finding too ... stated because it is a real
-    change". It was not a change: at HEAD that arm ALREADY wrote ``exc.__context__ = err``
-    in its own guarded ``try``, three lines below its ``attach_partial_state`` call. Nothing
-    about the diagnostic it emits moved. What the MOVE actually does is make this helper the
-    SINGLE OWNER of the write, which makes the call-site copy REDUNDANT — and the paragraph
-    above names that copy as "the drifting-sibling shape this module keeps paying for", so
-    the copy was deleted as the coherent completion of the move, not as an incidental tidy.
+    change". It was not a change: that arm was already writing ``exc.__context__ = err``
+    in its own guarded ``try``, before the move. Nothing about the diagnostic it emits
+    moved. What the MOVE does is put the write ATTEMPT in ONE place: every caller gets
+    it from this helper, so a call-site copy of it is a COPY — the drifting-sibling
+    shape named above — and not a second channel for any state this helper can reach.
 
-    WHAT THE DELETION LOSES, stated so nobody restores it by accident: the call site's
-    independent retry could fire in exactly ONE state this helper cannot reach — a
-    ``BaseException`` whose ``__setattr__`` raises for ``PARTIAL_STATE_ATTR`` and SUCCEEDS
-    for ``__context__``, i.e. one that discriminates BY ATTRIBUTE NAME. That is unmeasured
-    and contrived; the shared guard is one ``try`` for both writes, so on that object both
-    breadcrumbs are now dropped together and the abort still travels unchanged.
+    WHETHER ANY CALLER STILL KEEPS ITS OWN ``__context__`` RETRY IS THAT CALLER'S QUESTION,
+    AND THIS DOCSTRING DOES NOT ANSWER IT ON PURPOSE: a sentence here about what another
+    module currently contains goes stale the first time that module is edited, silently,
+    because nothing checks it. What IS stable is the DIFFERENCE such a retry makes, stated
+    so nobody adds or drops one by accident — there ARE states this helper cannot
+    reach, and here is one: a ``BaseException`` whose ``__setattr__`` raises for
+    ``PARTIAL_STATE_ATTR`` and SUCCEEDS for ``__context__``. Discriminating BY
+    ATTRIBUTE NAME is one way to build such an object; a ``__setattr__`` that fails
+    only on its FIRST call is another. The guard here is one ``try`` for both writes,
+    so on such an object it drops both breadcrumbs together and the abort still
+    travels unchanged; an independent retry at a call site would land the second one.
+    Such objects are contrived — constructed for this paragraph, not taken from any
+    measurement.
     """
     try:
         setattr(exc, PARTIAL_STATE_ATTR, err)
