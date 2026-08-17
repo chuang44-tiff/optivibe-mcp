@@ -234,27 +234,84 @@ _PAR_DEFAULTS = frozenset({"Fixed", "None", "Variable"})
 #: The first cut sent EVERY non-CB, non-Standard type to the coverage channel, so the
 #: branch could not tell "a type we chose not to audit" from "a coordinate break we failed
 #: to recognise" or "a Type read that FAILED" -- and both of those now reached a channel
-#: that does not alarm. Measured: a CB row whose Type renders ``"Coordinate Break"``
-#: (spaced) misses ``is_coordinate_break``'s substring test, falls through with TWO LIVE
-#: Par pickups naming the row being removed, and reads ``none_affected`` with strict mode
-#: proceeding. And ``_field(row, "Type")`` defaults to ``None`` on a throw, which renders
-#: as the string ``"None"`` -- a read FAULT wearing a coverage note.
+#: that does not alarm. The spaced-render instance below is CORRECTED; the fail-open
+#: ARGUMENT it illustrates is unaffected, because the third instance is real and
+#: unmeasured. And ``_field(row, "Type")`` defaults to ``None`` on a throw, which renders
+#: as the string ``"None"`` -- a read FAULT wearing a coverage note. That one is still
+#: UNMEASURED: no reproduction recipe exists, and the 0.1.7 live gate did not manufacture
+#: one.
+#:
+#: CORRECTED BY LIVE MEASUREMENT -- the sentence that stood here claimed, as
+#: MEASURED, that "a CB row whose Type renders ``"Coordinate Break"`` (spaced) misses
+#: ``is_coordinate_break``'s substring test". **That is FALSE on OpticStudio 2025 R1.**
+#: The 0.1.7 live gate captured both provenances for all 17 recognised types plus two
+#: controls: ``"%s" % row.Type`` renders the UNSPACED enum member (``'CoordinateBreak'``,
+#: ``'EvenAspheric'``, ``'Gradient2'``) and ``row.TypeName`` renders the SPACED display
+#: string (``'Coordinate Break'``, ``'Even Asphere'``, ``'Gradient 2'``). The spaced string
+#: is real -- but it lives on ``TypeName``, which NO production seam reads. This module
+#: reads ``_field(row, "Type")``, so ``is_coordinate_break``'s substring test PASSES and
+#: every one of the 17 tokens matches the allow-list exactly.
+#: THE ORIGIN, identified during the same Completion Sync and worth recording because the
+#: mechanism is reusable: an earlier gotcha captures a CB retype under the key
+#: ``type_name_after``, whose VALUE is correct but whose NAME reads as though it were
+#: ``row.Type``. It is not -- the solve-inventory probe reads ``str(row.TypeName)``.
+#: So a correct measurement OF ``TypeName`` was later read as a measurement of ``Type``,
+#: and the false claim descends from a capture KEY NAME, not from a bad reading. It is
+#: corrected rather than deleted because a reader who meets the spaced string on
+#: ``TypeName`` needs to know it was investigated and which seam it is not on.
+#: (Also measured, and it sharpens the standing refusal to normalize: ``Gradium`` renders
+#: ``TypeName`` = ``'GRADIUM'`` -- ALL-CAPS and UNSPACED. Space-stripping alone would not
+#: even recover it, so the rejected remedy is worse than it was priced.)
 #:
 #: Under the allow-list both land in the ``else``: unrecognised -> GAP -> ``could_not_scan``
 #: -> strict refuses. An unrecognised token costs a false refusal; an unrecognised token
 #: waved through costs a destroyed relationship reported as clean. Only the first is
 #: recoverable, and the ABSENT-vs-UNREADABLE rule governs the direction.
 #:
-#: NOT TRANSCRIBED -- ``test_the_unaudited_par_types_are_DERIVED_from_the_authoring_modules``
-#: rebuilds this set from ``_asphere_cells.ASPHERE_TYPE_INFO`` and
-#: ``_grin_cells.GRIN_TYPE_INFO`` and asserts equality, so a family this package learns to
-#: author cannot silently stay outside it. The derivation lives in the test because this
-#: module is at its declared ceiling and a comprehension here would cost statements the
-#: test can spend for free.
+#: DERIVED AGAINST THE **RECOGNITION** SETS, NOT THE AUTHORING ONES, AND THAT DISTINCTION IS
+#: THE WHOLE GUARD. ``test_the_unaudited_par_types_are_DERIVED_from_the_authoring_modules``
+#: rebuilds this set from ``_asphere_cells.ASPHERE_TYPE_INFO``,
+#: ``_grin_cells.GRIN_FAMILY_TYPE_TOKENS`` and the grating token. The derivation lives in the
+#: test because this module is at its declared ceiling and a comprehension here would cost
+#: statements the test can spend for free.
+#:
+#: THE EARLIER WORDING HERE WAS FALSE IN BOTH HALVES, and the 0.1.6 external review found
+#: what that bought. It claimed the test "asserts equality" (it asserts a SUBSET) and that it
+#: derives from ``GRIN_TYPE_INFO`` -- the **authorable** GRIN types, of which there are TWO,
+#: against TWELVE the package RECOGNISES. But this branch classifies a type READ BACK off a
+#: loaded design, never one we authored, so the authorable set is the wrong universe by
+#: construction: ten of the twelve recognised tokens are not authorable, eight of them had
+#: been hand-added here, and ``Gradium`` / ``GridGradient`` were simply missed. A subset
+#: assertion over a 7-member universe could not see it -- the set stayed green at 16 members
+#: while a design carrying either token hit the ``else`` arm, reported a FAULT, and refused
+#: every strict removal. That is the M1 outage reproduced on a type we recognise, and it is
+#: precisely the "transcription that quietly falls behind" the test's own docstring promises
+#: to prevent. Recognition is what must drive this set; authorability is a narrower thing.
+#: ``EvenAsphere`` IS GONE (0.1.6 review), AND THE DIRECTION ARGUMENT RESOLVES THE
+#: OPPOSITE WAY TO HOW IT WAS FIRST FRAMED. It was carried here as a "spelling variant that
+#: guards an enum-rendering difference between engine versions" -- a rationale with no
+#: measurement anywhere behind it. What ``_asphere_cells`` ACTUALLY records about that token
+#: (lines 22-23, 216, 327) is the opposite kind of fact: it is the AUTHORING-side misspelling
+#: trap, and ``getattr(SurfaceType, "EvenAsphere")`` RAISES. No engine, no version, no
+#: capture in this tree has ever rendered it on a READ-BACK, which is the only side this set
+#: classifies.
+#:
+#: An unmeasured member of an ALLOW-LIST is a WAIVER, and this list's own doctrine six
+#: paragraphs up decides which direction a waiver may fail in: "an unrecognised token costs
+#: a false refusal; one WAVED THROUGH costs a destroyed relationship reported as clean. Only
+#: the first is recoverable." Keeping the token buys the recoverable failure ONLY if the
+#: token never appears; if any engine ever did render it, the row lands in COVERAGE, the
+#: verdict stays clean, and ``refuse_on_solve_refs=true`` PROCEEDS over an unaudited Par
+#: table. That is the fail-OPEN half, bought against a hazard nobody measured.
+#:
+#: Deleting it rather than rewording it is what makes the equality assertions in
+#: ``test_adv_solve_refs_ia_r1`` and ``release/public-authored/``
+#: LOUD: with the token gone and any exemption left behind, both fail. If a real
+#: rendering difference is ever MEASURED, it comes back with the capture beside it.
 _UNAUDITED_PAR_TYPES = frozenset({
-    "EvenAspheric", "EvenAsphere", "OddAsphere", "ExtendedAsphere", "ExtendedOddAsphere",
+    "EvenAspheric", "OddAsphere", "ExtendedAsphere", "ExtendedOddAsphere",
     "Gradient1", "Gradient2", "Gradient3", "Gradient4", "Gradient5", "Gradient6",
-    "Gradient7", "Gradient9", "Gradient10", "Gradient12",
+    "Gradient7", "Gradient9", "Gradient10", "Gradient12", "Gradium", "GridGradient",
     "DiffractionGrating",
 })
 
@@ -290,13 +347,41 @@ _UNREADABLE = object()
 #: reference TRACKING across an insert/remove of ANOTHER row, where Par2/Par4/Par5 remain
 #: genuinely inferred. Two claims, two measurements, two ranges; a sweep that unified them
 #: would launder an inference into a measurement (a test pins them apart).
+#:
+#: THE COVERAGE CLAUSE NAMES **BOTH** KEYS, AND THE SECOND HALF WAS MISSING (0.1.6 PR
+#: review). ``SCOPE`` ships on EVERY envelope -- the degraded one included -- and the
+#: clause said flatly that those surfaces "are named in ``par_refs_not_audited``". On the
+#: degraded path that key is STRUCTURALLY ABSENT: ``_block`` never ran, and F-I's fix
+#: publishes the same records under
+#: ``established_before_the_failure.not_audited_identities`` instead. So the string was
+#: directing a caller to read a key that cannot be there, on the one path where the removal
+#: has already happened and the records are the caller's last handle.
+#:
+#: The amendment is ADDITIVE -- a parenthetical, no clause removed, no wording reflowed --
+#: because the pins on this string are of two kinds and both must survive: substring
+#: assertions on individual clauses, and identity assertions (``block["scope"] is/==
+#: SCOPE``) that only care that one object ships everywhere. Rewriting the sentence would
+#: have risked the first for no gain. ``test_the_scope_string_states_the_three_tier_re_author_truth``
+#: pins the new key by substring, so deleting the parenthetical reddens rather than
+#: silently restoring the dangling reference.
+#:
+#: THE OTHER TWO SERVED SURFACES ARE DELIBERATELY LEFT ALONE, and the distinction is what
+#: bounds this fix. ``lens_surface``'s ``remove_surface`` description and
+#: ``server_mcp``'s instructions also name ``par_refs_not_audited``, and they are CORRECT
+#: as written: they describe the PRIMARY contract to an agent choosing a tool, and neither
+#: is CO-SHIPPED with a degraded envelope -- so neither can point a caller at an absent key
+#: in the moment they need it. Only ``SCOPE`` travels inside the block that lost the key.
+#: Sweeping all three would have widened a boundary case into the headline description of
+#: a door that almost never takes that path.
 SCOPE = (
     "solve references FROM SURVIVING ROWS to the removed row, on the five geometry cells "
     "(catalog-driven: pickup and the five index-field solve types) plus coordinate-break "
     "parameter cells, current configuration only. Solves ON the removed row are not "
     "reported. NOT audited: merit-function, tolerance and multi-configuration surface "
     "references; asphere/grating/GRIN parameter cells -- those surfaces are named in "
-    "par_refs_not_audited, which is a COVERAGE statement and not a fault; a surface "
+    "par_refs_not_audited (or, when the disclosure could not be built, under "
+    "established_before_the_failure.not_audited_identities), which is a COVERAGE "
+    "statement and not a fault; a surface "
     "whose type could not be read or recognised is a FAULT and appears in unscanned "
     "instead. Strict mode (refuse_on_solve_refs) refuses on the fault, NOT on the "
     "coverage record. "
@@ -969,7 +1054,29 @@ def _established(scan):
                 [{"surface": _plain(g.get("surface")), "cell": _plain(g.get("cell")),
                   "table": _plain(g.get("table")), "reason": _plain(g.get("reason"))}
                  for g in scan["gaps"][:_UNSCANNED_CAP]],
-            "unscanned_count": _plain(len(scan["gaps"]))}
+            "unscanned_count": _plain(len(scan["gaps"])),
+            # THE COVERAGE RECORDS TRAVEL THE DEGRADED PATH TOO. Omitting them here was the
+            # same discard this projection exists to prevent, one channel over: `SCOPE`
+            # ships its coverage clause on EVERY envelope including this one, so a caller
+            # was being told to read a key that is structurally absent whenever the block
+            # fails to build. And this path runs POST-mutation, where re-scanning is
+            # impossible — it is the worst place to drop a fact already in hand, not the
+            # most acceptable one.
+            #
+            # THE QUOTE THIS COMMENT USED TO CARRY IS NOW STALE, AND THAT IS THE POINT
+            # (0.1.6 review). It justified this list by quoting `SCOPE` as saying
+            # "those surfaces are named in ``par_refs_not_audited``" — which is exactly the
+            # half-truth the fix left behind: the records moved here, and the served
+            # sentence went on naming only the key they moved OFF. `SCOPE` now names BOTH
+            # (see its own comment), so this justification is paraphrased rather than
+            # quoted — a comment that quotes a string it does not own drifts the moment
+            # that string is corrected, which is what happened here.
+            # Capped and counted like `unscanned`, so a truncation here cannot be silent.
+            "not_audited_identities":
+                [{"surface": _plain(u.get("surface")), "cell": _plain(u.get("cell")),
+                  "table": _plain(u.get("table")), "reason": _plain(u.get("reason"))}
+                 for u in (scan.get("not_audited") or [])[:_UNSCANNED_CAP]],
+            "not_audited_count": _plain(len(scan.get("not_audited") or []))}
 
 
 def disclosure(scan, confirmed):
@@ -1010,7 +1117,13 @@ def disclosure(scan, confirmed):
         try:
             established = _established(scan)
             _sc.assert_wire_safe(established)
-            if established["affected_identities"] or established["unscanned_identities"]:
+            # THE THIRD DISJUNCT IS LOAD-BEARING, and its absence was a SECOND, independent
+            # loss: a scan whose only finding was a coverage record built the projection,
+            # certified it wire-safe, and then threw it away because the other two lists
+            # were empty — leaving state + scope + reason alone. That is precisely the M1
+            # design (one asphere, nothing else) meeting a post-mutation wire failure.
+            if (established["affected_identities"] or established["unscanned_identities"]
+                    or established["not_audited_identities"]):
                 block[_ESTABLISHED] = established
         except Exception:  # noqa: BLE001 — the projection may not raise out of here either
             pass
@@ -1076,6 +1189,9 @@ def _replay(hit, name):
     ``set_solve`` needs. That fix then printed them verbatim -- and on a ``radius`` /
     ``conic`` / ``semi_diameter`` pickup that prints ``Offset=None``, which ``set_solve``
     REJECTS: *"Offset must be a finite number; got None"* (``surface_solve``'s
+    guard in the raw-field validator, ~:1596 -- ANCHORED ON THE MESSAGE, because the earlier
+    citation here read ``:1200-1204`` and had rotted onto unrelated float-precision prose).
+    Handing a
     finite-number guard). Handing a caller a value the door refuses is the same defect as
     handing them nothing, one field over -- and it was invisible to that fix's test, which
     used a ``thickness`` pickup, the ONE cell where ``Offset`` is supported and finite.
@@ -1109,6 +1225,31 @@ def _replay(hit, name):
     Distinguishing them properly needs the ``_MEASURED`` ``Supports*`` capability flags,
     which are deliberately PRIVATE to the substrate. That is a real improvement and a real
     coupling decision, so it is deferred rather than taken here.
+
+    **``column`` IS THE THIRD SIBLING, AND THE FIX LANDED ON TWO OF THREE (0.1.7 internal
+    review, finding 4 — the SIXTH instance of this class in this
+    lineage).** ``_remedy``
+    applied this helper to ``scale_factor`` and ``offset`` and printed ``hit.get("column")``
+    RAW, so a null column rendered ``Column=None`` and ``set_solve`` REJECTS it:
+    *"Column takes a SurfaceColumn member name or a cell token; got None"*
+    (``surface_solve.py``'s *"Column takes a SurfaceColumn member name or a cell token"*
+    guard, ~:1562 -- the earlier ``:1541-1543`` citation had rotted). Reachable on the
+    ``pickup column unrenderable``
+    provenance, which is PRE-EXISTING and not something the 0.1.7 pickup work introduced.
+    ``test_r5_replay_is_used_for_every_pickup_parameter_that_can_be_null`` was GREEN with
+    the defect present because its universe was the two fields it happened to know about —
+    an enumeration where the claim was universal. It now derives that universe, and an AST
+    row forbids a raw ``hit.get(...)`` of ANY nullable pickup parameter inside this render.
+
+    **KNOWN RESIDUAL, stated because a caller ACTS on this text.** ``_REPLAY_NULL`` is
+    worded for the two NUMERIC parameters: its *"refuses a non-finite one, and 0.0 is its
+    documented no-op"* clause is not advice a ``Column`` caller can follow — ``Column``
+    takes a member NAME, and there is no zero-equivalent. Both halves that DO apply are
+    still correct for it (the value is not available from this scan, and substituting a
+    guess re-authors a different relationship), and serving a numeric-flavoured phrase is
+    strictly better than serving a value the door rejects. A column-specific phrase costs a
+    module-level constant (+1 statement) against a ceiling pinned by EQUALITY at 258, so
+    it is DISCLOSED here rather than trimmed in, and ticketed.
     """
     value = hit.get(name)
     return _REPLAY_NULL if value is None else value
@@ -1124,7 +1265,7 @@ def _remedy(hit):
                       "set_solve parameters are Column=%s, ScaleFactor=%s, Offset=%s, and "
                       "its Surface reference is the row being removed, so a surviving row "
                       "must be named in its place)"
-                      % (hit.get("surface_after"), hit.get("column"),
+                      % (hit.get("surface_after"), _replay(hit, "column"),
                          _replay(hit, "scale_factor"),
                          _replay(hit, "offset")))
         except Exception:  # noqa: BLE001 — a parameter may cost the PARAMETERS, not the hit
