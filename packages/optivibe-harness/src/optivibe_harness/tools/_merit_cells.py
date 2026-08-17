@@ -313,6 +313,209 @@ class ParamCoercionError(ValueError):
     """
 
 
+#: The reason vocabulary of the TWO shared numeric resolvers below.
+#:
+#: **ONE token set, consumed by BOTH the range DOOR (``_optimize_common``) and the
+#: WRITER (``coerce_param_value``, below) — that is 's whole content.** The
+#: two sides answer the same question ("is this an integral surface index, and what
+#: exactly is it?") and used to answer it with two bodies; a shared reason token is what
+#: lets ONE classification feed TWO different error channels without either side
+#: re-deriving the other's rule (the door maps it to ``None`` / a verdict code, the
+#: writer to a ``ParamCoercionError``). explicitly REJECTS merging them into
+#: one unbounded acceptor — the *magnitude policy* stays with each caller — so what is
+#: shared is the CLASSIFICATION and nothing else (its option (b)).
+NUMERIC_OK = "ok"
+#: Not a number at all: a ``bool`` (an ``int`` subclass, and a client bug), a ``str``,
+#: ``None``, a list — anything that is not an ``int``/``float`` instance.
+NUMERIC_NOT_A_NUMBER = "not_a_number"
+#: **The conversion DID NOT REPEAT**. Converting the value twice in a row
+#: produced two different numbers, so the number this resolver would report is not the
+#: number a LATER conversion will produce. Only reachable for an ``int``/``float``
+#: SUBCLASS, because only a subclass can put user code (``__int__`` / ``__float__``) on
+#: the conversion path — see the resolvers' own notes for the measurement.
+NUMERIC_UNSTABLE = "unstable"
+#: A number, but not a whole one (``2.5``) — or a non-finite, which is not integral
+#: either. ``resolve_integral`` only.
+NUMERIC_NOT_INTEGRAL = "not_integral"
+#: ``inf`` / ``-inf`` / ``nan`` — a non-physical merit target. ``resolve_double`` only.
+NUMERIC_NOT_FINITE = "not_finite"
+#: **``float(value)`` could not convert the value AT ALL**: an ``int`` whose
+#: magnitude exceeds the float range (``10**400``) raises ``OverflowError``.
+#: ``resolve_double`` only.
+NUMERIC_UNREPRESENTABLE = "unrepresentable"
+#: ``float(value)`` converted but LOST exactness (the case, ``2**53 + 1``). DISTINCT
+#: from ``NUMERIC_UNREPRESENTABLE`` on purpose: two different diagnoses with two
+#: different messages, and acceptance item 3 forbids collapsing them.
+#: ``resolve_double`` only.
+NUMERIC_INEXACT_INT = "inexact_int"
+#: The conversion RAISED something other than the overflow above — a hostile
+#: ``__int__``/``__float__``, a ``__float__`` returning a non-float (``TypeError``), a
+#: metaclass making ``isinstance`` raise. Reported rather than propagated so both
+#: resolvers can promise NEVER to raise.
+NUMERIC_CONVERSION_FAILED = "conversion_failed"
+
+
+def _same_number(a, b):
+    """Are two ALREADY-CONVERTED readings the same number, treating ``nan`` as equal?
+
+    **``==`` is the wrong operator here and the bug it causes is a false accusation.**
+    ``nan != nan`` is True by IEEE, so a plain ``a != b`` stability test reports EVERY
+    ``nan``-carrying value as "the conversion did not repeat" — which is both wrong (the
+    conversion repeated perfectly; it repeated ``nan``) and diagnostically worse than the
+    truth, since the honest answer for that value is *non-finite*, an arm that already
+    exists with its own message. Found by this cycle's own re-pointed adversarial row: a
+    ``float`` subclass carrying ``nan`` took the UNSTABLE arm instead of the non-finite
+    one.
+
+    Both arguments are outputs of ``int()``/``float()`` on the same object, so they are
+    exact builtins — no user code runs in this comparison.
+    """
+    if a == b:
+        return True
+    return isinstance(a, float) and isinstance(b, float) \
+        and math.isnan(a) and math.isnan(b)
+
+
+def resolve_integral(value):
+    """``(int, NUMERIC_OK)`` iff ``value`` is an integral index; else ``(None, reason)``.
+
+    **THE ONE BODY behind "is this an integral surface index?".** Both the
+    authoring DOOR (``_optimize_common._range_cell_int`` / ``check_authoring_range``) and
+    the WRITER (``coerce_param_value``'s ``int`` arm) call THIS — they do not each
+    implement it. The pair had already drifted once, and the consequence was a
+    ``{"Surf1": 2**53 + 1, "Surf2": 3}`` DESCENDING range authored under ``ok: true``:
+    the door deferred to a writer refusal that never came, because the magnitude guard
+    lived in the ``double`` arm only. The two bodies were brought back into agreement at
+    an earlier round and nothing pinned the agreement, which is the drift surface this closes.
+
+    **NEVER raises.** Every branch that can run user code is inside the outer catch, and
+    an unclassifiable value is reported as ``NUMERIC_CONVERSION_FAILED`` — fail-CLOSED
+    for both callers (the door resolves ``None`` and refuses/defers; the writer raises
+    ``ParamCoercionError``).
+
+    An ``int`` resolves **EXACTLY at any magnitude** and that is deliberate, not an
+    oversight: the range decision needs only ORDERING, and Python ints compare exactly
+    at any magnitude, so no ``float`` round-trip is required to make it. Routing an
+    ``int`` through ``float(value) != int(value)`` is what produced the drift above
+    (``2**53 + 1`` read as "not an index", ``10**400`` raised ``OverflowError``). The
+    WRITER's magnitude question is a different one — what an Int32 cell can actually
+    store — and it stays with the writer; this function does not answer it.
+
+    ``int(first)`` / ``int(value)`` and never ``value``: this STRIPS an ``int`` SUBCLASS,
+    so a hostile ``__le__`` / ``__eq__`` cannot reach the door's ``0 <= surf1 <= surf2``
+    comparison or a refusal message's ``.format()``.
+
+    **THE STABILITY PROBE, and why it exists.** MEASURED on this
+    interpreter: ``int(x)`` on an ``int`` SUBCLASS dispatches to ``__int__`` on EVERY
+    call, so an object returning 2 then 9 is converted to two different numbers by two
+    adjacent calls. The door judged conversion #1 (2, admitted) and the writer performed
+    conversion #2 (9, authored) — cells ``[9, 3]``, DESCENDING and out of domain, with
+    ``ok: True`` and no disclosure. So a value whose conversion does not REPEAT is
+    refused here, by the one body both sides consume.
+
+    **The probe reads the OVERRIDE and does not bypass it, and that distinction is
+    load-bearing.** Reading ``int.__int__(value)`` to get the underlying value was
+    measured to make the defect WORSE: with a subclass of value 2 whose
+    ``__int__`` returns 9 unconditionally, the shipped code judges **9** — the number the
+    writer actually authors — and refuses it on its ordering; a bypass would judge 2,
+    admit, and let ``[9, 3]`` through. The probe preserves that: a stable override is
+    still read at its override value and still refused downstream on ordering/domain.
+
+    ``type(value) is int`` SKIPS the probe. That is not an optimisation for its own sake:
+    an exact ``int`` has NO user code on its conversion path, so the second call cannot
+    differ, and the door reads live cells (exact marshalled numbers) on its hot path.
+
+    **What this does NOT establish, stated rather than implied.** The probe converts
+    TWICE. An adversary whose conversion is constant for the first *k* calls and differs
+    afterwards is NOT caught, and no finite number of probes catches one — so this
+    refuses *observably* unstable conversions, not "unstable values". An ``int`` subclass
+    with a stable override (``enum.IntEnum`` is the ordinary case, and it is MEASURED
+    stable) is unaffected.
+    """
+    try:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None, NUMERIC_NOT_A_NUMBER
+        if isinstance(value, int):
+            first = int(value)
+            if type(value) is not int and int(value) != first:
+                return None, NUMERIC_UNSTABLE
+            return first, NUMERIC_OK
+        # A float (or a float subclass). Resolve the integer FROM the probed conversion
+        # rather than from the underlying value: MEASURED, ``int(float_subclass)`` does
+        # NOT dispatch to ``__float__`` while ``float(float_subclass)`` does, so the two
+        # can disagree. Deriving both the ordering decision and the integer from ONE
+        # conversion is what makes the door and the writer agree by construction.
+        first = float(value)
+        if type(value) is not float and not _same_number(float(value), first):
+            return None, NUMERIC_UNSTABLE
+        if not math.isfinite(first) or first != int(first):
+            return None, NUMERIC_NOT_INTEGRAL
+        return int(first), NUMERIC_OK
+    except Exception:  # noqa: BLE001 — see "NEVER raises" above; fail CLOSED
+        return None, NUMERIC_CONVERSION_FAILED
+
+
+def resolve_double(value):
+    """``(float, NUMERIC_OK)`` iff ``value`` is a finite double; else ``(None, reason)``.
+
+    **THE ONE BODY behind "is this a writable double?"**, and the fix for: the
+    ORDER of its first two steps is the whole defect. The arm this replaces read
+
+        1. ``coerced = float(value)``      <- RAISES for an int ``float()`` cannot convert
+        2. ``math.isfinite(coerced)``
+        3. the guard: an int whose ``float()`` does not round-trip -> refuse
+
+    **Step 3 exists to refuse exactly this class of value and step 1 made it unreachable
+    above a magnitude.** MEASURED: ``add_operand("MNEA", params={"Zone": 10**400})``
+    raised ``OverflowError: int too large to convert to float`` out of a function whose
+    only documented failure is ``ParamCoercionError``, with ``cell WRITES attempted:
+    []``. ``2**53 + 1`` reached step 3 and was refused cleanly; ``10**400`` never got
+    there. The guard was not wrong — it was DEAD above a magnitude, and the boundary
+    between "refused cleanly" and "raises" was undocumented.
+
+    So the conversion is attempted INSIDE a guard and an overflow becomes
+    ``NUMERIC_UNREPRESENTABLE`` — a REFUSAL the caller can turn into the ``merit_param``
+    message every other bad param already earns. The two int diagnoses stay DISTINCT
+    (``NUMERIC_UNREPRESENTABLE`` = cannot convert at all; ``NUMERIC_INEXACT_INT`` = the
+    Case, converts but loses exactness), because collapsing them would trade one
+    honest message for two vaguer ones.
+
+    **NEVER raises**, and carries the same stability probe as
+    ``resolve_integral`` — with a different dunder, which is the point. MEASURED:
+    ``float(int_subclass)`` dispatches to ``__float__`` and NOT to ``__int__``, so the
+    ``double`` arm's instability vector is an independent one; a probe that only watched
+    ``__int__`` would miss it entirely. ``math.isfinite`` is itself a third conversion on
+    a subclass, which is why it is applied to the already-converted ``first`` and never
+    to ``value``.
+
+    The magnitude policy is NOT shared with ``resolve_integral`` and that is deliberate
+   : an ``int`` resolves exactly at any magnitude as an INDEX, while as a
+    DOUBLE it must survive a float round-trip or the read-back firewall compares against
+    an already-rounded value and passes while emitting numerically-different data.
+    """
+    try:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None, NUMERIC_NOT_A_NUMBER
+        try:
+            first = float(value)
+        except OverflowError:
+            # The raise the guard three lines down was written to prevent.
+            return None, NUMERIC_UNREPRESENTABLE
+        if type(value) not in (int, float) and not _same_number(float(value), first):
+            return None, NUMERIC_UNSTABLE
+        if not math.isfinite(first):
+            return None, NUMERIC_NOT_FINITE
+        # An int whose float() does NOT round-trip exactly is SILENTLY truncated,
+        # and the read-back firewall compares against the already-rounded float so it
+        # PASSES. Refuse pre-mutation so re-apply fidelity holds. Compared against the
+        # ORIGINAL int (Python compares int and float exactly, at any magnitude).
+        if isinstance(value, int) and first != value:
+            return None, NUMERIC_INEXACT_INT
+        return first, NUMERIC_OK
+    except Exception:  # noqa: BLE001 — NEVER raises; fail CLOSED
+        return None, NUMERIC_CONVERSION_FAILED
+
+
 def coerce_param_value(header, kind, value):
     """Coerce a ``params`` value to its cell ``kind`` (§3 step 4).
 
@@ -334,6 +537,18 @@ def coerce_param_value(header, kind, value):
 
     Returns the coerced value (an ``int`` for an int cell, a ``float`` for a double
     cell). Raises ``ParamCoercionError`` on any mismatch (caller -> ``merit_param``).
+
+    **This function no longer implements either numeric rule — it CONSUMES
+    ``resolve_integral`` / ``resolve_double`` and maps their reason to a message
+   .** The range door consumes the SAME two bodies, so the two sides cannot
+    drift; what lives here is the ERROR CHANNEL (a ``ParamCoercionError`` naming the
+    cell), which is the one thing only this function knows how to write.
+
+    **It raises ``ParamCoercionError`` and NOTHING ELSE for any input** — 's
+    ``OverflowError`` at ``10**400`` is now the ``NUMERIC_UNREPRESENTABLE`` refusal
+    below. The one residual raise is a hostile ``__repr__`` on a value interpolated into
+    a message; the two NEW arms therefore name the value's TYPE rather than its ``repr``,
+    and the pre-existing arms keep their ``{value!r}`` byte-identical.
     """
     if isinstance(value, bool):
         raise ParamCoercionError(
@@ -341,47 +556,89 @@ def coerce_param_value(header, kind, value):
             "a client bug (bool is an int subclass)"
         )
     if kind == "int":
-        if isinstance(value, int):
-            return int(value)
-        if isinstance(value, float) and value.is_integer():
-            return int(value)
+        coerced, reason = resolve_integral(value)
+        if reason == NUMERIC_OK:
+            return coerced
+        if reason in (NUMERIC_UNSTABLE, NUMERIC_CONVERSION_FAILED):
+            raise ParamCoercionError(_unstable_param_message(header, value, "integer"))
         raise ParamCoercionError(
             f"parameter {header!r} is an integer cell; got "
             f"{type(value).__name__} {value!r} (need an exact integer)"
         )
     if kind == "double":
-        if isinstance(value, (int, float)):
-            coerced = float(value)
-            # Reject a non-finite target PRE-mutation (inf/-inf/nan are non-physical
-            # merit targets — a client miswrite, same family as the bool-is-int trap).
-            # math.isfinite is False for inf, -inf, AND nan, so both are refused here
-            # explicitly rather than leaning on the read-back firewall's nan != nan.
-            if not math.isfinite(coerced):
-                raise ParamCoercionError(
-                    f"parameter {header!r} is a numeric cell; got the non-finite "
-                    f"value {value!r} (need a finite number — inf/-inf/nan are "
-                    "non-physical merit targets and are rejected pre-mutation)"
-                )
-            # Fix: an int whose float() does NOT round-trip exactly (a magnitude
-            # > 2^53 like 9007199254740993) is SILENTLY truncated by float(), and the
-            # read-back firewall compares against the already-rounded float so it
-            # PASSES — emitting numerically-different data. Reject it pre-mutation so
-            # re-apply fidelity holds (§3/§4). Legitimate finite floats are untouched
-            # (this guard only fires for an int input that float() cannot represent).
-            if isinstance(value, int) and float(coerced) != value:
-                raise ParamCoercionError(
-                    f"parameter {header!r} is a numeric (double) cell; the integer "
-                    f"{value!r} cannot be represented exactly as a float "
-                    f"(float({value!r}) == {coerced!r}); refusing the silent "
-                    "magnitude truncation that would break re-apply fidelity"
-                )
+        coerced, reason = resolve_double(value)
+        if reason == NUMERIC_OK:
             return coerced
+        if reason in (NUMERIC_UNSTABLE, NUMERIC_CONVERSION_FAILED):
+            raise ParamCoercionError(_unstable_param_message(header, value, "numeric"))
+        if reason == NUMERIC_UNREPRESENTABLE:
+            #. The magnitude is named by its DIGIT COUNT, not by dumping 401
+            # digits into an error string — and not via ``{value!r}``, which a hostile
+            # ``__repr__`` can make raise out of a function that promises to raise only
+            # ``ParamCoercionError``.
+            raise ParamCoercionError(
+                f"parameter {header!r} is a numeric (double) cell; the supplied "
+                f"{type(value).__name__} is too large to represent as a float at all "
+                f"({_magnitude_hint(value)}), so it cannot be written — refusing it "
+                "here rather than raising past the parameter firewall"
+            )
+        if reason == NUMERIC_NOT_FINITE:
+            # A non-finite target is a client miswrite in the same class as the
+            # bool-is-int trap: inf/-inf/nan are non-physical merit targets and are
+            # rejected PRE-mutation rather than leaning on the read-back firewall's
+            # ``nan != nan`` (which would catch only nan).
+            raise ParamCoercionError(
+                f"parameter {header!r} is a numeric cell; got the non-finite "
+                f"value {value!r} (need a finite number — inf/-inf/nan are "
+                "non-physical merit targets and are rejected pre-mutation)"
+            )
+        if reason == NUMERIC_INEXACT_INT:
+            #. ``float(value)`` is re-evaluated for the message ONLY: this reason is
+            # returned solely after that conversion already SUCCEEDED, so it cannot
+            # raise here, and the text stays byte-identical to the pre-one.
+            raise ParamCoercionError(
+                f"parameter {header!r} is a numeric (double) cell; the integer "
+                f"{value!r} cannot be represented exactly as a float "
+                f"(float({value!r}) == {float(value)!r}); refusing the silent "
+                "magnitude truncation that would break re-apply fidelity"
+            )
         raise ParamCoercionError(
             f"parameter {header!r} is a numeric cell; got "
             f"{type(value).__name__} {value!r} (need a number)"
         )
     raise ParamCoercionError(
         f"parameter {header!r} maps to a non-writable {kind} cell"
+    )
+
+
+def _magnitude_hint(value):
+    """A BOUNDED description of how big a number is, for a refusal message.
+
+    Never interpolates the value itself: ``10**400`` is 401 characters of digits and a
+    hostile ``__repr__`` raises. Digit count IS the magnitude, and it is one short
+    phrase. Falls back to a bare phrase if even the length cannot be taken, so a message
+    helper can never be the thing that raises.
+    """
+    try:
+        return f"{len(str(abs(int(value))))} decimal digits; the float ceiling is ~1.8e308"
+    except Exception:  # noqa: BLE001 — a message must never raise
+        return "beyond the float range (~1.8e308)"
+
+
+def _unstable_param_message(header, value, cell_word):
+    """The refusal for a value whose numeric conversion did not REPEAT.
+
+    Names the INSTABILITY rather than the value, because the value is precisely the
+    thing that has no single answer — and because reading it is what is unsafe. Shared
+    by both arms so the two cannot describe the same hazard two ways.
+    """
+    article = "an" if cell_word.startswith(("a", "e", "i", "o", "u")) else "a"
+    return (
+        f"parameter {header!r} is {article} {cell_word} cell; the supplied "
+        f"{type(value).__name__} did not convert to a stable number (converting it "
+        "twice in a row produced two different results, or the conversion raised). "
+        "Refusing it: the value written would not be the value checked. Pass a plain "
+        f"{'int' if cell_word == 'integer' else 'int or float'}."
     )
 
 
@@ -620,6 +877,19 @@ __all__ = [
     "_VALUELESS_CONTROL_OPERANDS",
     "write_verified_cell",
     "coerce_param_value",
+    # The ONE body per numeric question, consumed by the range door as well as by
+    # ``coerce_param_value``. Exported because ``_optimize_common`` is a
+    # legitimate consumer, not because anything outside this package should call them.
+    "resolve_integral",
+    "resolve_double",
+    "NUMERIC_OK",
+    "NUMERIC_NOT_A_NUMBER",
+    "NUMERIC_UNSTABLE",
+    "NUMERIC_NOT_INTEGRAL",
+    "NUMERIC_NOT_FINITE",
+    "NUMERIC_UNREPRESENTABLE",
+    "NUMERIC_INEXACT_INT",
+    "NUMERIC_CONVERSION_FAILED",
     "apply_params",
     "CellLayoutError",
     "ParamCoercionError",

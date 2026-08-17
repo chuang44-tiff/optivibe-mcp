@@ -617,13 +617,32 @@ def _read_value_tagged(row, token):
     """``(value, readable)`` — the cell's VALUE and whether the read SUCCEEDED.
 
     THE TAG IS THE POINT. ``None`` is a legitimate reading on this seam
-    (``material`` on an air surface can read empty, a cell can genuinely hold nothing),
+    (a cell can genuinely hold nothing),
     so collapsing a FAULT to ``None`` makes "the glass is unchanged" and "the glass could
     not be read" the same wire value — and the shipped clear envelope then reported
     ``material: null`` beside ``glass_unchanged: true``, an out-of-contract success. It is
     the ABSENT-vs-UNREADABLE rule at value scale: ABSENT is not UNREADABLE, and only the
     second one is an
     alarm.
+
+    CORRECTED BY LIVE MEASUREMENT. The parenthetical above used to read
+    "``material`` on an air surface can read empty, a cell can genuinely hold nothing".
+    **The first half was FALSE, and it was load-bearing** -- it was the stated origin of
+    F-C's behavioural half (whether a legitimate null should be permitted rather than
+    refused), which the 0.1.7 deferred on the grounds that its reachability
+    "rests on a docstring, not a measurement". The 0.1.7 live gate took the measurement:
+
+        _read_value_tagged(row, 'material')  ->  (value='', readable=True)
+        type(value).__name__ == 'str'   value is None -> False   value == '' -> True
+        CONTROL (glass surface): (value='N-BK7', readable=True)
+
+    A real air surface's ``Material`` reads the empty STRING, not ``None``. Empty is not
+    null, so this seam does not demonstrate the claim it was cited for, and ``_capture``'s
+    ``value is None`` arm is NOT reachable by this route (it did not fire; the glass
+    control proves the read path was live, so ``''`` is not a degraded read).
+    The general claim is KEPT -- a cell can genuinely hold nothing, the tag is still the
+    point, and this measures ONE route (an un-solved air material cell under a ``Fixed``
+    solve). It does NOT prove no route yields ``None``.
 
     ONE literal: the row PROPERTY names and the ``SurfaceColumn`` MEMBER names
     coincide on all five geometry cells, so this consumes ``_sc.TOKEN_TO_COLUMN`` rather
@@ -732,12 +751,44 @@ def _capture(cell, row, token, surface, door="set_solve"):
             surface=surface)
     value, value_readable = _read_value_tagged(row, token)
     if value is None and prior_type in ("Fixed", "Variable"):
+        # THE MESSAGE SAYS "reads as null", NOT "could not be read", AND THE DIFFERENCE IS
+        # A FACT ABOUT THE ENGINE. This arm keys on `value is None`, not on
+        # `not value_readable` — the tag is unpacked one line up and this arm ignores it —
+        # so it fires on a SUCCESSFUL read that returned null as much as on a failed one.
+        # `_read_value_tagged`'s own docstring names that as legitimate on this seam ("a
+        # material cell can read empty"), and the material path is where it is reachable:
+        # `set_solve(cell="material")` calls `_capture` unconditionally and an un-solved
+        # material cell arrives with `prior_type == "Fixed"`. The old wording asserted a
+        # read FAULT the harness had not observed (0.1.6 external review).
+        #
+        # WHAT THE REVIEW GOT WRONG, recorded so it is not "fixed" back: it also reported
+        # this message as pointing the caller at `solves_unreadable`. It does not, and it
+        # never did — that remedy belongs to the two arms where the read genuinely FAILED
+        # (`_capture`'s unreadable-type arm and `clear_solve`'s), where it is correct.
+        #
+        # AND WHAT THE ROUND-1 REWORDING GOT WRONG, stripped in round 2. It illustrated the
+        # legitimate-empty case as "(a material cell on an air surface)". This tree's
+        # MEASURED convention is that air material reads `""` — an EMPTY STRING, not null —
+        # so the parenthetical names a reading nothing here has observed, and it is worse
+        # than idle: the deferral three lines below says in terms that no probe or fixture
+        # in this tree has `Material` returning null and that it must be measured first,
+        # while the SERVED text was answering that question with an example. A concrete
+        # instance SOFTENS an alarm — an agent reading it concludes "ah, the ordinary air
+        # case" and stops looking. The honest half ("either way there is no token to
+        # restore") is what makes the refusal actionable and it is kept verbatim.
+        #
+        # STILL REFUSES, and the direction is deliberate: a non-driving solve OWNS its
+        # number, so a null gives the transaction nothing to restore. Whether a legitimate
+        # null should be PERMITTED here rather than refused is a behaviour question that
+        # needs a live measurement of `Material` returning null — no probe or fixture in
+        # this tree has one — and is ticketed rather than guessed at.
         raise SurfaceWriteError(
             "the '%s' cell of surface %s carries a non-driving %s solve whose VALUE "
-            "could not be read — a non-driving solve OWNS its number, so an unreadable "
-            "number is an unrestorable one. Nothing was written."
+            "reads as null — a non-driving solve OWNS its number, so a null one is an "
+            "unrestorable one. This may be a legitimate empty reading rather than a read "
+            "fault; either way there is no token to restore. Nothing was written."
             % (token, surface, prior_type),
-            field=token, intended="a readable incumbent value", actual=None,
+            field=token, intended="a non-null incumbent value", actual=None,
             surface=surface)
     fields = _sc.read_solve_fields(_sc.unwrap_or_none(prior_token), token, prior_type)
     unread = sorted(n for n, (_v, state) in fields.items() if state == "mismatched")
@@ -859,9 +910,38 @@ def attach_partial_state(exc, err):
     a diagnostic breadcrumb into the thing that replaces the abort. On that path the
     family degrades to ``internal``, which is the honest answer when the signal could not
     be attached, and the abort still travels unchanged.
+
+    ``__context__`` IS A BREADCRUMB AND NOW LIVES INSIDE THE SAME GUARD. It sat one line
+    below the call in ``_restore``, UNGUARDED, on the same arbitrary ``BaseException`` —
+    so a type whose ``__setattr__`` raises was protected from the ``setattr`` above and
+    then displaced the abort on the very next statement, which is the outcome this guard
+    exists to prevent (0.1.6 external review). ``__context__`` is a C-level slot on
+    ``BaseException``, so the ``__slots__`` half of the concern does not apply to it; the
+    raising-``__setattr__`` half does, because a subclass override still intercepts it.
+    MOVED rather than separately guarded: this helper is where "attach a breadcrumb
+    without ever displacing the abort" is defined, and a second guarded copy at the call
+    site is the drifting-sibling shape this module keeps paying for.
+
+    CONSEQUENCE FOR THE OTHER CALLER — AND THE FIRST WORDING OF THIS PARAGRAPH WAS FALSE,
+    WHICH IS WHY THE CORRECTION IS RECORDED RATHER THAN THE CONCLUSION. It claimed
+    ``cb_surface``'s abort arm "NOW chains the finding too ... stated because it is a real
+    change". It was not a change: at HEAD that arm ALREADY wrote ``exc.__context__ = err``
+    in its own guarded ``try``, three lines below its ``attach_partial_state`` call. Nothing
+    about the diagnostic it emits moved. What the MOVE actually does is make this helper the
+    SINGLE OWNER of the write, which makes the call-site copy REDUNDANT — and the paragraph
+    above names that copy as "the drifting-sibling shape this module keeps paying for", so
+    the copy was deleted as the coherent completion of the move, not as an incidental tidy.
+
+    WHAT THE DELETION LOSES, stated so nobody restores it by accident: the call site's
+    independent retry could fire in exactly ONE state this helper cannot reach — a
+    ``BaseException`` whose ``__setattr__`` raises for ``PARTIAL_STATE_ATTR`` and SUCCEEDS
+    for ``__context__``, i.e. one that discriminates BY ATTRIBUTE NAME. That is unmeasured
+    and contrived; the shared guard is one ``try`` for both writes, so on that object both
+    breadcrumbs are now dropped together and the abort still travels unchanged.
     """
     try:
         setattr(exc, PARTIAL_STATE_ATTR, err)
+        exc.__context__ = err
     except BaseException:  # noqa: BLE001 — a breadcrumb NEVER displaces the abort
         pass
 
@@ -962,7 +1042,6 @@ def _restore(session, system, lde, surface, token, prior, entered=None):
         # the family, because Python assigns ``__context__`` implicitly and an abort that
         # merely happened inside a ``HarnessError`` handler was being renamed by it.
         attach_partial_state(exc, err)
-        exc.__context__ = err
         raise
     _prove_restore(session, system, lde, surface, token, prior, entered)
 
@@ -1886,16 +1965,37 @@ def clear_solve(session, params):
     relationship the solve expressed is gone.
 
     THE V7/V8 GATES RUN ON THE HARNESS-CHOSEN TARGET and a failure is ``surface_write``,
-    never ``tool_param``: the caller typed no type, so a failure here is engine drift and
+    never ``tool_param``: the caller typed no type, so a GATE failure is engine drift and
     the ``accepted_here`` remedy suffix (a ``set_solve`` remedy) is not appended. Every
     one of the five targets is present in its cell's measured legal set AND catalogued,
     so the gates refuse nothing legitimate — they are drift armour, and they are what
     makes a wrong future edit to the default table refuse LOUD instead of authoring blind.
+
+    THAT SENTENCE IS ABOUT THE GATES, AND F-E IS WHY THE QUALIFIER IS NOW EXPLICIT. An
+    unresolvable ``SolveType`` enum is an ENVIRONMENT fault, not a gate verdict, and it
+    now reaches the caller as ``tool_param`` — the same family ``set_solve`` has always
+    served for it. Read broadly, the paragraph above used to promise the opposite about a
+    condition it was not written for (0.1.6 PR #8 review batch, F-E).
     """
     system, lde, surface, token, cell, legal = _prelude(session, params)
     target = _sc.DEFAULT_SOLVE_BY_CELL[token]
+    # F-E — THE ENUM RESOLUTION IS HOISTED OUT OF THE ``try`` ON PURPOSE, and the +1
+    # statement is the whole fix. ``_sc.solve_type_enum`` raises ``ToolParamError`` on a
+    # live-backend IMPORT failure ("could not resolve SolveType from ZOSAPI.Editors"),
+    # which is an ENVIRONMENT fault, not a write fault. Inside the try it was re-familied
+    # as ``surface_write`` here while ``set_solve`` — which calls the SAME resolver bare,
+    # one function down — served ``tool_param`` for the identical condition. Two doors,
+    # one fault, two families is a machine-readable signal an agent cannot branch on.
+    # Only ``_resolve_enum``'s member-absent case is re-familied now, which is ALSO what
+    # makes the message below TRUE: it asserts "the enum has no 'Fixed' member", and
+    # before the hoist it said that about an enum that could not be RESOLVED AT ALL.
+    #
+    # THE REVIEW ALSO CLAIMED A ``SurfaceColumn`` SPLIT OF THE SAME SHAPE. That is
+    # REFUTED (§1, F-E): both doors resolve SurfaceColumn through the shared
+    # ``_prelude``, so there is one family and nothing to split. Do not "fix" it.
+    solve_enum = _sc.solve_type_enum(system)
     try:
-        member = _resolve_enum(_sc.solve_type_enum(system), target)
+        member = _resolve_enum(solve_enum, target)
     except ToolParamError as exc:
         raise SurfaceWriteError(
             "the engine's SolveType enum has no %r member, so the '%s' cell's own "
@@ -1954,21 +2054,54 @@ def clear_solve(session, params):
     # non-finite reading is a FACT about a perfectly good plano cell; a FAILED read is an
     # alarm — the number the caller is told is "now baked in" was never read at all. A
     # first cut emitted the identical ``frozen_at: null`` for both.
+    # THE POST-CLEAR TYPE READ GOES THROUGH ``_observe``, WHICH NEVER RAISES, AND THAT IS A
+    # DISCLOSURE-DISCIPLINE FIX, NOT A STYLE ONE. It read `_sc.solve_cell(...)` directly —
+    # a RAISING fetch whose own message is "refusing rather than reading an unknown cell" —
+    # executed AFTER `_transact` has run `_t1` and PROVEN the clear landed. A throw there
+    # served a caller the word "refusing" about a write that had already succeeded, and
+    # routed it to `internal` with no clause saying the cell was changed. The file states
+    # the opposite rule twice and implements it on `set_solve`'s tail (`_t3` guards the
+    # identical read; `_emit` degrades a wire fault on a VERIFIED success); `clear_solve`'s
+    # tail was the one place it was missing (0.1.6 external review).
     representable = not (isinstance(value, float) and not math.isfinite(value))
     envelope = {"ok": True, "surface": surface, "cell": token,
                 "prior_solve": prior["type"], "cleared": True,
-                "solve_type": _sc.read_solve_type(
-                    _sc.solve_cell(system, lde, surface, token)),
+                "solve_type": _observe(system, lde, surface, token)[0],
                 "frozen_at": value if (representable and readable) else None}
     if not readable:
         envelope["frozen_at_unreadable"] = True
     elif not representable:
         envelope["frozen_at_not_representable"] = True
+    # F-B, THE DISCLOSURE HALF. The correctness half (``is_default_now`` reading null
+    # rather than a manufactured ``false``) is twenty lines down and was already closed;
+    # this is what stops the resulting ``solve_type: null`` being SILENT. The precedent is
+    # the two-cause ``frozen_at`` pair directly above: a null that a caller cannot
+    # distinguish from a fact needs a key saying which it is.
+    #
+    # THE KEY MEANS "THE READ FAILED", AND ONLY THAT. ``read_solve_type`` returns ``None``
+    # ONLY on a throw — there is no ABSENT reading, because every cell has a solve type
+    # and ``_observe`` is the never-raise reader that degrades a throw to null. So this is
+    # NOT the ABSENT-vs-UNREADABLE split applied to a third case; it is the
+    # UNREADABLE arm of it, named, on a call that otherwise reports ``ok`` and ``cleared``.
+    if envelope["solve_type"] is None:
+        envelope["solve_type_unreadable"] = True
     if refloated:
         envelope["refloated"] = True
     if prior["type"] == "Variable":
         envelope["cleared_variable"] = True
-    envelope["is_default_now"] = _sc.is_default_solve(token, envelope["solve_type"])
+    # ``is_default_now`` IS NULL WHEN THE TYPE COULD NOT BE READ, NOT ``false``.
+    # `is_default_solve` returns False for any non-`str`, so an unreadable type produced
+    # `{"solve_type": null, "is_default_now": false}` — an AFFIRMATIVE claim that the cell
+    # is NOT at its default, manufactured from a fault. Worse, it contradicted a proof this
+    # same call already holds: `_t1` read the type back and REFUSED unless it equalled
+    # `canonical`, which IS the cell's default, three statements earlier. This is not the
+    # ABSENT-vs-UNREADABLE conflation the review filed it as — `read_solve_type` has no
+    # ABSENT reading, every cell has a type and `None` means fault and nothing else — it is
+    # a false assertion derived from one. Null is the honest answer; the `frozen_at` pair
+    # one line up already models the same discipline (0.1.6 external review).
+    envelope["is_default_now"] = (
+        _sc.is_default_solve(token, envelope["solve_type"])
+        if envelope["solve_type"] is not None else None)
     if refloated:
         envelope["note"] = (
             "the %s solve was cleared and the semi-diameter RE-FLOATS — the engine now "
