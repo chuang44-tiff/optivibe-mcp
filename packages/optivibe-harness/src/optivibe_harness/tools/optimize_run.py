@@ -2203,9 +2203,33 @@ def _glass_band_findings(gaps, lo, hi):
 
 
 def _edge_audit_warnings(session, glass_floor, air_floor,
+                         # THESE TWO DEFAULTS ARE KEPT DELIBERATELY, AND THE REASON
+                         # BELONGS HERE RATHER THAN IN A COMMIT MESSAGE, because
+                         # ``_basis`` — one screen down in this same module — DELETED
+                         # its equivalents on the stated grounds that "a default here
+                         # was a CLAIM: absence of an argument shipped as presence of
+                         # evidence". Read side by side and without this note, the two
+                         # decisions simply contradict each other.
+                         #
+                         # They do not, for two measured reasons. ``_basis``' defaults
+                         # were load-bearing on a LIVE path and cost ONE call site to
+                         # delete; these are reached by NO production caller (both pass
+                         # all five explicitly) and deleting them would churn dozens of
+                         # test call sites to buy what the arity pin already binds. And
+                         # a deleted default is a weaker forcing function here than it
+                         # looks: this function's own never-raise net would SWALLOW the
+                         # resulting TypeError and relabel it ``audit_failed``, so the
+                         # loud failure the deletion is supposed to buy does not arrive.
+                         #
+                         # What the defaults are NOT is a safety net. A future caller
+                         # that omits them stamps both axes ``authored`` and silently
+                         # suppresses the withheld disclosure, so the arity pin is the
+                         # real guard — and it reads THIS module only, by bare name. A
+                         # call added from another module, or built dynamically, is
+                         # outside what it can see.
                          glass_basis=_FLOOR_BASIS_AUTHORED,
                          air_basis=_FLOOR_BASIS_AUTHORED):
-    """0-3 additive STRING keys from ONE ``check_clearance`` on the RESULT.
+    """The post-optimize geometry audit from ONE ``check_clearance`` on the RESULT.
 
     0-4 additive legacy STRING keys (``thin_edge_warning`` / ``buried_center_warning`` /
     ``negative_air_gap_warning`` / ``negative_bfl_warning``, BYTE-IDENTICAL text and
@@ -2236,7 +2260,7 @@ def _edge_audit_warnings(session, glass_floor, air_floor,
     Numbers are READ from the returned envelope (agreement with an independent
     ``check_clearance`` by construction — NOT ``MNEG.Value``, which the SEQ wizard clamps
     at target and evaluates at Surf1's larger aperture, ~40% divergent from
-    divergent from ``check_clearance``'s ``min(semi)`` convention). NEVER raises
+    ``check_clearance``'s ``min(semi)`` convention).
 
     NEVER raises, NEVER flips ``ok``, runs ONCE. It NO LONGER returns ``{}``: an absent
     audit key never meant clean, so a refusal / vacuity / fold / throw is DISCLOSED

@@ -796,7 +796,7 @@ def _validate_refs(entry, this_index, sig, op_type, n_operands, entry_errs):
 
 
 def _phase1_validate(system, mfe, recipe, range_disclosures=None):
-    """Phase-1 DRY validation: zero engine MUTATION (§5 Phase 1).
+    """Phase-1 DRY validation: zero NET engine mutation (§5 Phase 1).
 
     **THE CANONICAL MUTATION SENTENCE. Every other zero-mutation claim about this door
     DEFERS to this one by name rather than restating it** (a review found the
@@ -1154,7 +1154,7 @@ def apply_merit_recipe(session, params):
     restating it):** schema/version validation then validate EVERY operand (type vs
     live enum, target/weight coercion, each ``params`` name +
     value against a zero-net-mutation per-type signature cache). Any failure ->
-    (``merit_recipe_schema`` / ``merit_recipe_version`` / ``merit_recipe_invalid`` —
+    reject the WHOLE recipe (``merit_recipe_schema`` / ``merit_recipe_version`` / ``merit_recipe_invalid`` —
     the last carrying the per-entry error list). NO recipe row is authored; the
     signature probe's scratch rows are reaped.
 
@@ -1475,8 +1475,6 @@ def _rollback_or_failclosed(session, mfe, checkpoint_path, atomic, mode, *,
     rows are GONE, so disclosing a range about them would be a NEW overclaim of exactly
     the kind this change exists to remove. Default ``None`` keeps every caller that
     omits it byte-identical.
-
-    Builds the ``merit_recipe_apply`` envelope for an atomic Phase-2 failure:
 
     Builds the ``merit_recipe_apply`` envelope for an atomic Phase-2 failure:
 

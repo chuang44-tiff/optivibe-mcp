@@ -530,7 +530,7 @@ def _glass_floor_warning(system, last_surface=_oc._UNSET_LAST_SURFACE):
                 if _grin.row_is_grin_primitive(row) is not True:
                     if _sc._material_is_air(row):  # air surface -> skip
                         continue
-                # A MIRROR / coordinate-break / powered-non-Standard surface
+                    # A MIRROR / coordinate-break / powered-non-Standard surface
                     # is NOT glass — reuse the sibling inert-DOF predicate rather than
                     # re-derive a MIRROR test inline. `_material_is_air("MIRROR")` is False, so
                     # without this a free mirror radius (glass=False, no MNEG) would false-fire
@@ -2676,11 +2676,11 @@ def add_operand(session, params):
                 info = live_sig.get(header)
                 if info is None or not _mc.is_row_ref_header(header, info["kind"]):
                     continue  # a non-ref / unknown name is handled by apply_params below
-            # Fix (§6): range-check the SAME effective integer the WRITER stores.
+                # Fix (§6): range-check the SAME effective integer the WRITER stores.
                 # ``coerce_param_value`` accepts an integral float (``999.0`` -> ``int(999)``)
                 # into an int cell, so a bare ``isinstance(value, int)`` skip let an integral
                 # float bypass the range check and write a provably dangling raw row (the
-            # live twin). ``_mc.row_ref_int`` returns the exact int for an int OR an
+                # live twin). ``_mc.row_ref_int`` returns the exact int for an int OR an
                 # integral float (rejecting bool), and ``None`` for a non-integral float /
                 # non-number — which is the param-class trap ``apply_params`` rejects below,
                 # so we leave it to that rather than double-handling here.

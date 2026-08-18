@@ -426,12 +426,38 @@ def _min_positive_target(mfe, token, *, last_surface, surface=None):
                 # nan/inf/0.0/-0.0 and never a bool.
                 unestablished = True
                 continue
-            if w <= 0.0:
+            if w == 0.0:
                 # ARM 2 — a DELIBERATE opt-out. A weight-0 boundary row is a
                 # legitimate MONITOR pattern (the docstring's own asymmetry note), so
                 # ABSENT is correct and the (d) policy default is licensed. ``0.0`` and
                 # ``-0.0`` share this arm (they compare equal); they must NEVER share a
                 # branch with the unreadable case above — that sharing WAS the bug.
+                #
+                # THE TEST IS ``== 0.0`` AND NOT ``<= 0.0``, AND THE NARROWING IS
+                # MEASURED. It read ``<= 0.0`` and swept a NEGATIVE weight into the
+                # opt-out on the strength of evidence that only ever covered weight ZERO.
+                continue
+            if w < 0.0:
+                # ARM 2b — a NEGATIVE weight is NOT an opt-out. MEASURED LIVE against a
+                # passing ``+1.0`` control: a ``-1.0`` MNEG drives the design onto its
+                # target indistinguishably from that control — centre thickness
+                # 3.6 -> 5.126034, merit 1.0 -> 0.0, edge landing on 1.660068 — and MNCG
+                # behaves the same way (3.6 -> 4.600000000033). A weight of ZERO, on the
+                # same design, moves nothing whatsoever. The shipped ``add_operand``
+                # accepts the shape and reads it back, so this is not a GUI-only or
+                # loaded-merit-only row.
+                #
+                # It is not FOUND either, and that is the whole reason this arm exists.
+                # The sign's effect is COMPOSITION-DEPENDENT: alone the row exerts full
+                # pressure, but held against a second objective at weight ``-4.0`` the
+                # DLS step vanished — merit 2.931945379252224 -> ...245 with the geometry
+                # unmoved — while the engine reported run/Succeeded/IsValid all True. A
+                # row whose enforcement depends on what else occupies the merit cannot
+                # yield a floor anyone should threshold against. So: UNESTABLISHED, which
+                # makes the (d) audit DISCLOSE and substitute nothing, rather than certify
+                # ``default_no_floor_authored`` over a floor this design demonstrably
+                # authored and the engine demonstrably enforced.
+                unestablished = True
                 continue
             # The ONE positive-target predicate, shared with the linter. The
             # independent copy that used to live here agreed with it, which is the state
@@ -1516,7 +1542,7 @@ TARGET_UNREADABLE = "UNREADABLE"
 # alone. That is the same move two earlier decisions made, and it is why they held.
 FLOOR_FOUND = "FOUND"                 #: a positive authored floor -> ``value`` is it
 FLOOR_ABSENT = "ABSENT"               #: no row of this token, or every row a DELIBERATE
-                                      #: opt-out (target <= 0 / weight <= 0). A policy
+                                      #: opt-out (target <= 0 / weight == 0). A policy
                                       #: default is CORRECT here.
 # THE ENUMERATION ABOVE IS EXHAUSTIVE, AND THAT IS A CONTRACT, NOT AN OBSERVATION
 # It was FALSE on the shipped tree for the reason the audit named — an
@@ -1528,6 +1554,22 @@ FLOOR_ABSENT = "ABSENT"               #: no row of this token, or every row a DE
 # becomes true by accident is one refactor away from being false again. **Every route
 # into ABSENT must be a decision the author made on purpose. An unreadable / declined /
 # faulted read is UNESTABLISHED.**
+#
+# THE WEIGHT HALF OF THAT ENUMERATION WAS ``weight <= 0`` AND IS NOW ``weight == 0``,
+# because a negative weight was measured to exert full optimization pressure rather than
+# to opt out; it routes to UNESTABLISHED and its evidence sits at the branch.
+#
+# THE TARGET HALF DELIBERATELY STAYS AT ``<= 0``, AND THE ASYMMETRY IS MEASURED, NOT
+# ASSUMED. A negative target is not vacuous either — thinning an element until its edge
+# thickness goes negative makes one VIOLABLE, and a violated ``-1.0`` target was measured
+# driving the edge exactly onto ``-1.0``. It stays ABSENT because the CONSEQUENCE runs the
+# other way: the (d) substitution is the hardcoded default, which is STRICTER than any
+# non-positive floor, so no violation can be missed through this route, and a row bearing
+# a positive target alongside it still governs (the reader takes the MIN POSITIVE target,
+# so a non-positive sibling is simply not a candidate). What that leaves is a provenance
+# sentence claiming no floor was authored where one was — disclosed at the scan's own
+# served-skip wording rather than repaired by a policy change on the safe side of the
+# audit.
 #
 # CORRECTION — THE SENTENCE ABOVE USED TO END "The arm COUNT is bound
 # structurally (an AST row over ``_min_positive_target``), so adding a route without
@@ -2465,9 +2507,19 @@ def _render(template, **kw):
     try:
         return template.format(**kw)
     except Exception:  # noqa: BLE001 — a message that RAISES loses the whole verdict
-        return ("this operand's surface range was refused, and the detail could not be "
-                "rendered (a supplied value or the operand token raised while being "
-                "formatted). The refusal itself stands; re-read the params you passed.")
+        # NEUTRAL ON PURPOSE — this fallback must not name an outcome. ``_render`` serves
+        # the refusal templates AND the clamp flag, and that flag is attached to a
+        # ``wellformed`` verdict, i.e. an ADMITTED operand. The old text asserted "was
+        # refused ... The refusal itself stands", so a render failure on the admit path
+        # would have shipped a refusal claim inside the flags of an operand that was
+        # accepted. Unreachable as written (the clamp flag interpolates only door-derived
+        # ints), which is exactly why it is worth fixing while it is still cheap: the
+        # verdict already carries the outcome in ``code``/``refuse``, so this string
+        # never has to guess it.
+        return ("this operand's surface range could not be described (a supplied value "
+                "or the operand token raised while the message was being formatted). "
+                "The verdict itself stands — read ``code`` and ``refuse`` on it for the "
+                "outcome, and re-read the params you passed.")
 
 
 def _range_door_verdict(code, reason=None, surf1=None, surf2=None, ceiling=None,
@@ -3223,9 +3275,12 @@ def _malformed_range_sentence(groups, rows, unclassified, domain_established):
         parts.append(
             "This check does not consult a bound's WEIGHT, so a weight-0 monitor row is "
             "classified exactly like any other and can appear in the rows below. What it "
-            "does require is a strictly-positive TARGET: a row whose target is 0 is "
-            "skipped as a deliberate opt-out, and skipped SILENTLY — it is neither "
-            "reported here nor counted as unclassified. This classification is valid for the system "
+            "does require is a strictly-positive TARGET: a row whose target is 0 OR "
+            "NEGATIVE is skipped, and skipped SILENTLY — it is neither reported here nor "
+            "counted as unclassified. Read that as a scope limit rather than as a "
+            "statement about the row: a negative target is still a bound the optimizer "
+            "enforces once the design violates it, so a skipped row is not necessarily an "
+            "inert one. This classification is valid for the system "
             "state at the time of this call, and the engine NORMALIZES a range cell at "
             "EVALUATION rather than clamping it at write — so a census taken before an "
             "evaluation of this merit and one taken after it can BOTH be correct and "
