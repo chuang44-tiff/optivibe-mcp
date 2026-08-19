@@ -596,18 +596,35 @@ def _validate_operand_entry(entry, index):
     return None
 
 
-def _signature_cache_for_type(mfe, member, op_type):
+def _signature_cache_for_type(mfe, member, op_type, *, cols_out=None):
     """Read one operand type's live param signature ZERO-NET-MUTATION (§5).
 
+    "Zero NET" is the whole claim and the qualifier is load-bearing: this function
+    APPENDS a scratch operand and reaps it, so the row set is unchanged but an
+    EVALUATION happened. See ``_phase1_validate``'s canonical mutation sentence for
+    the residual that follows from it — it is stated once, there, not restated here.
+
     Builds a throwaway operand of ``op_type``, ``read_param_map`` it (the live
-    ``{Header: kind}`` signature), then ``RemoveOperandAt`` the throwaway so the MFE
-    is left exactly as before (count ``88 -> 88``). The throwaway is removed in a
-    ``finally`` so a read THROW still reaps the scratch row.
+    ``{Header: kind}`` signature), then ``RemoveOperandAt`` the throwaway so the row
+    SET is restored (measured: count ``88 -> 88``). What that does and does not claim is
+    stated ONCE in ``_phase1_validate``, and this line does not restate it -- an
+    UNQUALIFIED restatement of the whole mutation claim stood here while the
+    paragraph three lines above already said the qualification lives elsewhere. The
+    throwaway is removed in a ``finally`` so a read THROW still reaps the scratch row.
 
     Returns ``{Header: kind}`` (the kind, not the col — the apply path re-reads the
     live col off the real operand it authors). Raises ``SurfaceWriteError`` on a cell
     read firewall fault (the caller turns Phase-1 faults into an error LIST, but a
     raw .NET fault here is a genuine engine problem -> ``surface_write``).
+
+    **``cols_out``** (additive, keyword-only; ``None`` is byte-identical) — an
+    out-param filled ``{Header: col}`` from the SAME ``read_param_map`` result whose
+    columns are otherwise discarded here. The range door decides shape on
+    *Header AT col 2/3*, exactly as the linter and ``add_operand`` do; without the
+    cols the recipe door would have had to decide on Header PRESENCE alone, so an
+    operand carrying ``Surf1`` at some other column would be checked by one door and
+    ignored by the other — the two-doors-one-rule premise broken inside its own
+    design. The cols come off the live scratch row, never reconstructed from a token.
 
     fix (§5.4): the scratch reap is keyed on ``count_before`` (the count
     captured BEFORE ``AddOperand``), NOT on ``op.OperandNumber`` — because the
@@ -707,6 +724,8 @@ def _signature_cache_for_type(mfe, member, op_type):
                 f"engine rejected operand type {op_type} on the scratch row"
             )
         live = _mc.read_param_map(op)
+        if cols_out is not None:
+            cols_out.update({header: live[header]["col"] for header in live})
         return {header: live[header]["kind"] for header in live}
     finally:
         # remove the throwaway so the MFE is zero-net-mutated. Reap by the
@@ -776,8 +795,39 @@ def _validate_refs(entry, this_index, sig, op_type, n_operands, entry_errs):
             # forward/self/backward-in-range are ALLOWED un-validated this cycle.
 
 
-def _phase1_validate(system, mfe, recipe):
-    """Phase-1 DRY validation: zero engine MUTATION (§5 Phase 1).
+def _phase1_validate(system, mfe, recipe, range_disclosures=None):
+    """Phase-1 DRY validation: zero NET engine mutation (§5 Phase 1).
+
+    **THE CANONICAL MUTATION SENTENCE. Every other zero-mutation claim about this door
+    DEFERS to this one by name rather than restating it** (a review found the
+    unqualified copies, and restating a qualified claim in three places is how one of
+    them loses its qualifier — the no-drifting-copy discipline applied to prose):
+
+        Phase 1 is zero-NET-mutation, reap-proven — it is **NOT** pre-mutation. The
+        per-type signature probe APPENDS a scratch operand (``mfe.AddOperand()``) and
+        attempts the reap on every exit, so on a HEALTHY engine the MFE's row set is
+        unchanged whether the recipe is accepted or rejected. TWO residuals, and the
+        clause is qualified rather than absolute because a measurement found the second one
+        false against the first draft of this sentence:
+
+        (1) that append is an EVALUATION EVENT, and per the measured clamp law it can
+        NORMALIZE a PRIOR out-of-domain range row before the refusal returns. That
+        residual is PRE-EXISTING in kind (the shipped probe has always appended) — the
+        range door adds no new instance of it. Carried as a documented limit; a test
+        pins the delta as EXACTLY that row's clamp image and nothing else.
+
+        (2) the reap is **best-effort** — ``_signature_cache_for_type``'s ``finally``
+        swallows it (``except Exception: pass``), deliberately, so a reap throw cannot
+        mask the read outcome it was taken for. So a degraded ``RemoveOperandAt`` can
+        STRAND the scratch row PERMANENTLY, and the row-set invariant above does not
+        hold on that engine. Measured, one entry: healthy -> rows +1 and ``ok: True``;
+        degraded reap -> rows **+2** (the authored operand AND the un-reaped scratch),
+        still ``ok: True``, the extra row counted in ``number_of_operands`` — and the
+        SAME strand on the REJECTED side, which are exactly the two cases the sentence
+        used to enumerate. The BEHAVIOUR is defensible and is deliberately unchanged
+        (hardening the reap would trade a stranded row for a masked read); what was
+        wrong was a clause that presented itself as having enumerated its residuals
+        while naming only the first. Carried as a documented limit.
 
     1. Top-level schema/version (``_validate_recipe_schema``) -> a hard
        ``(family, message)`` reject (MFE untouched).
@@ -794,6 +844,17 @@ def _phase1_validate(system, mfe, recipe):
     The per-type signature cache is bounded by the number of DISTINCT operand types
     in the recipe (NOT the recipe length). It is built via throwaway operands that
     are ``RemoveOperandAt``-reaped (proven zero-net-mutation).
+
+    **The surface-RANGE door.** Every entry whose operand is range-SHAPED and whose
+    ``params`` carry a Surf endpoint is checked by the SAME ``check_authoring_range``
+    predicate ``add_operand`` uses — a refusal becomes a per-entry error (so the WHOLE
+    recipe is rejected, zero recipe rows authored), an admitted-but-disclosed verdict
+    is collected into the optional ``range_disclosures`` out-param for the caller's
+    top-level flags. The surface count is resolved ONCE above the loop: two entries in
+    one recipe must never be classified against different domains.
+
+    ``range_disclosures`` is an optional OUT-param (``None`` is byte-identical, which
+    is what keeps ``merit_math``'s call site untouched).
     """
     family, message = _validate_recipe_schema(recipe)
     if family is not None:
@@ -801,8 +862,20 @@ def _phase1_validate(system, mfe, recipe):
 
     enum_type = _oc._merit_operand_enum(system)
     signature_cache = {}        # {op_type: {Header: kind}}
+    # The PARALLEL per-type column map. The shipped signature cache is kinds-only
+    # AND probes only the FIRST occurrence of a type, so without this a SECOND entry of
+    # a cached type would reach the door with no cols, route ``shape_unreadable`` and
+    # PROCEED — bypassing the range check on ordinary input, since any wizard-shaped
+    # recipe repeats MNCA/MNEA once per gap. Filled at probe time, read for EVERY entry.
+    cols_cache = {}             # {op_type: {Header: col}}
     member_cache = {}           # {op_type: live enum member}
     errors = []
+    if range_disclosures is None:
+        range_disclosures = []
+    # Resolved ONCE per pass and threaded (the shared-domain discipline). ``None``
+    # is a FAILED domain read, and the door treats it as "proceed + disclose", never as
+    # a licence to refuse on a bound it cannot state.
+    last_surface = _oc._resolve_last_surface(system)
     # The recipe length bounds a valid 0-based ``refs`` index (§5.2 out-of-range).
     n_operands = len(recipe["operands"])
 
@@ -844,9 +917,10 @@ def _phase1_validate(system, mfe, recipe):
         # params and the refs blocks below reuse it (§5.4: no extra engine touch).
         sig = None
         if op_type not in signature_cache:
+            probe_cols = {}
             try:
                 signature_cache[op_type] = _signature_cache_for_type(
-                    mfe, member_cache[op_type], op_type
+                    mfe, member_cache[op_type], op_type, cols_out=probe_cols
                 )
             except _mc.ParamCoercionError as exc:
                 entry_errs.append(str(exc))
@@ -864,6 +938,11 @@ def _phase1_validate(system, mfe, recipe):
                     f"could not probe the live signature of {op_type}: {exc}"
                 )
                 signature_cache[op_type] = {}
+            # A faulted probe leaves this ``{}`` — and the fault path above has already
+            # appended an error, so that recipe is rejected regardless of what the door
+            # then says. Cached alongside the kinds so EVERY later entry of this type
+            # reads the same cols the first one did.
+            cols_cache[op_type] = probe_cols
         sig = signature_cache[op_type]
 
         # Validate params NAME + VALUE against the live per-type signature.
@@ -887,6 +966,37 @@ def _phase1_validate(system, mfe, recipe):
                     _mc.coerce_param_value(header, sig[header], value)
                 except _mc.ParamCoercionError as exc:
                     entry_errs.append(str(exc))
+                except Exception as exc:  # noqa: BLE001 — see below
+                    # The OTHER caller of the function an earlier fix measured.
+                    # ``coerce_param_value`` raises exceptions that are NOT
+                    # ``ParamCoercionError`` -- measured, ``OverflowError`` from
+                    # ``float(10**400)`` at ``_merit_cells.py`` before the magnitude
+                    # guard. An earlier fix widened ``add_operand``'s catch and left
+                    # this one, so the throw escaped ``apply_merit_recipe`` ENTIRELY and
+                    # falsified three shipped claims, one of them SERVED: the tool
+                    # description's *"on any error it rolls back and reports
+                    # checkpoint:false / partial_state:true"* -- there was no envelope at
+                    # all.
+                    #
+                    # Recorded as a per-entry VALIDATION error, which is Phase 1's own
+                    # idiom for the probe fault two branches above and is NOT the
+                    # reap-then-re-raise chosen for ``add_operand``. The two differ
+                    # CORRECTLY: that one sits in Phase 2, after a row exists, so re-labelling
+                    # there would claim a diagnosis about state that was already
+                    # mutated. Here there is none -- measured, the row count is unchanged
+                    # and no checkpoint file is created, because Phase 1 runs entirely
+                    # before the atomic checkpoint and the signature probe reaps its
+                    # scratch row in a ``finally``.
+                    #
+                    # The message names the VALIDATION that failed and the exception
+                    # TYPE -- never a diagnosis of the caller, which this layer cannot
+                    # make for an unknown exception, and never ``{exc!r}``: a fix
+                    # for a never-raise defect must not interpolate a repr that can
+                    # itself raise.
+                    entry_errs.append(
+                        f"could not validate parameter {header!r} of {op_type}: "
+                        f"{type(exc).__name__}"
+                    )
                 # §5.3 LOUD raw-Op#-in-params guard: an Op#-prefixed cell on this
                 # operand type carrying a NON-ZERO value in the ``params`` channel is an
                 # un-remapped raw row reference (the cycle-1 silent-wrong case — cycle-1
@@ -910,6 +1020,30 @@ def _phase1_validate(system, mfe, recipe):
                             f"{value}) is an un-remapped raw row reference; references "
                             "belong in 'refs', not 'params'"
                         )
+
+        # ---- The surface-RANGE door, the SAME predicate ``add_operand`` uses. ----
+        # Placed AFTER the params NAME/VALUE loop deliberately: a non-integral endpoint
+        # already has ``coerce_param_value``'s better error in ``entry_errs``, and the
+        # door DEFERS to it (``value_unreadable``, no range message) so exactly ONE error
+        # is reported per bad value. ``cols_cache`` supplies the Header->col map the shape
+        # rule needs; a faulted probe leaves it empty, which reads NOT-a-range-operand —
+        # safe, because that entry already carries the probe fault as an error.
+        #
+        # The entry carries the live ``kind`` as well as the col. The door's
+        # deferral decision asks the WRITER whether it would refuse this value, and the
+        # writer's answer depends on the cell KIND — so a map that carried only the col
+        # would make the recipe door decide the deferral blind where ``add_operand``
+        # (which hands over the whole ``read_param_map``) decides it informed. ``sig``
+        # is ``{Header: kind}`` from the same probe, so this costs no extra read.
+        sig_cols = {h: {"col": c, "kind": sig.get(h)}
+                    for h, c in cols_cache.get(op_type, {}).items()}
+        verdict = _oc.check_authoring_range(
+            sig_cols, recipe_params, last_surface, operand_token=op_type
+        )
+        if verdict["refuse"]:
+            entry_errs.append(verdict["reason"])
+        elif verdict["clamp_expected"] or verdict["flags"]:
+            range_disclosures.append((index, op_type, verdict))
 
         # range-validate a value-less control operand's proof param
         # (CONF -> Cfg# in 1..NumberOfConfigurations) PRE-mutation, the negative-gate
@@ -1015,12 +1149,14 @@ def _wire_refs(op, refs, index_to_live, *, operand_token):
 def apply_merit_recipe(session, params):
     """Apply a portable recipe to the MFE: two-phase + atomic rollback (§5).
 
-    **Phase 1 (ZERO engine mutation):** schema/version validation then validate
-    EVERY operand (type vs live enum, target/weight coercion, each ``params`` name +
+    **Phase 1 (zero NET engine mutation — the canonical sentence and its disclosed
+    residual live on ``_phase1_validate``; this docstring DEFERS to it rather than
+    restating it):** schema/version validation then validate EVERY operand (type vs
+    live enum, target/weight coercion, each ``params`` name +
     value against a zero-net-mutation per-type signature cache). Any failure ->
-    reject the WHOLE recipe (``merit_recipe_schema`` / ``merit_recipe_version`` /
-    ``merit_recipe_invalid`` — the last carrying the per-entry error list). NO
-    mutation occurred.
+    reject the WHOLE recipe (``merit_recipe_schema`` / ``merit_recipe_version`` / ``merit_recipe_invalid`` —
+    the last carrying the per-entry error list). NO recipe row is authored; the
+    signature probe's scratch rows are reaped.
 
     **Phase 2 (only if Phase 1 clean):** ``mode="replace"`` (default) clears the MFE
     first; ``mode="append"`` authors onto the existing MFE. TWO-PHASE author-then-wire
@@ -1038,7 +1174,29 @@ def apply_merit_recipe(session, params):
     unchanged); a rollback LOAD throw -> ``partial_state:true, rolled_back:false`` +
     an explicit "reload your .zmx" message. The temp ``.MF`` is reaped in ``finally``.
     ``atomic=False`` = best-effort (author the rest, ``ok:true`` + per-row report).
-    The handler NEVER raises.
+    The handler returns a structured envelope on every path it has been MEASURED on,
+    including a param-validation throw that is not a ``ParamCoercionError``. It is
+    not claimed to be exhaustive: "never raises" was stated absolutely HERE, and a probe
+    measured one path THROUGH THIS HANDLER on which it was false. A THIRD site carries
+    the same absolute (``optimize_merit.py``'s ``preserve_custom`` handler) and was NOT
+    measured — a gap, not a pass.
+
+    **A correction, recorded rather than silently patched.** The retired sentence
+    attributed that falsification to the UN-SWEPT handler instead of to this one, and
+    tagged that un-swept site as measured. Two errors in one clause: the measurement
+    was of THIS handler, so the sentence read as *"our claim was fine, someone else's
+    was not"*; and the un-swept site was explicitly recorded UNMEASURED, so tagging it
+    as falsified was an inference wearing a measured label. **The sibling correction
+    below (``_rollback_or_failclosed``) got both right**, which is what makes this an
+    instance of the sibling-defect class rather than a typo: the same correction
+    landed twice, once accurately. The retired wording is deliberately NOT quoted
+    here — a correction that reproduces the phrase it retires defeats the guard
+    watching for its return (a lesson hit in this repo before).
+
+    **A FOURTH site was found and it WAS false** — ``range_headers_supplied``'s
+    *"(never raises)"*, measured to strand a typed row through ``add_operand``'s
+    unguarded cost gate. Narrowed there. So the absolute has now been stated at four
+    sites, falsified at two, and remains unmeasured at one.
     """
     system = session.system
     mfe = system.MFE
@@ -1059,8 +1217,11 @@ def apply_merit_recipe(session, params):
             f"atomic must be a bool, got {type(atomic).__name__} {atomic!r}",
         )
 
-    # ---- Phase 1: dry validation (zero engine mutation). ----
-    family, message, errors = _phase1_validate(system, mfe, recipe)
+    # ---- Phase 1: dry validation (zero NET engine mutation). ----
+    # ``range_disclosures`` collects the ADMITTED-but-disclosed range verdicts so
+    # the ok envelope can name them; a REFUSED one is already a per-entry error below.
+    range_disclosures = []
+    family, message, errors = _phase1_validate(system, mfe, recipe, range_disclosures)
     if family is not None:
         detail = {}
         if errors is not None:
@@ -1096,6 +1257,35 @@ def apply_merit_recipe(session, params):
                 atomic=atomic,
             )
 
+    # The range disclosure RENDERED ONCE, as a kwargs FRAGMENT, and
+    # threaded to EVERY exit that leaves authored rows in the MFE -- not just the ok
+    # envelope. The rule said *"ONE top-level flags list on the **ok** envelope"* and the
+    # build transcribed it faithfully; the defect is that *"the recipe was applied"* and
+    # *"ok is True"* were treated as the same set and they are NOT. Measured on the
+    # degraded-telemetry exit (``CalculateMeritFunction`` throws): ``ok:False,
+    # applied:1, rolled_back:False``, the row carrying ``[2, 99]`` -> ``[2, 7]`` after
+    # one evaluation, and NO ``flags`` -- the silent rewrite, undisclosed, on a path
+    # the design DELIBERATELY admits (refusing a too-large ``Surf2`` was rejected as
+    # *"plausibly what the author meant"*, so the disclosure is the ONLY protection
+    # there) and which the SERVED clause promises unconditionally (*"accepted and
+    # disclosed"*, no exit qualifier).
+    #
+    # A FRAGMENT rather than a list so absent-when-empty is structural: ``{}`` splices
+    # to nothing at four call sites with no conditional, so the "silence cannot
+    # overclaim" contract holds at every exit by construction instead of by four copies
+    # of the same ``if``.
+    #
+    # SCOPE, stated because these exits are not the ok envelope: the entries are keyed
+    # by RECIPE INDEX (Phase-1 verdicts over the whole recipe), not by live row number.
+    # On a ``partial_state`` exit some of those entries may never have been authored --
+    # the flag says *this recipe entry's range would be narrowed*, which is true either
+    # way, and ``results`` / ``applied`` / ``failed_index`` carry which rows actually
+    # landed. It is NOT a claim that every named row is in the merit.
+    range_flag_kw = ({"flags": [f"operand[{index}] ({op_type}): {text}"
+                                for index, op_type, verdict in range_disclosures
+                                for text in verdict["flags"]]}
+                     if range_disclosures else {})
+
     try:
         # ---- Phase 2: apply (mode replace clears first). ----
         if mode == "replace":
@@ -1106,6 +1296,7 @@ def apply_merit_recipe(session, params):
                     session, mfe, checkpoint_path, atomic, mode,
                     results=[], failed_index=None,
                     reason=f"clear_merit failed: {clear.get('error')}",
+                    range_disclosures=range_flag_kw,
                 )
 
         # ---- Sub-phase 2a: AUTHOR every operand (literal params + Target/Weight) ----
@@ -1128,6 +1319,7 @@ def apply_merit_recipe(session, params):
                         session, mfe, checkpoint_path, atomic, mode,
                         results=results, failed_index=index,
                         reason=str(exc),
+                        range_disclosures=range_flag_kw,
                     )
                 # atomic=False: best-effort, continue past the failure.
                 continue
@@ -1151,6 +1343,7 @@ def apply_merit_recipe(session, params):
                         results=results, failed_index=index,
                         reason=f"engine threw while authoring operand[{index}] "
                                f"({op_type}): {exc!r}",
+                        range_disclosures=range_flag_kw,
                     )
                 # atomic=False: best-effort, continue past the failure.
                 continue
@@ -1189,6 +1382,7 @@ def apply_merit_recipe(session, params):
                         results=results, failed_index=index,
                         reason=(f"internal remap desync (missing live row for index "
                                 f"{exc})" if isinstance(exc, KeyError) else str(exc)),
+                        range_disclosures=range_flag_kw,
                     )
                 # atomic=False: best-effort, continue past the failure.
                 continue
@@ -1209,6 +1403,7 @@ def apply_merit_recipe(session, params):
                         results=results, failed_index=index,
                         reason=f"engine threw while wiring refs for operand[{index}] "
                                f"({entry['type']}): {exc!r}",
+                        range_disclosures=range_flag_kw,
                     )
                 # atomic=False: best-effort, continue past the failure.
                 continue
@@ -1247,8 +1442,9 @@ def apply_merit_recipe(session, params):
                 merit=merit,
                 mode=mode,
                 atomic=atomic,
+                **range_flag_kw,
             )
-        return {
+        envelope = {
             "ok": True,
             "mode": mode,
             "atomic": atomic,
@@ -1258,13 +1454,27 @@ def apply_merit_recipe(session, params):
             "number_of_operands": number_of_operands,
             "merit": merit,
         }
+        # ONE top-level flags list naming the recipe INDEX of each admitted-but-
+        # disclosed range. ABSENT when there is nothing to disclose (an accepted pair
+        # that is a fixed point of the clamp says nothing, which cannot overclaim) --
+        # which the empty FRAGMENT gives for free.
+        envelope.update(range_flag_kw)
+        return envelope
     finally:
         _unlink_quiet(checkpoint_path)
 
 
 def _rollback_or_failclosed(session, mfe, checkpoint_path, atomic, mode, *,
-                            results, failed_index, reason):
+                            results, failed_index, reason, range_disclosures=None):
     """Roll back via ``LoadMeritFunction(tmp)``; fail-closed if the LOAD throws (§5).
+
+    ``range_disclosures`` is the caller's pre-rendered range-disclosure
+    kwargs FRAGMENT -- ``{"flags": [...]}`` or ``{}`` -- and it is spliced onto the TWO
+    ``partial_state: True`` returns ONLY. It is deliberately NOT spliced onto the
+    successful-rollback return: there ``rolled_back:true, applied:0`` and the authored
+    rows are GONE, so disclosing a range about them would be a NEW overclaim of exactly
+    the kind this change exists to remove. Default ``None`` keeps every caller that
+    omits it byte-identical.
 
     Builds the ``merit_recipe_apply`` envelope for an atomic Phase-2 failure:
 
@@ -1272,7 +1482,9 @@ def _rollback_or_failclosed(session, mfe, checkpoint_path, atomic, mode, *,
       ``rolled_back:true, checkpoint:true, applied:0``;
     - a rollback LOAD THROW (checkpoint existed, restore failed) -> FAIL-CLOSED:
       ``partial_state:true, rolled_back:false, checkpoint:true`` + an EXPLICIT "reload
-      your design .zmx to recover" message. The handler NEVER raises.
+      your design .zmx to recover" message. THIS HELPER never raises -- read as a claim
+      about ``apply_merit_recipe`` as a whole the sentence overstated, and a probe
+      measured one path on which that wider reading was false.
 
     When ``checkpoint_path`` is falsy (``None`` / empty — the ``atomic=False`` case,
     which takes NO checkpoint), there is NOTHING to restore: NEVER feed a ``None`` /
@@ -1310,6 +1522,7 @@ def _rollback_or_failclosed(session, mfe, checkpoint_path, atomic, mode, *,
             mode=mode,
             atomic=atomic,
             number_of_operands=_safe_count(mfe),
+            **(range_disclosures or {}),
         )
     try:
         mfe.LoadMeritFunction(checkpoint_path)
@@ -1329,6 +1542,7 @@ def _rollback_or_failclosed(session, mfe, checkpoint_path, atomic, mode, *,
             mode=mode,
             atomic=atomic,
             number_of_operands=_safe_count(mfe),
+            **(range_disclosures or {}),
         )
     return _oc.error_envelope(
         "apply_merit_recipe",
@@ -1449,11 +1663,21 @@ APPLY_MERIT_RECIPE_SPEC = ToolSpec(
         "atomic": "boolean",
     },
     description=(
-        "Apply a portable merit recipe (validated before any mutation). "
-        "mode='replace' (default) clears the merit editor first; mode='append' adds "
-        "onto it. Gotcha: fail-closed — on any error it rolls back and reports "
-        "checkpoint:false / partial_state:true rather than leaving a half-applied "
-        "merit. See add_operand, add_math_constraint, build_merit."
+        "Apply a portable merit recipe (validated before any recipe entry is "
+        "authored). mode='replace' (default) clears the merit editor first; "
+        "mode='append' adds onto it. Gotcha: fail-closed — a validation failure refuses "
+        "the whole recipe before anything is authored, and a failure DURING the apply "
+        "rolls back to the pre-apply merit and reports rolled_back:true / "
+        "checkpoint:true / applied:0 rather than leaving a half-applied merit; if the "
+        "ROLLBACK itself fails the envelope says so with partial_state:true / "
+        "rolled_back:false and names the .zmx reload as the recovery. "
+        + _oc._RANGE_DOOR_SERVED_CLAUSE + " A WELL-FORMED "
+        "result describes only the range structure at write time — it does not "
+        "establish that the interval contains a qualifying surface or that the operand "
+        "will contribute; checked before any recipe entry is authored, and this tool "
+        "evaluates the merit before returning, so its envelope reports what it "
+        "AUTHORED, not a post-return reading of the cells. "
+        "See add_operand, add_math_constraint, build_merit."
     ),
 )
 

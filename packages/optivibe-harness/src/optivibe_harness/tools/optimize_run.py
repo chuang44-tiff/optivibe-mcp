@@ -159,6 +159,9 @@ def dry_run(session, params):
     # ok-pass (NumberOfOperands > 0), via the ONE shared predicate. Merged with any
     # config-span warning (either may be None).
     merged = _merge_warning(result.get("warning"), _oc._scan_rayfree_merit(system))
+    # The malformed-range linter, on the same non-blocking channel.
+    merged, _s3_keys = _malformed_range_finding(system, merged)
+    result.update(_s3_keys)
     if merged is not None:
         result["warning"] = merged
     return result
@@ -438,6 +441,54 @@ def _merge_warning(first, second):
     if not parts:
         return None
     return "; ".join(parts)
+
+
+def _malformed_range_finding(system, warning):
+    """``(merged_warning, additive_keys)`` for the malformed-range linter.
+
+    ONE call shape for all three preflight/tail sites (no drifting copy). The
+    human sentence merges into the existing ``warning`` channel; the structured finding
+    gets its OWN key, because ``_merge_warning``'s ``"; "`` join is LOSSY and a finding
+    carrying row numbers, surfaces and tiers does not survive an unsplittable string.
+
+    GATES NOTHING — ``ok`` and ``verdict`` are never touched here
+    (``SPEC-high-level.md:490``: analytic checks are flags, never verdicts).
+    ``_scan_malformed_ranges`` has THREE return shapes and the keys track them exactly:
+
+    * CLEAN **and fully read** -> ``(None, None)``, and BOTH keys are ABSENT. All three
+      conjuncts are required: no flagged rows, ``unclassified == 0``, AND a domain that
+      resolved to a real integer.
+    * a CENSUS -> ``(sentence, record)`` carrying ``scan_completed: True``.
+      ``malformed_ranges`` is PRESENT whenever a ROW could not be classified, even with
+      zero flagged rows.
+    * a SCAN FAULT -> ``(sentence, record)`` carrying ``scan_completed: False``, with
+      ``rows`` / ``unclassified`` / ``by_operand`` / ``n_operands`` deliberately ABSENT
+      rather than zero-filled. **So ``malformed_ranges`` is present on a fault TOO**, and
+      a consumer that wants a census must branch on ``scan_completed`` instead of reading
+      a missing key as a zero.
+
+    **THE PARAGRAPH BELOW IS HISTORY, AND THE TENSE IS THE WHOLE POINT OF KEEPING IT.**
+    ``_scan_malformed_ranges`` USED TO return ``(None, None)`` -- the CLEAN signal -- on a
+    TOTAL-scan throw (``system.MFE`` or ``int(mfe.NumberOfOperands)``, i.e. before the row
+    loop), and the line below turned that into ``keys = {}``. An otherwise-COMPLETED
+    optimization whose post-run operand-count read threw then carried neither
+    ``malformed_ranges`` nor any fault disclosure, byte-identical to a clean scan. That is
+    FIXED at the scanner: a total-scan throw now returns a fault RECORD naming the stage
+    it failed at, plus a fault SENTENCE that states in terms that it is a statement about
+    the CHECK and not about the merit. Both scanners were changed in one go, deliberately,
+    because fixing one and leaving its twin is the pattern that bred the defect.
+
+    **AND THIS DOCSTRING IS WHAT KEPT BEING LEFT BEHIND -- TWICE.** An earlier round
+    narrowed the SCANNER's own version of this sentence and left this one, its CONSUMER,
+    untouched: one of two sites. The behaviour fix then corrected the scanner AGAIN and
+    STILL left this consumer describing the defect as live, so a reader of THIS function
+    was told the fault went undisclosed after it had been disclosed. The transferable part
+    is not about the scan: a docstring that describes a callee's behaviour is a SECOND
+    SITE, and the callee's fix does not reach it.
+    """
+    sentence, ranges = _oc._scan_malformed_ranges(system)
+    keys = {} if ranges is None else {"malformed_ranges": ranges}
+    return _merge_warning(warning, sentence), keys
 
 
 def _auto_normalize(session, params):
@@ -1071,6 +1122,8 @@ def _optimize_impl(session, params):
     # non-blocking ray-free-merit WARN — the merit exists here
     # (a run completed). Merged with the run-time + span warnings (all may be None).
     warning = _merge_warning(warning, _oc._scan_rayfree_merit(system))
+    # The malformed-range linter (structured key applied to the result).
+    warning, _s3_keys = _malformed_range_finding(system, warning)
 
     # Post-optimize edge / buried-center audit — ONCE on the RESULT,
     # after the pass loop + optimizer Close(). Reuses check_clearance (agreement by
@@ -1078,11 +1131,33 @@ def _optimize_impl(session, params):
     # MNEG.Value — the SEQ wizard floors at Surf1's larger aperture, ~40% divergent),
     # fully guarded, additive keys, never flips ok, never raises. Only the SUCCESS
     # return is hooked (a failed/refused/uncomputable run has no completed geometry).
-    audit_floor = _resolve_audit_glass_floor(system)
+    # Each resolver returns (floor_or_None, provenance). ``None`` means the
+    # floor was NOT ESTABLISHED, and the audit must not silently substitute a default for
+    # it -- ``_edge_audit_warnings`` audits that axis at 0.0 so a NEGATIVE edge still
+    # fires, and emits ``thin_edge_net_withheld_warning`` naming the [0, floor)
+    # thresholding it withheld.
+    # THAT CLAUSE USED TO BE FALSE. It read "and discloses that the [0, floor)
+    # thresholding did not run" while the whole emitted envelope was a single
+    # ``geometry_audit`` key carrying no such statement anywhere -- so the comment
+    # asserted a disclosure existed and nobody built it. The key named above makes it
+    # true. The disclosure is GLASS-ONLY and that is MEASURED: nothing reads an AIR
+    # gap's ``threshold``, so an unestablished AIR floor withholds no thresholding to
+    # disclose.
+    audit_floor, glass_basis = _resolve_audit_glass_floor(system)
     # dogfood F-2: the AIR floor resolves from the design's OWN authored bound too,
-    # so geometry_audit.basis reports the floors ACTUALLY used on BOTH axes.
-    air_floor = _resolve_audit_air_floor(system)
-    edge_audit = _edge_audit_warnings(session, audit_floor, air_floor)
+    # rather than the hardcoded default it used to be handed.
+    #
+    # THIS COMMENT USED TO END "so geometry_audit.basis reports the
+    # floors ACTUALLY used on BOTH axes", which is FALSE and was the THIRD live copy of
+    # a claim round 4 corrected in two other places in the same change. Measured with
+    # both axes UNESTABLISHED: check_clearance WAS GIVEN {min_glass: 0.0, min_air: 0.0}
+    # while basis PUBLISHES {min_glass: None, min_air: None}. ``basis`` reports WHAT THE
+    # AUDIT WAS GIVEN as a RESOLVER RESULT -- each axis's own resolved floor and where it
+    # came from -- and on an unestablished axis that is ``None``, never the 0.0 the call
+    # really ran at. Read the (value, provenance) PAIR, never the number alone.
+    air_floor, air_basis = _resolve_audit_air_floor(system)
+    edge_audit = _edge_audit_warnings(
+        session, audit_floor, air_floor, glass_basis, air_basis)
 
     result = {
         "ok": True,
@@ -1115,7 +1190,8 @@ def _optimize_impl(session, params):
         "artifacts": artifact_trail,
         "warning": warning,
     }
-    result.update(edge_audit)  # 0-3 additive (d) keys; never overwrites a base key
+    result.update(_s3_keys)    # the structured malformed-range finding (additive)
+    result.update(edge_audit)  # 0-6 additive geometry-audit keys; never overwrites a base key
     # GRIN §4.4: the post-optimize GRIN index audit — ONCE on the RESULT, after the
     # edge audit (the both-tails drift-pin). Additive keys, never flips ok,
     # never raises. The box audit runs regardless of grin_dn_max (weight-/param-independent).
@@ -1334,14 +1410,38 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
     span = _config_span_disclosure(system)
     warning = _merge_warning(warning, span["warning"])
     warning = _merge_warning(warning, _oc._scan_rayfree_merit(system))
+    # The malformed-range linter (structured key applied to the result).
+    warning, _s3_keys = _malformed_range_finding(system, warning)
 
     # The post-optimize edge / negative-air-gap audit rides a Hammer
     # result too (drift-pin — the same leaf helper as the DLS tail).
-    audit_floor = _resolve_audit_glass_floor(system)
+    # Each resolver returns (floor_or_None, provenance). ``None`` means the
+    # floor was NOT ESTABLISHED, and the audit must not silently substitute a default for
+    # it -- ``_edge_audit_warnings`` audits that axis at 0.0 so a NEGATIVE edge still
+    # fires, and emits ``thin_edge_net_withheld_warning`` naming the [0, floor)
+    # thresholding it withheld.
+    # THAT CLAUSE USED TO BE FALSE. It read "and discloses that the [0, floor)
+    # thresholding did not run" while the whole emitted envelope was a single
+    # ``geometry_audit`` key carrying no such statement anywhere -- so the comment
+    # asserted a disclosure existed and nobody built it. The key named above makes it
+    # true. The disclosure is GLASS-ONLY and that is MEASURED: nothing reads an AIR
+    # gap's ``threshold``, so an unestablished AIR floor withholds no thresholding to
+    # disclose.
+    audit_floor, glass_basis = _resolve_audit_glass_floor(system)
     # dogfood F-2: the AIR floor resolves from the design's OWN authored bound too,
-    # so geometry_audit.basis reports the floors ACTUALLY used on BOTH axes.
-    air_floor = _resolve_audit_air_floor(system)
-    edge_audit = _edge_audit_warnings(session, audit_floor, air_floor)
+    # rather than the hardcoded default it used to be handed.
+    #
+    # THIS COMMENT USED TO END "so geometry_audit.basis reports the
+    # floors ACTUALLY used on BOTH axes", which is FALSE and was the THIRD live copy of
+    # a claim round 4 corrected in two other places in the same change. Measured with
+    # both axes UNESTABLISHED: check_clearance WAS GIVEN {min_glass: 0.0, min_air: 0.0}
+    # while basis PUBLISHES {min_glass: None, min_air: None}. ``basis`` reports WHAT THE
+    # AUDIT WAS GIVEN as a RESOLVER RESULT -- each axis's own resolved floor and where it
+    # came from -- and on an unestablished axis that is ``None``, never the 0.0 the call
+    # really ran at. Read the (value, provenance) PAIR, never the number alone.
+    air_floor, air_basis = _resolve_audit_air_floor(system)
+    edge_audit = _edge_audit_warnings(
+        session, audit_floor, air_floor, glass_basis, air_basis)
 
     result = {
         "ok": True,
@@ -1380,7 +1480,8 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
         "artifacts": artifact_trail,
         "warning": warning,
     }
-    result.update(edge_audit)  # 0-4 additive (d)/(Item-1) keys; never overwrites a base key
+    result.update(_s3_keys)    # the structured malformed-range finding (additive)
+    result.update(edge_audit)  # 0-6 additive geometry-audit keys; never overwrites a base key
     # GRIN §4.4: the post-optimize GRIN index audit rides a Hammer result too (the
     # both-tails drift-pin — the same leaf helper as the DLS tail).
     result.update(_grin_index_audit_warnings(session, grin_dn_max))
@@ -1439,36 +1540,196 @@ def _finite_below(v, floor):
     )
 
 
+
+#: ``basis.min_glass_provenance`` / ``min_air_provenance``. The audit floor is no
+#: longer a bare float, because a bare float cannot say WHY it is that number -- and the
+#: field it feeds, ``geometry_audit.basis``, is documented as "the floors ACTUALLY used".
+_FLOOR_BASIS_AUTHORED = "authored"                   #: the design's own positive bound
+_FLOOR_BASIS_DEFAULT = "default_no_floor_authored"   #: ABSENT -> the policy
+_FLOOR_BASIS_UNESTABLISHED = "unestablished"         #: rows exist, none established
+#: An authored floor supplied the VALUE, but a HIGHER-PRIORITY token of the same pair
+#: read UNESTABLISHED. The VALUE is a real
+#: authored floor and nothing about it is partial -- what is partial is the EVIDENCE, so
+#: the name says which thing is unestablished rather than qualifying the number.
+_FLOOR_BASIS_PARTIAL = "authored_sibling_unestablished"
+
+#: The provenances on which the ``[0, floor)`` sub-floor net ran AT A FLOOR THIS AUDIT CAN
+#: VOUCH FOR. ``authored`` is the design's own bound; ``default_no_floor_authored`` is the
+#: ABSENT domain, where the policy default IS the correct floor (the resolver's own
+#: ruling: "Keep it, and say so") and the net therefore really did run. Everything else --
+#: ``unestablished``, ``authored_sibling_unestablished``, and ANY token this constant does
+#: not list -- is a floor whose EVIDENCE is degraded. Membership is the POSITIVE test on
+#: purpose: an unrecognised token falls OUT and resolves toward disclosure, never toward a
+#: clean bill (measured pre-fix: a fifth token thresholded at its value and emitted NO
+#: withheld disclosure at all -- a fail-open on exactly the input names as its
+#: own trigger).
+_FLOOR_BASES_GOVERNING = (_FLOOR_BASIS_AUTHORED, _FLOOR_BASIS_DEFAULT)
+
+
+def _effective_floor(value, basis):
+    """``(threshold, governing)``. TOTAL: never returns ``None``/non-finite.
+
+    ``_edge_audit_warnings`` used to decide BOTH of these from ONE expression::
+
+        eff_glass = 0.0 if glass_floor is None else glass_floor
+
+    which answers the EVIDENCE question (*"do we know what the design intended?"*) from
+    the VALUE's nullability — re-deriving, one function later, exactly the state the
+    ``(value, status)`` tri-state was introduced to stop anyone re-deriving. They are two
+    questions and they get two answers, from the two different inputs:
+
+    - **the threshold** comes from the VALUE, and is made TOTAL here. The guard is
+      ``_finite``, not ``is not None``: the old expression passed ``nan`` / ``inf`` /
+      ``True`` / a string straight through into ``check_clearance`` (measured pre-fix ---
+      ``glass_floor=nan`` was handed to the audit verbatim). So this is fail-safe in the
+      direction was worried about *and* in one more besides — it is strictly
+      safer than the expression it replaces, not merely tidier.
+    - **``governing``** comes from the PROVENANCE — positive membership of
+      ``_FLOOR_BASES_GOVERNING`` — **AND** from the value being finite. The second
+      conjunct sweeps this fix's own mechanism for siblings: a provenance claiming
+      ``authored`` beside an unusable value must NOT read as established, or a
+      provenance-keyed branch would restore the silent withdrawal one input over. Both
+      conjuncts must hold; either failing resolves toward ALARM.
+
+    So a DISAGREEMENT between the pair is now the alarm case
+    rather than the silent one, and no branch can pass ``None`` into ``check_clearance``.
+
+    **NEVER RAISES, and that is enforced rather than asserted.** ``_finite`` reaches
+    ``math.isfinite``, which calls ``__float__`` — so an ``int``/``float`` SUBCLASS whose
+    ``__float__`` raises passes the ``isinstance`` guard and throws (the shape
+    ``_FloatRaises`` was written for one mechanism over), and ``basis in
+    _FLOOR_BASES_GOVERNING`` reflects ``==`` onto ``basis``, which can throw too. Writing
+    "never raises" over an unguarded body is an overclaim this module records being
+    corrected in THREE named places already — ``_resolve_audit_glass_floor`` (three
+    falsified clauses at once), ``_resolve_audit_air_floor`` and ``_basis``
+    (where an ``isinstance`` guard was measured NOT to deliver the contract its
+    docstring claimed) — so the body is guarded instead. A value that cannot even be
+    TESTED is by
+    definition unusable, so the except resolves to ``(0.0, False)`` — the ALARM side.
+    (It matters that this is total: the sole caller sits inside its own outer never-raise
+    net, so an escape here would not surface — it would relabel the WHOLE audit
+    ``audit_failed`` / ``basis: None``, quieter than the disclosure it replaced.)
+    """
+    try:
+        finite = _finite(value)
+        return (float(value) if finite else 0.0,
+                bool(finite and basis in _FLOOR_BASES_GOVERNING))
+    except Exception:  # noqa: BLE001 — an untestable value is UNUSABLE; alarm, not clean
+        return (0.0, False)
+
+
+def _resolve_floor_pair(mfe, tokens, last_surface, default):
+    """``(floor_or_None, provenance)`` for an (edge, centre) token pair.
+
+    **The fallback is SCOPED, not deleted.** It has two domains and only one of them is a
+    policy:
+
+    - **ABSENT** (no rows of either token, or every row a deliberate ``target <= 0`` /
+      weight-0 opt-out): the design authored no floor, and ``default`` is a DOCUMENTED
+      Policy threshold measured against the micro-optic false positive.
+      Deleting it here would remove the detect-side net from exactly the population most
+      likely to have thin edges -- designs nobody ever floored. **Keep it, and say so.**
+    - **UNESTABLISHED** (rows of the token EXIST that the reader declined or failed to
+      establish): substituting ``default`` certifies "audited at the floor" when no floor
+      was established. That is a spoofable oracle, and it is the fail-open that was
+      measured -- an authored 2.0 silently audited at 1.0, missing every glass edge in
+      [1.0, 2.0). **Refuse it.** Absence of evidence ships as absence of evidence.
+
+    On UNESTABLISHED the AXIS IS NOT SUPPRESSED: the caller still audits at 0.0, so a
+    NEGATIVE edge/centre -- a finding at ANY floor -- still fires. Only the ``[0, floor)``
+    thresholding is withheld, which is the only part that ever needed the floor's value.
+
+    **PRIORITY ORDER, AND EVALUATION STOPS AT THE FIRST ``FLOOR_FOUND``** -- a
+    lower-priority token may never be READ AT ALL. So ``authored`` means *the
+    highest-priority token that could be read supplied this value*; it says **nothing**
+    about lower-priority tokens. ``authored_sibling_unestablished`` is emitted only in
+    the direction where a GOVERNING floor was lost: a higher-priority token read
+    UNESTABLISHED and a lower-priority one then supplied the value.
+
+    **The asymmetry is deliberate, and it is measured, not assumed.** ``check_clearance``
+    applies ONE ``min_glass`` to BOTH the edge and the centre of every glass gap
+    (``clearance.py:280``), so there is no per-axis threshold to resolve into: a FOUND
+    **edge** already governs both axes and an unread centre costs no detection. The
+    reverse is not symmetric -- an unestablished **edge** with a FOUND centre silently
+    thresholds the graded axis at the OTHER axis's number, which is the 2.0 -> 1.0 drop
+    that was measured. Hence one token, one direction. (Considered and REJECTED:
+    evaluating all tokens before returning, to make the token symmetric. It costs a full
+    extra MFE walk per axis on the common healthy path and buys ZERO detection, for the
+    reason above. Recorded so it is not re-proposed as a fix for the asymmetry.)
+    """
+    worst_unestablished = False
+    for token in tokens:
+        value, status = _oc._min_positive_target(mfe, token, last_surface=last_surface)
+        if status == _oc.FLOOR_FOUND:
+            # CARRY the state this resolver was HANDED. It used to return
+            # ``authored`` here unconditionally, discarding ``worst_unestablished`` the
+            # moment any token resolved: a design authoring MNEG 2.0 (edge, drifted
+            # cells) + MNCG 1.0 (centre, intact) was audited at 1.0 and stamped
+            # ``authored`` -- a positive assertion of a clean origin for a resolution
+            # that lost the governing floor. The governing ruling line is "no consumer may
+            # re-derive state"; this consumer did something adjacent and equally bad and
+            # DISCARDED a state it was handed. ``worst_unestablished`` can only be True
+            # from an EARLIER iteration, so this fires in one direction only, by
+            # construction -- see the docstring.
+            return (value, _FLOOR_BASIS_PARTIAL if worst_unestablished
+                    else _FLOOR_BASIS_AUTHORED)
+        if status == _oc.FLOOR_UNESTABLISHED:
+            worst_unestablished = True
+    if worst_unestablished:
+        return (None, _FLOOR_BASIS_UNESTABLISHED)
+    return (default, _FLOOR_BASIS_DEFAULT)
+
 def _resolve_audit_glass_floor(system):
     """The (d) post-optimize audit's glass floor (§D-FLOOR OPTION-ii / MIN).
 
     The design's OWN authored positive floor — the MIN positive MNEG target (else the
     MIN positive MNCG target) read through the shared ``_min_positive_target`` reader —
-    with the standard 1.0 mm fallback when none is authored. Reading the authored floor
-    kills the micro-optic false-positive (a design built at min_glass=0.3 audited at a
-    flat 1.0 would false-warn). MIN is the loosest authored intent, so it never
-    over-warns a legitimately-thin design. NEVER raises -> _DEFAULT_MIN_GLASS on a throw.
+    with the 1.0 mm fallback when none is authored. Reading the authored floor kills the
+    micro-optic false-positive (a design built at min_glass=0.3 audited at a flat 1.0
+    would false-warn). MIN is the loosest authored intent, so it never over-warns a
+    legitimately-thin design.
 
-    ``_min_positive_target`` returns a STRICTLY-positive float or ``None`` (never a
-    falsy-but-valid 0.0), so the ``or``-chain is correct.
+    **THREE CLAUSES WERE FALSIFIED HERE AND ARE NOW CORRECTED.** An earlier
+    change REWROTE this function and left its docstring stating the
+    pre-rewrite contract in three places -- the second time that same sentence was
+    falsified without being touched. What it used to say, and what
+    is true:
+
+    - *"NEVER raises -> ``_DEFAULT_MIN_GLASS`` on a throw."* It never raises, but a
+      throw now returns ``(None, _FLOOR_BASIS_UNESTABLISHED)``: a resolver that threw
+      established NOTHING, and substituting a policy floor for it certifies "audited at
+      the floor" when no floor was read.
+    - *"``_min_positive_target`` returns a STRICTLY-positive float or ``None``."* It
+      returns a ``(value, status)`` TUPLE, and ``value`` is non-``None`` iff
+      ``status == FLOOR_FOUND``.
+    - *"...so the ``or``-chain is correct."* There is no ``or``-chain. It was deleted;
+      the priority walk lives in ``_resolve_floor_pair``, which is also where the
+      four-value provenance vocabulary is decided.
+
+    Returns ``(floor_or_None, provenance)``. NEVER raises.
     """
     try:
         mfe = system.MFE
-        return (
-            _oc._min_positive_target(mfe, "MNEG")
-            or _oc._min_positive_target(mfe, "MNCG")
-            or _DEFAULT_MIN_GLASS
-        )
-    except Exception:  # noqa: BLE001 — advisory; fall back to the standard floor
-        return _DEFAULT_MIN_GLASS
+        # ONE domain read for this pass, threaded to BOTH reads so they
+        # cannot classify the same row against different domains.
+        last_surface = _oc._resolve_last_surface(system)
+        return _resolve_floor_pair(
+            mfe, ("MNEG", "MNCG"), last_surface, _DEFAULT_MIN_GLASS)
+    except Exception:  # noqa: BLE001 — a resolver that threw established NOTHING
+        return (None, _FLOOR_BASIS_UNESTABLISHED)
 
 
 def _resolve_audit_air_floor(system):
     """The (d) post-optimize audit's AIR floor — the design's OWN authored floor.
 
-    The exact sibling of `_resolve_audit_glass_floor`: the MIN positive ``MNEA`` (edge)
-    target, else the MIN positive ``MNCA`` (centre) target, with the standard 0.5 mm
-    fallback when none is authored. ``build_merit(min_air=Δ)`` authors those bounds
+    The exact sibling of `_resolve_audit_glass_floor` — **and it was CHECKED for that
+    sibling's three falsified clauses and carries NONE of them.** No edit is
+    needed here; it is recorded so a later reader following the cross-reference above,
+    landing in the corrected text, does not "fix" this one into divergence with it.
+
+    The MIN positive ``MNEA`` (edge) target, else the MIN positive ``MNCA`` (centre)
+    target, with the 0.5 mm fallback when none is authored. ``build_merit(min_air=Δ)``
+    authors those bounds
     (``AirMin``/``AirEdge`` -> positive ``MNCA``/``MNEA``), so an authored air floor has a
     live source to resolve from exactly as the glass floor does. NEVER raises.
 
@@ -1478,7 +1739,18 @@ def _resolve_audit_air_floor(system):
     ``geometry_audit.basis``, a field the spec describes as "the floors actually used".
     Shipping a floor the design did not author, in the field added to stop exactly that
     class of over-claim, is this cycle's own thesis violated in its own new field. Both
-    axes now resolve the same way, so ``basis`` reports what the audit really used.
+    axes now resolve the same way, so ``basis`` reports each axis's OWN resolved floor
+    instead of a hardcoded constant for one of them.
+
+    **The sentence above used to end "so ``basis`` reports what
+    the audit really used", and that is FALSE.** It was the THIRD live copy of the claim
+    corrected in two other places in the same change — and it sat 44 lines below
+    this docstring's own "was CHECKED for that sibling's three falsified clauses and
+    carries NONE of them", which reads as a clean bill of health while the docstring
+    carried a DIFFERENT falsified clause. The check was scoped to the sibling's three
+    clauses; this one was not among them. Measured with both axes UNESTABLISHED:
+    ``check_clearance`` was GIVEN ``{min_glass: 0.0, min_air: 0.0}`` while ``basis``
+    published ``{min_glass: None, min_air: None}``.
 
     Verdict-neutral by construction: nothing in `_edge_audit_warnings` reads an AIR gap's
     ``threshold`` (the legacy strings are glass-only and the nonphysical air arm keys on
@@ -1487,13 +1759,12 @@ def _resolve_audit_air_floor(system):
     """
     try:
         mfe = system.MFE
-        return (
-            _oc._min_positive_target(mfe, "MNEA")
-            or _oc._min_positive_target(mfe, "MNCA")
-            or _DEFAULT_MIN_AIR
-        )
-    except Exception:  # noqa: BLE001 — advisory; fall back to the standard floor
-        return _DEFAULT_MIN_AIR
+        # ONE domain read for this pass (the glass sibling's rule).
+        last_surface = _oc._resolve_last_surface(system)
+        return _resolve_floor_pair(
+            mfe, ("MNEA", "MNCA"), last_surface, _DEFAULT_MIN_AIR)
+    except Exception:  # noqa: BLE001 — a resolver that threw established NOTHING
+        return (None, _FLOOR_BASIS_UNESTABLISHED)
 
 
 # =========================================================================== #
@@ -1627,18 +1898,369 @@ _KIND_LEGACY_KEY = {
 }
 
 
-def _edge_audit_warnings(session, glass_floor, air_floor):
-    """0-3 additive STRING keys from ONE ``check_clearance`` on the RESULT.
+# --------------------------------------------------------------------------- #
+# THE WITHHELD-THRESHOLDING DISCLOSURE.
+#
+# The comment above BOTH production call sites used to assert that this function
+# "discloses that the [0, floor) thresholding did not run". MEASURED, it did not: on an
+# UNESTABLISHED glass floor the ENTIRE emitted envelope was `{"geometry_audit": ...}` —
+# no `threshold`, no "did not run", no "withheld", no "sub-floor", not even the substring
+# "thin". The only carrier of the fact was the nested enum string
+# `geometry_audit.basis.min_glass_provenance`, and NOTHING in `src/` branches on it.
+#
+# That comment functioned as a LICENCE: it said the disclosure existed, so nobody built
+# it. These two strings make the sentence TRUE, in the channel that actually lost the
+# finding.
+#
+# WHY THE WARNING CHANNEL AND NOT `basis`, AND NOT `status`:
+#   * `basis.min_glass_provenance` ALREADY carries the fact and is unread. A second
+#     STRUCTURED field would be two texts for ONE claim — the two-texts-one-claim
+#     defect. ONE new carrier, in the channel a reader consults for this question.
+#   * `status` was PROPOSED and is REJECTED ON MEASUREMENT. `status` is not, and never
+#     was, a function of the floor: a FIRING `thin_edge_warning` coexists with
+#     `status: "no_findings"` on a fully healthy authored 2.0 floor, and sweeping the
+#     glass floor None -> 0.0 -> 0.1 -> 0.5 -> 1.0 -> 2.0 -> 5.0 across all four
+#     provenances yields the single status `no_findings` every time. `status` derives
+#     from `nonphysical` + `reason`, and every `nonphysical` append site keys on a
+#     literal `< 0.0`. So `no_findings` means exactly what its own constant says — the
+#     audit RAN and returned no confirmed NONPHYSICAL finding — and that is TRUE here.
+#     Moving it would (1) demote EVERY verdict on this population via `_qualify_verdict`,
+#     (2) make `aperture_ramp` REJECT AND RESTORE every step (its accept gate is
+#     `ga_status == "no_findings"`), and (3) serve `_NOT_AUDITED_MSG`'s "the per-gap
+#     clearance audit did NOT run over this design" about a design where it FULLY ran.
+#
+# GLASS ONLY, and that asymmetry is MEASURED, not an oversight (a live probe). An
+# UNESTABLISHED **AIR** floor costs this function NOTHING: the emitted string-key set and
+# the status are byte-identical to the authored-air case, only `basis` differs (honestly),
+# because NOTHING here consumes an air gap's `threshold` — the two threshold-reading
+# clauses (`thin_edge_warning`, `buried_center_warning`) are glass-only and the
+# nonphysical air arm keys on `< 0`. A symmetric air arm would manufacture a false alarm
+# on a population with ZERO detection loss. Do not "fix" the asymmetry.
+#
+# BOTH ARMS, and that is the point. PARTIAL is not a milder UNESTABLISHED — it is the
+# SAME channel losing a DIFFERENT band. Measured on a design whose true authored edge
+# floor is 2.0, sweeping the real edge thickness (YES = reported, . = a real sub-floor
+# edge that is NOT reported):
+#
+#     scenario                            -0.2   0.3   0.6   0.9   1.2   1.5   1.9
+#     edge FOUND 2.0 (healthy)             YES   YES   YES   YES   YES   YES   YES
+#     edge lost, centre 1.0 (PARTIAL)      YES   YES   YES   YES    .     .     .
+#     both lost -> UNESTABLISHED           YES    .     .     .     .     .     .
+#
+# An UNESTABLISHED-only fix is the exact shape this change has bred at every round
+# (four times, across three successive rounds).
+#
+# THE PARTIAL ARM MAY NOT NAME THE LOST FLOOR'S VALUE. `_resolve_floor_pair` STOPS at the
+# first `FLOOR_FOUND`, so the unestablished token's own target was never read — naming a
+# number there would be a fresh over-claim inside the fix for an over-claim. It names the
+# TOKEN PAIR (glass resolves MNEG then MNCG, `_resolve_audit_glass_floor`) and says the
+# number is unavailable BECAUSE it was never read.
+#
+# WHAT THIS DOES **NOT** DO: it does not restore the detection. The `[0, authored)` band
+# stays unreported on UNESTABLISHED and `[sibling, lost)` on PARTIAL. This key converts a
+# SILENT loss into a STATED one. Reversing the loss means re-adjudicating the "no
+# substitution on UNESTABLISHED" rule, which the spoofable-oracle argument decided and
+# which needs a live gate.
+#
+# The key NAME carries the substring `thin_edge` deliberately, so a reader scanning the
+# envelope for the edge axis sees it next to `thin_edge_warning` rather than filed under
+# an unrelated name.
+#
+# ⚠ IT DOES NOT RESCUE THE GREP, and audit measured that:
+#     grep "thin_edge_warning"  vs  "thin_edge_net_withheld_warning"  ->  0 matches
+# `optimize_merit`'s served ETGT note sends a reader to grep the FULL key
+# ("the post-optimize thin_edge_warning on `optimize` is the AUTHORITY for edge safety"),
+# and that grep still returns nothing here — which is the exact "reads as clean" failure
+# this key exists to stop, one substring short. The mitigation as originally commented
+# CLAIMED to close that and does not. Tracked rather than silently reworded, because the
+# real fix is either a shared prefix both keys carry or a change to the served note, and
+# both are consumer-visible surface that round 5 was not authorised to move.
+# --------------------------------------------------------------------------- #
+_EDGE_FLOOR_WITHHELD_MSG = {
+    _FLOOR_BASIS_UNESTABLISHED: (
+        "the GLASS floor was NOT ESTABLISHED, so the [0, floor) sub-floor net did NOT "
+        "run: this audit thresholded the glass axis at 0.0, where only a NEGATIVE edge "
+        "or centre can fire. No usable glass floor could be established, so its value "
+        "is unavailable and cannot be named here. "
+        "An ABSENT thin_edge_warning on this result is therefore NOT evidence of a "
+        "manufacturable edge — it is an unchecked band. Grade the edge directly with "
+        "check_clearance at an explicit min_glass; if the merit carries no readable "
+        "glass floor, authoring one (build_merit glass=true, min_glass>0) and "
+        "re-optimizing restores the net."
+        # — without this clause the sentence above ("it is an unchecked band")
+        # OVER-STATES the loss the moment a provisional grade runs, and two adjacent texts
+        # would disagree about the same result. Digits are legitimate in THIS arm (0.0 is
+        # the number the audit really ran at), unlike the PARTIAL arm below.
+        " The band below the {hi:.3f} mm policy default IS now graded provisionally and "
+        "reported under thin_edge_warning_provisional when it finds a sub-floor edge or "
+        "cemented centre; that default is NOT this design's own floor, and the band above "
+        "it stays ungraded."
+        # ...and it is FORMATTED, not a literal. `_EDGE_FLOOR_WITHHELD_MSG` is served
+        # verbatim, so an unformatted `{hi:.3f}` would ship the BRACES to a reader. The
+        # number is interpolated from `_DEFAULT_MIN_GLASS` rather than typed, so the text
+        # cannot drift from the constant the grade actually uses. The rest of this
+        # arm contains no braces -- `[0, floor)` is square -- so one `.format` is safe.
+    ).format(hi=_DEFAULT_MIN_GLASS),
+    _FLOOR_BASIS_PARTIAL: (
+        "the GLASS floor came from the SIBLING bound only: the higher-priority glass "
+        "token (MNEG, the edge floor) read UNESTABLISHED, so this audit thresholded the "
+        "glass axis at the OTHER token's number (MNCG, the centre floor). A sub-floor "
+        "edge or centre ABOVE that number but below the unestablished token's own floor "
+        "was NOT reported. That floor's value cannot be named here — resolution stops at "
+        "the first floor it finds, so it was never read. An ABSENT thin_edge_warning on "
+        "this result is therefore NOT evidence of a manufacturable edge at the design's "
+        "own floor. Author a readable MNEG bound (build_merit glass=true) and "
+        "re-optimize, or grade the edge directly with check_clearance at an explicit "
+        "min_glass."
+        # -- and this arm's sentence is DIGIT-FREE by contract (the shipped
+        # `test_r5_the_PARTIAL_arm_names_no_NUMBER_for_the_floor_it_lost` row asserts no
+        # digit appears anywhere in this message, because the lost floor's value was
+        # never read and any number here would be invented). So it may not name the
+        # policy default, and it may not cite a ticket id.
+        " A PROVISIONAL grade against the policy default floor is reported under "
+        "thin_edge_warning_provisional when it finds an edge or cemented centre below "
+        "that default and at or above the sibling's number. Where the sibling's number "
+        "already meets or exceeds the policy default there is no band left to grade and "
+        "nothing is reported, so silence in that key is not evidence either."
+    ),
+}
+
+#: An UNRECOGNISED provenance token. ``_EDGE_FLOOR_WITHHELD_MSG`` is keyed on the two
+#: KNOWN degraded arms, so a fifth token would ``KeyError`` -- and because this whole
+#: function sits inside its own outer never-raise net, that KeyError would be SWALLOWED
+#: and relabel the entire audit ``audit_failed`` / ``basis: None``: quieter than the
+#: honest disclosure it replaced (round 4's pinned row exists for exactly that swallow, one
+#: mechanism over). So the lookup is a ``.get`` with this fallback, and a token nobody
+#: recognises still ships a disclosure rather than a clean envelope or a faulted one.
+_EDGE_FLOOR_WITHHELD_FALLBACK = (
+    "the GLASS floor's provenance is not one this audit recognises, so it cannot vouch "
+    "that the [0, floor) sub-floor net ran at a floor the design chose. An ABSENT "
+    "thin_edge_warning on this result is therefore NOT evidence of a manufacturable "
+    "edge. Grade the edge directly with check_clearance at an explicit min_glass."
+)
+
+
+# --------------------------------------------------------------------------- #
+# THE PROVISIONAL SUB-FLOOR NET, and why the spoofable-oracle objection
+# does not reach it.
+#
+# The withheld disclosure converted a SILENT loss into a STATED one and deliberately stopped there: on an
+# UNESTABLISHED glass floor the `[0, floor)` net does not run at all, so a real 0.6 mm
+# glass edge on a design whose true floor is 2.0 is reported NOWHERE, at any number, while
+# the envelope reads `verdict: "improved"` / `status: "no_findings"`. Reproduced against
+# the pre-fix tree, sweeping the real edge thickness (YES = the edge's own MEASURED NUMBER
+# appears in some `*_warning` string; `.` = a real sub-floor edge that is NOT reported):
+#
+#     scenario                            -0.2   0.3   0.6   0.9   1.2   1.5   1.9
+#     edge FOUND 2.0 (healthy)             YES   YES   YES   YES   YES   YES   YES
+#     edge lost, centre 1.0 (PARTIAL)      YES   YES   YES   YES    .     .     .
+#     both lost -> UNESTABLISHED           YES    .     .     .     .     .     .
+#
+# WHY THIS IS NOT THE SUBSTITUTION THE RESOLVER REFUSED.
+#
+# The resolver refused to substitute `_DEFAULT_MIN_GLASS` into `eff_glass`, and that refusal is
+# UPHELD -- the primary audit call still runs at `eff_glass`, and every legacy key is
+# byte-identical. The objection was that a substitution THERE certifies "audited at the
+# floor" when no floor was read: the fabricated number flows into `g["threshold"]`, into
+# the legacy `thin_edge_warning` / `buried_center_warning` texts a reader treats as the
+# edge AUTHORITY, and into `basis`, the field documented as what the audit was given. An
+# absent `thin_edge_warning` would then read as "graded, and clean, at the design's own
+# floor". That is a certification, and it is spoofable.
+#
+# A spoofable oracle is one whose SILENCE is read as evidence. This channel has no
+# silence to read:
+#   * it is ADD-ONLY. It cannot suppress a legacy key, mute a finding, or convert an
+#     unknown into a clean. It only ever ADDS a MEASURED number the withheld net could
+#     not see.
+#   * its own silence carries no weight, because `thin_edge_net_withheld_warning` is
+#     emitted on the SAME population UNCONDITIONALLY, whether or not this key fires.
+#     Absence of evidence still ships as absence of evidence -- which is precisely what
+#     the resolver's rule required, and it is untouched.
+#   * it does not certify the band it did not grade: the message NAMES the provisional
+#     floor as the policy default and states that the band ABOVE it stays ungraded.
+#   * it never reaches `nonphysical`, `status`, `reason` or the verdict. MEASURED across all
+#     four provenances plus an unknown token: `status` stays `no_findings`, `nonphysical`
+#     stays `[]`, `reason` stays None and `_qualify_verdict` leaves `improved` alone. The
+#     `aperture_ramp` half is an INFERENCE, not a measurement taken here: its accept gate is
+#     documented as `ga_status == "no_findings"`, and `status` is pinned unchanged above --
+#     no row in this file drives `aperture_ramp` itself. Those were the two consequences
+#     that made the `status` route unacceptable in round 5.
+#
+# So the act that rule forbade was moving a fabricated number into the CERTIFYING channel,
+# in the direction of CLEAN. This moves it into an ALARM channel that certifies nothing.
+# The uncertainty resolves toward alarm, which is the direction the rule requires.
+#
+# THE COST, STATED RATHER THAN OMITTED. On this population a design whose real floor is
+# genuinely BELOW the policy default -- a micro-optic authored at min_glass=0.3 whose MNEG
+# rows later became unreadable -- can draw a provisional finding it does not deserve. That
+# is the micro-optic false positive, accepted HERE and still refused in the legacy
+# channel, for one reason: this key is a non-blocking advisory on a population that ALREADY
+# carries an evidence caveat, it says in its own text that a design built below the policy
+# floor is not defective, and it moves neither `ok`, the verdict, nor any promote gate. On
+# a design with GOVERNING evidence it is never emitted at all (the negative control).
+#
+# WHAT IT DOES NOT RESTORE, and this is a real residual, not a rounding:
+#   * the band `[policy_default, real_floor)`. `real_floor` was never read -- that is what
+#     UNESTABLISHED means -- so no honest number covers it.
+#   * on PARTIAL whose sibling floor is AT OR ABOVE the policy default there is NO
+#     extension and this key is correctly SILENT. Measured: a PARTIAL sibling of 1.0 is
+#     exactly `_DEFAULT_MIN_GLASS`, so the band `[1.0, 1.0)` is empty and nothing is
+#     emitted; the ticket's own 1.5 mm PARTIAL case is in that band and stays unreported.
+# The MECHANISM covers both arms (acceptance item 1); the DETECTION GAIN on
+#     PARTIAL is conditional on the sibling sitting below the policy default.
+#
+# AND THE CONVERSE FALSE-POSITIVE, which the mutation census had to force into view: on a
+# GOVERNING floor BELOW the policy default -- a micro-optic authored at min_glass=0.3 -- a
+# band DOES exist, so the `not glass_governing` gate is the ONLY thing keeping this key off
+# a perfectly healthy design. The first negative control used floors of 2.0 and 1.0, both
+# at or above the policy default, where the empty band masks the governance gate: a build
+# that ignored governance entirely PASSED it. That is what
+# `test_t3b_..._micro_optic...` exists for, and it is the row a future edit will trip.
+# --------------------------------------------------------------------------- #
+_PROVISIONAL_KEY = "thin_edge_warning_provisional"
+
+#: The key NAME contains `thin_edge_warning` as a literal SUBSTRING, and that is chosen,
+#: not incidental. `optimize_merit`'s served ETGT note tells a reader that "the
+#: post-optimize thin_edge_warning on `optimize` is the AUTHORITY for edge safety", i.e.
+#: it sends them to grep that exact string -- and it is MEASURED that
+#: `thin_edge_net_withheld_warning` does NOT contain it, so the grep returned nothing on
+#: precisely the population that had lost a finding. This key restores a HIT for the
+#: FINDING half. It does not rescue the grep for the DISCLOSURE half: renaming the
+#: withheld key is a consumer-visible envelope change and `optimize_merit.py` is outside this
+#: change's scope -- see this cycle's report for that scope finding.
+#:
+#: IT DOES NOT END IN `_warning`, and that is a CHOICE with a measurement behind it. The
+#: two competing names each buy one property: `provisional_thin_edge_warning` keeps the
+#: family suffix, `thin_edge_warning_provisional` keeps SORTED ADJACENCY to
+#: `thin_edge_warning` in a dumped envelope (the withheld key's own rationale for its name,
+#: one key over). Adjacency won because a reader scanning the edge axis meets all three
+#: `thin_edge_*` keys together. The suffix costs nothing MEASURED: nothing in `src/`
+#: enumerates keys by a `_warning` suffix (`_qualify_verdict` reads
+#: `geometry_audit.status` and nothing else; `_merge_warning` merges named strings), so
+#: the suffix is a naming convention here and not a consumed contract. The only
+#: suffix-enumerating code is six test
+#: `assert not [k for k in out if k.endswith("_warning")]` rows, and they are unaffected
+#: EITHER WAY -- every one of them passes a GOVERNING floor, on which this key cannot
+#: fire. That is stated as a measured fact, not offered as the reason for the name.
+_PROVISIONAL_HEAD = (
+    "PROVISIONAL sub-floor grade — the design's own glass floor was NOT established on "
+    "this result (see thin_edge_net_withheld_warning), so the sub-floor net above ran at "
+    "{lo:.3f} mm and could not see these. Re-graded against the {hi:.3f} mm policy "
+    "default: "
+)
+_PROVISIONAL_TAIL = (
+    ". THIS IS NOT A VERDICT and NOT a finding at the design's own floor: {hi:.3f} mm is "
+    "the policy default, NOT a floor this design chose, so a design legitimately built "
+    "below it (a micro-optic) is not defective here. It is equally NOT a clean bill for "
+    "the band ABOVE {hi:.3f} mm — that band stays ungraded, because the design's own "
+    "floor could not be read. Grade the edge directly with check_clearance at an explicit "
+    "min_glass, or author a readable glass floor (build_merit glass=true, min_glass>0) "
+    "and re-optimize."
+)
+
+
+def _glass_band_findings(gaps, lo, hi):
+    """Glass edges / cemented centres MEASURED in the half-open band ``[lo, hi)``.
+
+    ``[lo, hi)`` is exactly what a net thresholded at ``lo`` could NOT see and a net
+    thresholded at ``hi`` WOULD. Excluding ``v < lo`` is what keeps this channel from ever
+    RESTATING a legacy finding: a negative edge already fires ``thin_edge_warning`` at
+    ``lo == 0.0``, so the provisional key reports the findings the legacy net MISSED and
+    nothing else. Both callers' thresholds come from ``_effective_floor``, so ``lo`` is
+    finite by construction and ``hi`` is a module constant.
+
+    The two predicates MIRROR the legacy clauses deliberately: an EDGE on any glass gap,
+    and a CENTRE only on a glass gap immediately followed by another glass gap (a cemented
+    interior) — the same pair ``thin_edge_warning`` and ``buried_center_warning`` use. This
+    channel re-runs the SAME two nets at a different threshold; it may not invent a THIRD
+    finding class, because a class the legacy net never had cannot be described as
+    something the withheld thresholding lost.
+
+    The clauses above are NOT refactored to share this body. They read each gap's OWN
+    ``g["threshold"]`` off the envelope, which the docstring calls "that gap's own
+    threshold" and which degrades independently when a malformed envelope omits it; this
+    reads a threshold computed HERE. Sharing one body would have to erase that
+    distinction, and the legacy keys' text and triggers are contract-frozen
+    (BYTE-IDENTICAL, ``_edge_audit_warnings``' docstring). Six duplicated lines is the
+    cheaper of the two risks. Pure; never raises on a well-formed list of dicts (and the
+    caller's outer net covers the rest).
+    """
+    found = []
+    total = len(gaps)
+    for j in range(total):
+        g = gaps[j]
+        if not isinstance(g, dict) or g.get("kind") != "glass":
+            continue
+        edge = g.get("edge_thickness")
+        if _finite_below(edge, hi) and not _finite_below(edge, lo):
+            found.append((g, "edge", edge))
+        nxt = gaps[j + 1] if j + 1 < total else None
+        if isinstance(nxt, dict) and nxt.get("kind") == "glass":
+            center = g.get("center_thickness")
+            if _finite_below(center, hi) and not _finite_below(center, lo):
+                found.append((g, "center", center))
+    return found
+
+
+def _edge_audit_warnings(session, glass_floor, air_floor,
+                         # THESE TWO DEFAULTS ARE KEPT DELIBERATELY, AND THE REASON
+                         # BELONGS HERE RATHER THAN IN A COMMIT MESSAGE, because
+                         # ``_basis`` — one screen down in this same module — DELETED
+                         # its equivalents on the stated grounds that "a default here
+                         # was a CLAIM: absence of an argument shipped as presence of
+                         # evidence". Read side by side and without this note, the two
+                         # decisions simply contradict each other.
+                         #
+                         # They do not, for two measured reasons. ``_basis``' defaults
+                         # were load-bearing on a LIVE path and cost ONE call site to
+                         # delete; these are reached by NO production caller (both pass
+                         # all five explicitly) and deleting them would churn dozens of
+                         # test call sites to buy what the arity pin already binds. And
+                         # a deleted default is a weaker forcing function here than it
+                         # looks: this function's own never-raise net would SWALLOW the
+                         # resulting TypeError and relabel it ``audit_failed``, so the
+                         # loud failure the deletion is supposed to buy does not arrive.
+                         #
+                         # What the defaults are NOT is a safety net. A future caller
+                         # that omits them stamps both axes ``authored`` and silently
+                         # suppresses the withheld disclosure, so the arity pin is the
+                         # real guard — and it reads THIS module only, by bare name. A
+                         # call added from another module, or built dynamically, is
+                         # outside what it can see.
+                         glass_basis=_FLOOR_BASIS_AUTHORED,
+                         air_basis=_FLOOR_BASIS_AUTHORED):
+    """The post-optimize geometry audit from ONE ``check_clearance`` on the RESULT.
 
     0-4 additive legacy STRING keys (``thin_edge_warning`` / ``buried_center_warning`` /
     ``negative_air_gap_warning`` / ``negative_bfl_warning``, BYTE-IDENTICAL text and
-    triggers, each present only when firing) PLUS — on EVERY exit — the ``geometry_audit``
+    triggers, each present only when firing — untouched here; they still
+    threshold at ``eff_glass``) PLUS — on EVERY exit — the ``geometry_audit``
     block and, iff ``reason is not None``, ``geometry_not_audited``.
+
+    **A FIFTH string key** is added, ``thin_edge_net_withheld_warning``, on the
+    SUCCESS exit only and only when the GLASS floor is NOT GOVERNING (its provenance is
+    UNESTABLISHED / PARTIAL / unrecognised, or its value is unusable). It is
+    not a legacy key and it is not a finding about the design: it states that the
+    ``[0, floor)`` sub-floor net did not run at a floor this audit can vouch for, so an
+    ABSENT ``thin_edge_warning`` cannot be read as evidence of a manufacturable edge. See
+    ``_EDGE_FLOOR_WITHHELD_MSG`` for the measurement, the glass-only scope and why this
+    is NOT in ``status``.
+
+    **A SIXTH string key** is added, ``thin_edge_warning_provisional``, on the same
+    SUCCESS-exit / non-governing population and ONLY when a glass edge or cemented centre
+    is MEASURED inside the band ``[eff_glass, _DEFAULT_MIN_GLASS)`` that the withheld net
+    could not see. It is ADD-ONLY and certifies nothing: it never suppresses a legacy key,
+    never reaches ``nonphysical`` / ``status`` / the verdict, and its own silence carries no
+    weight because the withheld disclosure rides the same population unconditionally. See
+    the block above ``_PROVISIONAL_KEY`` for why that is not the refused substitution,
+    for the accepted micro-optic false-positive cost, and for the bands it does NOT
+    restore (``[policy default, the design's own floor)``, and PARTIAL whose sibling floor
+    is already at or above the policy default).
 
     Numbers are READ from the returned envelope (agreement with an independent
     ``check_clearance`` by construction — NOT ``MNEG.Value``, which the SEQ wizard clamps
     at target and evaluates at Surf1's larger aperture, ~40% divergent from
-    divergent from ``check_clearance``'s ``min(semi)`` convention). NEVER raises
+    ``check_clearance``'s ``min(semi)`` convention).
 
     NEVER raises, NEVER flips ``ok``, runs ONCE. It NO LONGER returns ``{}``: an absent
     audit key never meant clean, so a refusal / vacuity / fold / throw is DISCLOSED
@@ -1652,15 +2274,68 @@ def _edge_audit_warnings(session, glass_floor, air_floor):
     # never propagates. (The inner .get() / isinstance guards are belt-and-suspenders; the
     # outer try is the load-bearing never-raise guarantee.)
     try:
+        # An UNESTABLISHED floor audits at 0.0: a NEGATIVE edge/centre is a
+        # finding at ANY floor, so a degraded floor read must not suppress the whole
+        # axis; only the [0, floor) thresholding is withheld.
+        #
+        # THIS COMMENT USED TO END "and `basis` says so". IT
+        # DOES NOT. `basis` publishes the RAW floor, i.e. `None`, never the 0.0 that was
+        # actually passed to check_clearance — so the call is NOT reproducible from its
+        # own advertised basis, and the field that carries the fact is the
+        # *_provenance one, not the number. `_basis`' heading is narrowed to match in
+        # the same change (two texts, ONE claim: fix both or the next reader re-derives
+        # the contradiction). Publishing 0.0 here instead was CONSIDERED and REJECTED —
+        # 0.0 is equally a number the design never authored, and it would ripple into
+        # consumers to fix what is a documentation defect.
+        #
+        # RESOLVED. These two lines used to read
+        #
+        #     eff_glass = 0.0 if glass_floor is None else glass_floor
+        #     eff_air   = 0.0 if air_floor   is None else air_floor
+        #
+        # which decided the EFFECTIVE floor from the VALUE's NULLABILITY while the
+        # disclosure five lines down keyed on the PROVENANCE -- two adjacent predicates
+        # answering DIFFERENT questions, one of them answering the EVIDENCE question from
+        # the wrong input. `_effective_floor` splits them: the threshold comes from the
+        # VALUE (and is TOTAL -- `_finite`, so `nan`/`inf`/`True` can no longer reach
+        # `check_clearance`, which they measurably did), and `governing` comes from the
+        # PROVENANCE, conjoined with the value being usable. A DISAGREEMENT is now the
+        # ALARM case, not the silent one. The old note recorded the pair as a BIJECTION on
+        # every reachable input and it was; two shapes of disagreement were nonetheless
+        # reproducible by hand (`None` + `authored` -> a FULLY silent withdrawal, no
+        # disclosure at all; `nan` + `authored` -> `nan` handed to the audit), which is
+        # exactly the named trigger.
+        eff_glass, glass_governing = _effective_floor(glass_floor, glass_basis)
+        # The AIR flag is deliberately UNCONSUMED. The withheld disclosure is GLASS-ONLY
+        # and that asymmetry is MEASURED, not an oversight: nothing here reads an AIR gap's
+        # `threshold` (the two threshold-reading clauses are glass-only; the nonphysical
+        # air arm keys on `< 0`), so an unestablished AIR floor withholds no thresholding
+        # to disclose and an air arm would manufacture a false alarm on a population with
+        # ZERO detection loss. It is unpacked and named so a reader sees the decision
+        # instead of an absence -- do not wire it up. Air still gains the TOTALITY half.
+        eff_air, _air_governing = _effective_floor(air_floor, air_basis)
         env = clearance.check_clearance(
-            session, {"min_glass": glass_floor, "min_air": air_floor}
+            session, {"min_glass": eff_glass, "min_air": eff_air}
         )
         if not isinstance(env, dict) or not env.get("ok"):
             # step 1 — REPLACES the old `return {}`. A refused / malformed envelope
             # is an OBSTRUCTION, disclosed; it never reads as a clean bill of health.
+            #
+            # THE PROVENANCE ARGUMENTS ARE PASSED
+            # HERE, and this line is the DEFECT, not the default that let it hide. It
+            # used to call `_basis(env, glass_floor, air_floor)`, so on the REFUSED path
+            # both provenance fields fell to `_basis`'s own `authored` default: an
+            # envelope asserting the design authored both floors, on a path where the
+            # resolver may have established neither. The defaults are now deleted (a
+            # forgotten site is a loud TypeError), but note WHY that alone is not the
+            # fix: this call sits INSIDE `_edge_audit_warnings`' outer never-raise net,
+            # so a TypeError here is SWALLOWED and the refusal is relabelled
+            # `audit_failed` with `basis: None` — quieter than the wrong provenance it
+            # replaced. Measured. Pinned by a regression row (reason == "clearance_refused"
+            # AND basis is not None).
             return _not_audited_keys(
                 "clearance_refused",
-                _basis(env, glass_floor, air_floor),
+                _basis(env, glass_floor, air_floor, glass_basis, air_basis),
             )
 
         out = {}
@@ -1710,6 +2385,55 @@ def _edge_audit_warnings(session, glass_floor, air_floor):
                 + ". A buried cement center reads fine on a surface glance but is "
                 "sub-manufacturable."
             )
+
+        # --- the WITHHELD-THRESHOLDING disclosure, in the channel the
+        #     two clauses above live in (see `_EDGE_FLOOR_WITHHELD_MSG` for the full
+        #     measurement — glass only, BOTH arms, and why NOT `status`). Both clauses
+        #     above read `g["threshold"]`, which is `eff_glass`; when the glass floor
+        #     was not established `eff_glass` is 0.0 and neither clause can fire below
+        #     the design's real floor. That loss is now STATED rather than silent.
+        #
+        #     NOT emitted on the clearance-REFUSED early return above: on that path the
+        #     audit ran at NEITHER floor and `geometry_not_audited` already says so, so a
+        #     second key there is noise about a narrower fact. Pinned by a test row.
+        #
+        # The GATE is now `not glass_governing`, not membership of the
+        #     message dict. Those differ on exactly the inputs this fix was filed about -- an
+        #     unrecognised provenance token, and a provenance claiming `authored` beside an
+        #     unusable value, both of which used to emit NOTHING and now disclose. The
+        #     MESSAGE is still keyed on the token, via `.get` + a fallback, so an
+        #     unrecognised token cannot KeyError into the outer net and relabel the whole
+        #     audit `audit_failed`.
+        if not glass_governing:
+            out["thin_edge_net_withheld_warning"] = _EDGE_FLOOR_WITHHELD_MSG.get(
+                glass_basis, _EDGE_FLOOR_WITHHELD_FALLBACK)
+
+            # --- the PROVISIONAL sub-floor net. See the block above
+            #     `_PROVISIONAL_KEY` for why the spoofable-oracle objection does not
+            #     reach an ADD-ONLY alarm channel, for the accepted micro-optic cost, and
+            #     for the bands this still does NOT restore.
+            #
+            #     THERE IS NO SEPARATE `hi > lo` GATE, and its absence is MEASURED. An
+            #     earlier cut of this fix had one, above a comment calling it "a REAL gate,
+            #     not a micro-optimisation" -- and the mutation census FALSIFIED that
+            #     claim: deleting the gate reddened NOTHING, because `[lo, hi)` is EMPTY BY
+            #     CONSTRUCTION when `hi <= lo` (a value below `hi` is then also below `lo`,
+            #     so the exclusion in `_glass_band_findings` drops it). The emptiness is
+            #     what guarantees this channel never restates a legacy finding; a gate
+            #     would restate the same fact less provably, and its comment would be an
+            #     unbacked claim. Consequence, pinned by the PARTIAL rows: a sibling floor
+            #     at or above the policy default yields no findings and therefore no key.
+            band = _glass_band_findings(gaps, eff_glass, _DEFAULT_MIN_GLASS)
+            if band:
+                out[_PROVISIONAL_KEY] = (
+                    _PROVISIONAL_HEAD.format(lo=eff_glass, hi=_DEFAULT_MIN_GLASS)
+                    + "; ".join(
+                        f"S{g.get('surface')}->S{g.get('next_surface')} {axis} "
+                        f"{value:.3f} mm"
+                        for g, axis, value in band
+                    )
+                    + _PROVISIONAL_TAIL.format(hi=_DEFAULT_MIN_GLASS)
+                )
 
         # --- negative_air_gap_warning: an INTERIOR air gap whose CENTER is NEGATIVE
         #     (physical interpenetration — surfaces cross, nonphysical).
@@ -1878,7 +2602,7 @@ def _edge_audit_warnings(session, glass_floor, air_floor):
             "status": status,
             "reason": reason,
             "nonphysical": nonphysical,
-            "basis": _basis(env, glass_floor, air_floor),
+            "basis": _basis(env, glass_floor, air_floor, glass_basis, air_basis),
         }
         # --- step 5: geometry_not_audited IFF reason is not None — INDEPENDENT of
         #     status (invariant 4). ---
@@ -1914,16 +2638,55 @@ def _edge_audit_warnings(session, glass_floor, air_floor):
         }
 
 
-def _basis(env, glass_floor, air_floor):
-    """The ``basis`` block — the floors ACTUALLY used + the config evaluated.
+def _basis(env, glass_floor, air_floor, glass_basis, air_basis):
+    """WHAT THE AUDIT WAS GIVEN as its floors, and WHERE EACH CAME FROM.
 
     ``config_evaluated`` is read off the ``check_clearance`` envelope (``None`` when the
     envelope is unreadable). Pure; never raises.
+
+    **"never raises" WAS FALSE HERE, AND IS NOW TRUE.** The
+    read was ``env.get(...) if isinstance(env, dict) else None``, and an ``isinstance``
+    guard does not deliver a never-raise contract: a ``dict`` SUBCLASS whose ``.get``
+    throws PASSES the check and escapes (measured -- ``_basis(GetRaises(), 2.0, 0.5,
+    "authored", "authored")`` raised). It matters more than "unreachable in production"
+    suggests: ``_basis`` is called from INSIDE ``_edge_audit_warnings``' outer
+    never-raise net, so an escape there does not surface -- it converts the WHOLE audit
+    to ``reason: "audit_failed"`` / ``basis: None``, which is the exact swallow round 4's
+    own regression row exists to pin. Making ``_basis`` total DEFENDS round 4's fix.
+
+    The read now goes through this module's existing ``_safe_get``, which was written for
+    this class and whose docstring records that both audits converged on it -- a
+    SUBSTITUTION onto the shared predicate, not a second guard beside it. Round 4
+    REWROTE this docstring (narrowing the heading, adding the required-argument
+    paragraph) and left the false clause standing, while it corrected three falsified
+    clauses in a sibling docstring in the same change: the round applied its own rule to a
+    sibling and not to the function it was editing.
+
+    **THE HEADING IS NARROWED, because it used to read "the
+    floors ACTUALLY used" and that is FALSE on one axis.** When a floor is not
+    established this block publishes ``None`` while the audit ran ``check_clearance`` at
+    ``0.0`` (``_edge_audit_warnings``' ``eff_glass``/``eff_air``), so the call cannot be
+    reproduced from its own advertised basis. ``None`` is the deliberate choice —
+    publishing ``0.0`` would be equally a number the design never authored — and the
+    ``*_provenance`` field is what says which of the four it is. Read the pair, never
+    the number alone.
+
+    **The provenance fields.** A bare float cannot distinguish the design's own
+    authored 2.0 from the policy default 1.0 that got substituted when the reader
+    declined to establish it. An audit measured that exact substitution shipping here.
+
+    ``glass_basis``/``air_basis`` are REQUIRED and have **no default**. A
+    default here was a CLAIM: absence of an argument shipped as presence of evidence, on
+    the two fields added precisely to stop an over-claim — and it was load-bearing, not
+    theoretical (it produced the hollow ``test_b17`` and the ``:1751`` refusal-path
+    defect). The one direct test caller already passes five.
     """
-    config_evaluated = env.get("config_evaluated") if isinstance(env, dict) else None
+    config_evaluated = _safe_get(env, "config_evaluated")   # total, never raises
     return {
         "min_glass": glass_floor,
         "min_air": air_floor,
+        "min_glass_provenance": glass_basis,
+        "min_air_provenance": air_basis,
         "config_evaluated": config_evaluated,
     }
 

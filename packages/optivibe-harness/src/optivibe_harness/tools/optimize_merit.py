@@ -479,7 +479,7 @@ def _resolve_data_index(wizard, target_name, *, count_attr="NumberOfDataTypes",
     )
 
 
-def _glass_floor_warning(system):
+def _glass_floor_warning(system, last_surface=_oc._UNSET_LAST_SURFACE):
     """WARN str-or-None: a glass surface carries an exposed sag/thickness DOF while
     the LIVE MFE lacks the matching positive-target floor (widened from
     the center-only ``_glass_center_floor_warning``). NEVER raises.
@@ -530,7 +530,7 @@ def _glass_floor_warning(system):
                 if _grin.row_is_grin_primitive(row) is not True:
                     if _sc._material_is_air(row):  # air surface -> skip
                         continue
-                # A MIRROR / coordinate-break / powered-non-Standard surface
+                    # A MIRROR / coordinate-break / powered-non-Standard surface
                     # is NOT glass — reuse the sibling inert-DOF predicate rather than
                     # re-derive a MIRROR test inline. `_material_is_air("MIRROR")` is False, so
                     # without this a free mirror radius (glass=False, no MNEG) would false-fire
@@ -552,8 +552,22 @@ def _glass_floor_warning(system):
             return None  # nothing exposed -> silent
 
         # (2) LIVE positive-target floor presence (fail-closed -> None ⟺ unfloored).
-        edge_floored = _oc._min_positive_target(mfe, "MNEG") is not None
-        center_floored = _oc._min_positive_target(mfe, "MNCG") is not None
+        #     The domain is resolved ONCE for this pass and threaded to BOTH
+        #     reads, so the two can never classify the same row against different
+        #     domains. Threaded in from the caller when another consumer classifies in
+        #     the same pass (``build_merit`` runs the linter beside this warning).
+        if last_surface is _oc._UNSET_LAST_SURFACE:
+            last_surface = _oc._resolve_last_surface(system)
+        # Consumer (a) policy is **WARN UNLESS FOUND**: ABSENT and UNESTABLISHED
+        # are IDENTICAL here (both mean "no floor is established, so warn"), which is why
+        # the old ``is not None`` test was correct on this channel and why this migration
+        # is byte-identical for it. Do NOT "improve" this to warn only on ABSENT — reading
+        # UNESTABLISHED as benefit-of-the-doubt re-opens the dual-channel false clean
+        # in the new vocabulary.
+        edge_floored = _oc._min_positive_target(
+            mfe, "MNEG", last_surface=last_surface)[1] == _oc.FLOOR_FOUND
+        center_floored = _oc._min_positive_target(
+            mfe, "MNCG", last_surface=last_surface)[1] == _oc.FLOOR_FOUND
 
         # (3) compose — ONE key, edge clause first, center clause second.
         clauses = []
@@ -1816,9 +1830,23 @@ def build_merit(session, params):
     # glass=True path self-silences via the positive-target scan while an exposed glass
     # sag/thickness DOF with no matching positive floor (incl. glass=True, min_glass=0,
     # whose MNEG/MNCG author at Target 0) warns.
-    floor_warning = _glass_floor_warning(system)
+    # ONE domain read for this pass, threaded to BOTH consumers that
+    # classify ranges here (the floor warning and the malformed-range linter), so they
+    # cannot disagree about the same row. A second NumberOfSurfaces read in this pass is
+    # a contract breach, not an optimisation.
+    _s3_last_surface = _oc._resolve_last_surface(system)
+
+    floor_warning = _glass_floor_warning(system, _s3_last_surface)
     if floor_warning:
         result["glass_floor_warning"] = floor_warning
+
+    # The malformed-range linter. Additive keys only; NEVER touches ok or
+    # verdict (analytic checks are flags, never verdicts).
+    _s3_warn, _s3_ranges = _oc._scan_malformed_ranges(system, _s3_last_surface)
+    if _s3_ranges is not None:
+        result["malformed_ranges"] = _s3_ranges
+    if _s3_warn:
+        result["malformed_range_warning"] = _s3_warn
 
     # The additive ETGT disclosure key (§7). Present on the single-config
     # authored path (>=1 ETGT authored) or the multi-config disclosure clause; ABSENT on
@@ -2098,7 +2126,9 @@ def _restore_boundary(session, boundary0):
 
     A SUCCESSFUL inner rebuild's store site (§2.2) overwrote
     ``session._merit_wizard_boundary`` to the NEW ``{B1,sig1}``. When recovery restores
-    the old merit byte-faithfully, its boundary MUST be restored too — otherwise the NEXT
+    the old merit STRUCTURALLY (see ``_recover_preserve`` — the restore is faithful in
+    type and integer params and ~13-significant-digit in floats, NOT byte-identical),
+    its boundary MUST be restored too — otherwise the NEXT
     preserve slices with the wrong ``B``, and worse, a smaller ``B1`` whose ``TypeName``
     tuple is a PREFIX of the old block PASSES the sig check and silently absorbs old wizard
     rows into the "custom" tail. ``boundary0`` is the ``{B0,sig0,n_configs}`` dict captured
@@ -2113,21 +2143,58 @@ def _restore_boundary(session, boundary0):
         session._merit_wizard_boundary = boundary0
 
 
-def _recover_preserve(mfe, checkpoint_path, tail_recipe, session, boundary0, reason):
+def _recover_preserve(mfe, checkpoint_path, tail_recipe, session, boundary0, reason,
+                      append_errors=None):
     """§3.2 + FIX 1/2 recovery: ONE routine that restores the FULL pre-preserve merit AND
     the stored boundary ``{B0,sig0}``. NEVER raises.
 
+    **A DELIBERATE CHANGE TO THE RECOVERY ENVELOPE, accepted as a repair.** The shipped
+    recovery text pointed the caller at an ``errors`` key this envelope did not carry,
+    and its remedy was a LOOP: re-applying the returned tail refuses again for exactly
+    the reason it refused the first time. A recovery path that names a key it does not
+    emit, and loops, is not a recovery path. ``append_errors`` threads the
+    per-entry list from the refused re-append through as ``preserve_append_errors``
+    (ABSENT when there is nothing to report, e.g. the raw-throw path), and the reason
+    clause at the call site now says fix-or-DROP the named entries before re-applying.
+
     Shared by the append-fail path AND the FIX-1 rebuild/re-append THROW path (a raw .NET
     throw from the unguarded wizard ``Apply``/``OK``/``CalculateMeritFunction`` or the
-    re-append). Steps: (a) ``LoadMeritFunction(ckpt)`` restores the entire pre-preserve
-    merit (old wizard + tail) byte-faithfully; (b) restore ``{B0,sig0}`` (FIX 2 — the old
-    merit is restored byte-faithfully, so its boundary must be too); (c) return
+    re-append).
+
+    **THE RESTORE IS NOT BYTE-IDENTICAL, AND THIS DOCSTRING SAID IT WAS (corrected
+    here, live-measured).** ``SaveMeritFunction``/``LoadMeritFunction`` write the
+    ``.MF`` text format at **13 significant decimal digits, ROUNDING** — so a field
+    carrying a full-precision irrational double loses its low 3-4 digits. Measured on
+    OpticStudio 2025 R1 against a plain wizard merit with ``preserve_custom`` nowhere in
+    the sequence: **90 of 111 rows differ** after a bare save-then-load. Gaussian-
+    Quadrature ``TRAC`` rows carry 1/sqrt(2) and pi/18, which consume the full mantissa;
+    the 22 bit-exact rows are the ones holding short decimals. Max observed relative
+    deviation 4.13e-13; the whole structure compares equal at ``rel_tol=1e-11`` (that
+    combination was RUN; ``1e-12`` passed on 5 sampled pairs and was never run over all
+    112, so it is not the measured bound).
+
+    **WHAT IS EXACT, and it is the half that matters here:** the operand TYPE sequence,
+    the row/operand counts, and EVERY INTEGER param — which is every ``Surf1``/``Surf2``
+    the range door governs. So the recovery is sound and the range contract is
+    untouched; what was overclaimed is the word "byte".
+
+    NO OFFLINE LAYER CAN EVER CATCH THIS: ``FakeRecipeMFE`` checkpoints by snapshotting
+    the Python row list, and Python floats round-trip a list snapshot bit-exactly, so
+    the fake is lossless by construction and every offline ``preserve_custom`` row stays
+    green forever (the mock-divergence class). The fake now MODELS the 13-digit rounding
+    so the divergence is at least representable offline.
+
+    Steps: (a) ``LoadMeritFunction(ckpt)`` restores the entire pre-preserve merit (old
+    wizard + tail) — exact in structure and integer params, ~13 significant digits in
+    floats; (b) restore ``{B0,sig0}`` (the old merit is restored, so its
+    boundary must be too); (c) return
     ``rolled_back:true``; (d) if the restore ITSELF throws -> FAIL-CLOSED
     ``partial_state:true`` + a "reload your .zmx" message (never re-raise). ``reason`` is
     the human clause naming what failed (append error vs rebuild throw). Either way
     ``preserved_custom_recipe`` (the tail, held in-hand) is returned so the caller can
     re-apply it.
     """
+    detail = {"preserve_append_errors": append_errors} if append_errors else {}
     try:
         mfe.LoadMeritFunction(checkpoint_path)
     except Exception as exc:  # noqa: BLE001 — the restore itself threw -> partial state
@@ -2137,9 +2204,10 @@ def _recover_preserve(mfe, checkpoint_path, tail_recipe, session, boundary0, rea
             f"threw ({exc!r}), so the MFE is in a PARTIAL state. Reload your design .zmx, "
             "then re-apply preserved_custom_recipe via apply_merit_recipe(mode='append').",
             rolled_back=False, partial_state=True,
-            preserved_custom_recipe=tail_recipe, preserve_custom=True,
+            preserved_custom_recipe=tail_recipe, preserve_custom=True, **detail,
         )
-    # The old merit is back byte-faithfully — restore its boundary too (FIX 2).
+    # The old merit is back (structure + integer params EXACT, floats to ~13 significant
+    # digits — see this function's docstring) — restore its boundary too.
     _restore_boundary(session, boundary0)
     return _oc.error_envelope(
         "build_merit", "merit_preserve_custom",
@@ -2147,7 +2215,7 @@ def _recover_preserve(mfe, checkpoint_path, tail_recipe, session, boundary0, rea
         "state — your custom rows are intact and the rebuild did NOT take effect. The "
         "custom suite is also returned as preserved_custom_recipe.",
         rolled_back=True, restored_full_merit=True,
-        preserved_custom_recipe=tail_recipe, preserve_custom=True,
+        preserved_custom_recipe=tail_recipe, preserve_custom=True, **detail,
     )
 
 
@@ -2162,7 +2230,54 @@ def _preserve_custom_rebuild(session, params):
     NEW boundary) -> ``apply_merit_recipe(mode='append')`` the tail. On append-fail the
     OUTER full-merit checkpoint restores the ENTIRE pre-preserve merit (old wizard + tail)
     — apply's OWN inner rollback keeps the new wizard but LOSES the tail, so the outer
-    checkpoint is load-bearing (§3.2). The handler NEVER raises.
+    checkpoint is load-bearing.
+
+    **RAISE CONTRACT, narrowed because the absolute it carried was
+    MEASURED FALSE.** This docstring said *"The handler NEVER raises."* — the fourth site
+    to state that absolute in this layer, and the third of the four to be falsified by
+    someone finally trying to break it. It was carried unexamined through three rounds of
+    a cycle whose entire subject was prose claiming more than the code decides, and it
+    was carried on a REASON (its inputs are machine-derived from ``serialize_merit``, so
+    the caller-``params`` input class cannot reach it) that is TRUE and does not
+    imply the conclusion.
+
+    **What the handler DOES guarantee, measured over 18 probes (7 of them reachable
+    through a raise contract the SOURCE itself documents — no helper was monkeypatched
+    into violating its own contract):** the THREE paths with an explicit ``except`` return
+    a structured ``merit_preserve_custom`` envelope — a throwing ``NumberOfOperands``, a
+    throwing ``SaveMeritFunction`` checkpoint, and a raw throw from the DEEP
+    rebuild/re-append. The happy path is unaffected.
+
+    **What ESCAPES (5 of 7 documented-contract probes; every one leaves the merit
+    UNMUTATED on the fake, which is why this is a raise-not-a-strand and stayed one
+    ticket):**
+
+    * ``session.system`` / ``system.MFE`` at the top — ``ZemaxSession.system``'s OWN
+      docstring says it "can raise a raw ``RemotingException`` on a poisoned-but-not-yet-
+      flagged channel ... Route through ``Dispatcher.dispatch`` so that raw exception is
+      classified", and a closed session raises ``SessionClosedError``. So the absolute was
+      false on this function's first two statements, on exactly the engine-degradation
+      class it was written about;
+    * ``_serialize_with_rowmap`` — an EXPLICIT raise contract ("a parameter-cell read
+      THROW surfaces as ``SurfaceWriteError``"), unguarded at its call site;
+    * the build body's wizard ``Apply()``/``OK()``/``CalculateMeritFunction()`` at the
+      **first-use** and **empty-tail** call sites. The rebuild handler's own comment
+      (below) states these are unguarded — and then guards ONE of the THREE call sites.
+      Same throw, same function, two sites with no ``try``;
+    * a corrupt stored boundary (``stored`` not a dict, or ``B`` non-numeric) and a
+      hostile caller ``params.items()`` in the ``inner_params`` comprehension — both
+      in-process-reachable, neither reachable through the MCP adapter;
+    * ``_unlink_quiet`` in the ``finally``. Its own contract forbids raising, so this one
+      is SYNTHETIC — but it is the worst shape: made to throw, it converts a rebuild that
+      FULLY SUCCEEDED (measured: the merit really was rebuilt and the tail re-appended)
+      into an opaque ``internal``, so the caller is told to recover from a merit that is
+      already correct.
+
+    **The escapes are NOT fixed here and this sentence is not a plan to fix them.** The
+    ticket that raised this was scoped to DECIDING the claim, and dispatch's outer net
+    still guarantees nothing escapes to a client. What is retired is the absolute: the
+    contract is *"the three enumerated ``except`` paths return an envelope"*, never *"the
+    handler never raises"*.
     """
     # Lazy import: the recipe layer lives in optimize_merit_io, which does NOT import this
     # module — a top-level import would be acyclic, but the lazy form matches the
@@ -2340,7 +2455,10 @@ def _preserve_custom_rebuild(session, params):
             # ---- RE-APPEND failed (an ENVELOPE): recover the pre-preserve merit (§3.2). ----
             return _recover_preserve(
                 mfe, checkpoint_path, tail_recipe, session, stored,
-                f"re-appending your custom suite failed ({apply_result.get('error')})",
+                f"re-appending your custom suite failed ({apply_result.get('error')}) — "
+                "fix or drop the named entries in preserved_custom_recipe, then re-apply "
+                "via apply_merit_recipe(mode='append')",
+                append_errors=apply_result.get("errors"),
             )
         except Exception as exc:  # noqa: BLE001 — FIX 1: ANY raw .NET throw in the rebuild/re-append
             # The destructive rebuild runs the build body's UNGUARDED wizard
@@ -2350,7 +2468,15 @@ def _preserve_custom_rebuild(session, params):
             # rebuilt wizard with the custom tail LOST while the handler RAISES. Catch
             # GENERIC Exception (raw .NET throws are not a structured subclass; NOT
             # BaseException) and run the SAME full-merit + boundary recovery as the
-            # append-fail path — NEVER re-raise (§3.2 'the handler NEVER raises').
+            # append-fail path — this ``except`` never re-raises.
+            #
+            # The citation here USED to quote "the handler NEVER raises",
+            # quoting an absolute that has since been MEASURED FALSE (see the function
+            # docstring). The scope of THIS handler is unchanged and correct; what is gone
+            # is the appeal to a whole-function guarantee that does not hold. Note the
+            # comment above states the build body's wizard calls are UNGUARDED — and this
+            # ``try`` covers ONE of the THREE sites that call it. The other two, at
+            # first-use and empty-tail, raise straight out (measured).
             return _recover_preserve(
                 mfe, checkpoint_path, tail_recipe, session, stored,
                 f"the wizard rebuild/re-append raised ({exc!r})",
@@ -2486,6 +2612,7 @@ def add_operand(session, params):
     # ``0`` is allowed (the unset sentinel). NO forward/self policy here: at live
     # authoring time the agent controls evaluation order (forward/self is a frozen-
     # recipe / Phase-C concern); we refuse ONLY the row-cannot-exist case.
+    range_verdict = None
     if cell_params is not None and isinstance(cell_params, dict):
         try:
             live_sig = _mc.read_param_map(op)
@@ -2494,32 +2621,145 @@ def add_operand(session, params):
             _remove_orphan(mfe, op, operand_number, count_before=count_before, reap_bracket=cfg is not None)
             raise
         n_operands = int(mfe.NumberOfOperands)
-        for header, value in cell_params.items():
-            info = live_sig.get(header)
-            if info is None or not _mc.is_row_ref_header(header, info["kind"]):
-                continue  # a non-ref / unknown name is handled by apply_params below
-            # Fix (§6): range-check the SAME effective integer the WRITER stores.
-            # ``coerce_param_value`` accepts an integral float (``999.0`` -> ``int(999)``)
-            # into an int cell, so a bare ``isinstance(value, int)`` skip let an integral
-            # float bypass the range check and write a provably dangling raw row (the
-            # live twin). ``_mc.row_ref_int`` returns the exact int for an int OR an
-            # integral float (rejecting bool), and ``None`` for a non-integral float /
-            # non-number — which is the param-class trap ``apply_params`` rejects below,
-            # so we leave it to that rather than double-handling here.
-            effective_row = _mc.row_ref_int(value)
-            if effective_row is None:
-                continue
-            value = effective_row
-            if value != 0 and (value < 0 or value > n_operands):
-                _remove_orphan(mfe, op, operand_number, count_before=count_before, reap_bracket=cfg is not None)
-                return _oc.error_envelope(
-                    "add_operand",
-                    "merit_param",
-                    f"operand {operand} param {header!r} references row {value} but "
-                    f"the merit has only {n_operands} operands; an out-of-range row "
-                    "reference would read 0.0 silently",
-                    operand=operand,
+        # ---- The Op#-guard loop reads the RAW CALLER MAPPING, unguarded,
+        #      AFTER AddOperand + ChangeType — so a raise here STRANDED a typed row. ----
+        #
+        # ``params.get("params")`` is handed on with NO copy (:2466), so whatever the
+        # caller passed arrives with its own ``items`` / keys / values. The newly
+        # added site is closed structurally (``dict.__contains__`` in
+        # ``range_headers_supplied``) and ticketed these PRE-EXISTING ones; the ticket
+        # named TWO, and building the fix MEASURED FOUR — all four strand identically,
+        # all four in this one loop:
+        #
+        #   * ``cell_params.items()``            — a subclass whose ``items`` raises;
+        #   * ``live_sig.get(header)``           — a stored KEY with a colliding
+        #     ``__hash__`` and a raising ``__eq__``. It defeats that technique even in
+        #     principle: the comparison is the dict's OWN and the hostile object is the
+        #     STORED one;
+        #   * ``is_row_ref_header``'s ``str(header)`` (``_merit_cells.py:280``)
+        #     — a ``str`` subclass whose ``__str__`` raises;  [NOT in the ticket]
+        #   * ``row_ref_int``'s ``value.is_integer()`` (``_merit_cells.py:416``)
+        #     — a ``float`` subclass whose ``is_integer`` raises. [NOT in the ticket]
+        #
+        # Four sites in one loop is WHY this is a widened ``try`` and not four more
+        # unbound-slot bypasses: the loop's whole input is caller data, so guarding the
+        # REGION is one decision where bypassing each operation is four, and the fifth
+        # one someone adds later is unguarded again.
+        #
+        # ATTRIBUTION, and it is why ``merit_param`` is honest here rather than the bare
+        # ``raise`` the handler below deliberately keeps: the guarded region touches
+        # NO ENGINE. ``n_operands`` is read ABOVE the ``try`` on purpose — pull it inside
+        # and a degraded ``NumberOfOperands`` read would be labelled a caller fault.
+        #
+        # The region's operations are ENUMERABLE, which is what the claim rests on rather
+        # than a universal: ``cell_params.items()``, ``live_sig.get`` on a plain dict,
+        # ``_mc.is_row_ref_header`` and ``_mc.row_ref_int`` (both pure), ``_remove_orphan``
+        # (``try/except -> return`` end to end) and ``_oc.error_envelope`` (a dict build).
+        # Every one either consumes the caller's mapping/keys/values or cannot raise, so a
+        # thrown ``Exception`` here is caller-attributable REGARDLESS of its class —
+        # including a ``SurfaceWriteError`` a hostile ``items()`` chooses to raise, which
+        # is why no type-based re-raise arm is needed. What is NOT claimed: an interpreter-
+        # level ``MemoryError``/``RecursionError`` is nobody's fault in particular, and
+        # ``BaseException`` is deliberately not caught (an abort keeps travelling).
+        # Dedicated AST guards pin BOTH the read's
+        # position and the absence of any new engine read inside — that enumeration is
+        # what makes the attribution true rather than currently-true.
+        #
+        # ``reaped`` is LOAD-BEARING, not tidiness (measured): the out-of-range refusal
+        # below reaps and THEN builds a message containing ``{header!r}``, so a header
+        # whose ``__repr__`` raises lands in this handler with the row ALREADY removed.
+        # An unconditional reap would call ``RemoveOperandAt`` a SECOND time — and
+        # ``_remove_orphan``'s own docstring names a second removal as MFE corruption.
+        reaped = False
+        try:
+            for header, value in cell_params.items():
+                info = live_sig.get(header)
+                if info is None or not _mc.is_row_ref_header(header, info["kind"]):
+                    continue  # a non-ref / unknown name is handled by apply_params below
+                # Fix (§6): range-check the SAME effective integer the WRITER stores.
+                # ``coerce_param_value`` accepts an integral float (``999.0`` -> ``int(999)``)
+                # into an int cell, so a bare ``isinstance(value, int)`` skip let an integral
+                # float bypass the range check and write a provably dangling raw row (the
+                # live twin). ``_mc.row_ref_int`` returns the exact int for an int OR an
+                # integral float (rejecting bool), and ``None`` for a non-integral float /
+                # non-number — which is the param-class trap ``apply_params`` rejects below,
+                # so we leave it to that rather than double-handling here.
+                effective_row = _mc.row_ref_int(value)
+                if effective_row is None:
+                    continue
+                value = effective_row
+                if value != 0 and (value < 0 or value > n_operands):
+                    _remove_orphan(mfe, op, operand_number, count_before=count_before, reap_bracket=cfg is not None)
+                    reaped = True
+                    return _oc.error_envelope(
+                        "add_operand",
+                        "merit_param",
+                        f"operand {operand} param {header!r} references row {value} but "
+                        f"the merit has only {n_operands} operands; an out-of-range row "
+                        "reference would read 0.0 silently",
+                        operand=operand,
+                    )
+        except Exception as exc:  # noqa: BLE001 — see the block comment above
+            if not reaped:
+                _remove_orphan(mfe, op, operand_number, count_before=count_before,
+                               reap_bracket=cfg is not None)
+            try:
+                message = (
+                    f"the params mapping supplied for operand {operand} could not be "
+                    f"read ({exc!r}); no parameter cell was written and the "
+                    "half-authored row was removed"
                 )
+            except Exception:  # noqa: BLE001 — a rendering that can re-enter caller
+                # code is not a terminal guard. ``{operand}`` and ``{exc!r}`` both
+                # dispatch to caller-supplied ``__str__``/``__repr__``, so the fallback is
+                # a data-independent LITERAL — the only form that cannot raise in turn.
+                message = ("the params mapping supplied for this operand could not be "
+                           "read; no parameter cell was written and the half-authored "
+                           "row was removed")
+            return _oc.error_envelope(
+                "add_operand", "merit_param", message, operand=operand
+            )
+
+        # ---- The surface-RANGE authoring door (PREVENT). ----
+        # A boundary operand constrains thickness over Surf1..Surf2. Leave Surf2 at its
+        # default 0 and the interval is EMPTY: the operand evaluates nothing, reports
+        # its Target back, and reads as SATISFIED -- a floor that does not floor. Worse,
+        # an out-of-domain Surf1 is rewritten to N-2 at the next merit evaluation, so it
+        # clamps INTO a pair that reads well-formed and NO detector over stored cells can
+        # ever see it. This is the class PREVENT uniquely owns.
+        #
+        # ``live_sig`` is already in hand WITH cols (read above for the Op# guard), so
+        # the shape test costs ZERO extra engine reads. The surface-count read is LAZY --
+        # taken only once an endpoint was actually supplied -- so a params call that
+        # carries no range key (an EFFL Wave, a params-less add) is byte-identical.
+        #
+        # MUTATION CONTRACT, stated so no later sentence can blur it: this guard runs
+        # AFTER AddOperand + ChangeType and BEFORE any cell / Target / Weight write. It
+        # is ZERO-NET-MUTATION, reap-proven -- NOT pre-mutation. A pre-AddOperand gate
+        # was considered and rejected: it would need the default-0 inference the
+        # supplied-absence trigger exists to remove. The residual (a refused add still
+        # ran its own AddOperand, which IS an evaluation event and can normalize PRIOR
+        # out-of-domain rows) is pre-existing in kind and is ticketed, not denied.
+        #
+        # The trigger is derived by the SHARED ``range_headers_supplied``: this cost gate
+        # and the door's own completeness test used to
+        # encode "did the caller supply an endpoint?" independently, so a PARTIAL drift
+        # between them was invisible. They ask different questions -- ``bool(...)`` here,
+        # the NAMES there -- and the real invariant is containment (this gate may fire on
+        # a call the door rules ``not_applicable``: one wasted read, never a wrong
+        # verdict). Sharing the derivation enforces equality, which implies it.
+        last_surface = None
+        if _oc.range_headers_supplied(cell_params):
+            last_surface = _oc._resolve_last_surface(system)
+        range_verdict = _oc.check_authoring_range(
+            live_sig, cell_params, last_surface, operand_token=operand
+        )
+        if range_verdict["refuse"]:
+            _remove_orphan(mfe, op, operand_number, count_before=count_before,
+                           reap_bracket=cfg is not None)
+            return _oc.error_envelope(
+                "add_operand", "merit_param", range_verdict["reason"], operand=operand
+            )
 
     # A value-less CONTROL operand (CONF) reads a NON-FINITE
     # Target/Weight on a fresh author (the inf sentinel, probe PART A) — the numeric
@@ -2543,9 +2783,39 @@ def add_operand(session, params):
     # AFTER the row was created + typed. On ANY failure path that returns/raises an
     # error, REMOVE the orphan row BEFORE returning/re-raising, so a failed add leaves
     # the MFE unchanged (mirrors the recipe layer's atomic discipline). DEFERRED:
-    # ``apply_params`` only raises ``ParamCoercionError`` + ``SurfaceWriteError`` today
-    # (verified against the apply_params contract); the ``except ParamCoercionError``
-    # below is exhaustive for the current contract — not broadened this round.
+    #
+    # CLOSED — the DEFERRAL rested on a claim MEASURED FALSE. It asserted
+    # that ``apply_params`` raises only ``ParamCoercionError`` + ``SurfaceWriteError``
+    # today, verified against the apply_params contract, and that the narrow
+    # ``except ParamCoercionError`` below therefore covered every case that contract
+    # allows. It does not: ``coerce_param_value``'s DOUBLE arm evaluates ``float(value)``
+    # BEFORE the magnitude guard three lines below it (``_merit_cells.py``) -- the
+    # guard written to refuse exactly this class of value, made unreachable for the
+    # extreme case by the conversion above it. So an ordinary double param carrying an
+    # int too large to convert -- ``add_operand("MNEA", params={"Zone": 10**400})``,
+    # nothing to do with a surface range -- raises **OverflowError** out of
+    # ``apply_params``. Measured: NO cell write is attempted (the throw precedes the
+    # write), so this is ENGINE-INDEPENDENT and reachable on every version.
+    #
+    # That escaped both handlers below, so the caller got dispatch's opaque
+    # ``internal`` AND ``_remove_orphan`` never ran: the MFE kept a half-authored row
+    # from a call that reported failure. The catch below is therefore widened to
+    # ``Exception`` -- REAP then bare ``raise``, never a synthesised envelope:
+    #
+    #   * ``Exception``, NEVER ``BaseException``. This catch sits on an abort's travel
+    #     path, and a ``KeyboardInterrupt``/``SystemExit`` must keep travelling. The
+    #     accepted consequence, stated rather than hidden: an ABORTED call does not
+    #     reap. That is the right side of the two symmetric failure modes.
+    #   * bare ``raise``, not a structured envelope. An unknown exception is UNKNOWN:
+    #     calling it ``merit_param`` would claim the caller was at fault, and
+    #     ``surface_write`` would claim the engine rejected a write that may never have
+    #     been ATTEMPTED (it was not, in the measured case). ``internal`` is the honest
+    #     family and dispatch's net already guarantees nothing escapes to the client.
+    #     The STRAND is the correctness defect this closes; the family LABEL is a
+    #     diagnostics question, and pretending to solve it here would be the second.
+    #     The root fix (the unguarded ``float()``) is ticketed, PRIORITISED.
+    #   * ``_remove_orphan`` needs no inner guard: it is ``try/except Exception ->
+    #     return`` end to end (see its own body), so cleanup cannot mask the original.
     try:
         # NEW (§3): set the parameter cells type-aware, validated + read-back
         # proven. A bad param NAME or a wrong-type VALUE is a param-class failure
@@ -2604,6 +2874,14 @@ def add_operand(session, params):
         # re-raising so dispatch's ``surface_write`` envelope leaves the MFE unchanged.
         _remove_orphan(mfe, op, operand_number, count_before=count_before, reap_bracket=cfg is not None)
         raise
+    except Exception:  # noqa: BLE001 — reap on ANY escape; see the header above
+        # The transactional promise is "a failed add leaves the MFE unchanged", and it
+        # was only kept for the two exception types the header above claimed were
+        # exhaustive. Measured otherwise (``OverflowError`` out of the double arm), so
+        # the promise is now kept for every ``Exception``. Reap, then let the ORIGINAL
+        # exception continue unchanged: the row is gone, the diagnosis is not re-labelled.
+        _remove_orphan(mfe, op, operand_number, count_before=count_before, reap_bracket=cfg is not None)
+        raise
 
     result = {
         "ok": True,
@@ -2628,6 +2906,19 @@ def add_operand(session, params):
                     "params={'Field':<1-based index>} to constrain a specific (corner) "
                     "field"
                 )
+    # CONDITIONAL-ONLY range disclosure. ``ok`` stays True and EVERY key here is
+    # ABSENT unless there is something to disclose -- an accepted, unflagged pair emits
+    # NOTHING, because it is a FIXED POINT of the measured clamp and there is nothing
+    # left to perish. Silence cannot overclaim; a ``range_ok: true`` would.
+    if range_verdict is not None:
+        unverified_key = _oc._RANGE_DOOR_DISCLOSURE_KEY.get(range_verdict["code"])
+        if unverified_key is not None:
+            result[unverified_key] = True
+        if range_verdict["clamp_expected"]:
+            result["range_clamped_upper"] = True
+            result["range_effective"] = list(range_verdict["effective"])
+        if range_verdict["flags"]:
+            result.setdefault("flags", []).extend(range_verdict["flags"])
     # §1.9: additive echo when a per-config CONF bracket was authored. Absent on
     # the non-config= path (byte-identical envelope).
     if cfg is not None:
@@ -2660,6 +2951,29 @@ def dump_merit_function(session, params):
     mfe = system.MFE
     number_of_operands = int(mfe.NumberOfOperands)
 
+    # RECOMPUTE FIRST, then read the rows. This call already existed; it
+    # merely sat BELOW the loop, so every row was read from a STALE per-operand state
+    # while the ``merit`` scalar in the same envelope was fresh. Zero net statements, no
+    # new engine call, no new mutation: either way CalculateMeritFunction has run exactly
+    # once by the time the envelope returns.
+    #
+    # MEASURED, and first-call reachable: on a 50 mm lens, one row read
+    # ``value 0.0 / contribution 0.0`` on the first dump and
+    # ``50.038805076100346 / 99.9999159700665`` on the second — i.e. the dump reported
+    # the focal length of a 50 mm lens as ZERO, unflagged, beside a fresh merit.
+    #
+    # Is why the PRODUCER is fixed rather than a detector added: this defect
+    # defeated the probe investigating it (its first run reported its own armed control
+    # inert — a confidently wrong conclusion from a green run). A detector protects only
+    # the consumers that consult it; this protects every consumer, including the next
+    # probe nobody thought to arm. The probe's own dump-twice workaround is refused as a
+    # shipping pattern — it doubles engine reads to compensate for a defect one moved
+    # statement removes.
+    #
+    # Known and accepted: a CalculateMeritFunction throw now kills the dump BEFORE the
+    # rows are read — the same unguarded failure, the same opaque envelope, earlier.
+    merit = safe_float(mfe.CalculateMeritFunction())
+
     operands = []
     for i in range(1, number_of_operands + 1):
         op = mfe.GetOperandAt(i)
@@ -2677,7 +2991,7 @@ def dump_merit_function(session, params):
     return {
         "ok": True,
         "number_of_operands": number_of_operands,
-        "merit": safe_float(mfe.CalculateMeritFunction()),
+        "merit": merit,
         "operands": operands,
     }
 
@@ -2919,7 +3233,10 @@ ADD_OPERAND_SPEC = ToolSpec(
         "CONF rows. For an MTF-aware merit, author MTFT (tangential) / MTFS (sagittal) "
         "with params={'Field':<1-based index>,'Freq':<cyc/mm>} — the field is an "
         "integer Field index, NOT Hx/Hy (an omitted Field reads on-axis, which is "
-        "flagged). See add_math_constraint, apply_merit_recipe, build_merit, get_mtf."
+        "flagged). " + _oc._RANGE_DOOR_SERVED_CLAUSE + " A WELL-FORMED result describes "
+        "only the range structure at write time — it does not establish that the "
+        "interval contains a qualifying surface or that the operand will contribute. "
+        "See add_math_constraint, apply_merit_recipe, build_merit, get_mtf."
     ),
 )
 
