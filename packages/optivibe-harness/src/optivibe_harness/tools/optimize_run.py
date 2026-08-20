@@ -1,7 +1,8 @@
 """tools/optimize_run.py — dry_run (preflight) + optimize (THE CAPSTONE).
 
 - ``dry_run``  — NON-MUTATING preflight (§d/§e): counts variables + checks
-  the merit exists. Opens NO optimizer. Returns ``ready:True`` or a
+  the merit exists. Opens NO optimizer. Returns ``ready:True``, ``ready:False``
+  (the negative-weight scan did not execute), or a
   ``no_variables`` / ``no_merit`` envelope.
 - ``optimize`` — THE CAPSTONE closed loop (§a/§c). Embeds the dry_run gates
   (short-circuit BEFORE opening anything), opens ``Tools.OpenLocalOptimization()``
@@ -27,7 +28,7 @@ import time
 import uuid
 from dataclasses import asdict
 
-from .._io import safe_float
+from .._io import is_finite_number, safe_call, safe_exc, safe_float, safe_repr
 from ..enums import _resolve_enum
 from ..errors import OptimizeError, ToolParamError
 from ..server import ToolSpec
@@ -72,11 +73,29 @@ def dry_run(session, params):
     """NON-MUTATING preflight: are variables + a merit present? Opens NO optimizer.
 
     Delegates to ``_optimize_common._preflight``. A pass returns
-    ``{ok:True, variables, number_of_operands, merit, ready:True}``; a gate fail
+    ``{ok:True, variables, number_of_operands, merit, ready:True}``; ``ready:False``
+    with a ``negative_weight_scan_fault`` record when the negative-weight scan could
+    NOT execute (so a truthiness consumer fails closed while a schema and a
+    direct-indexing consumer both keep working); a gate fail
     returns the ``no_variables`` / ``no_merit`` / ``stop_on_glass_vertex`` envelope
     (``ok=False``, no ``ready`` key). dry_run reports the stop-convention problem
     too (the caller learns the problem WITHOUT opening the optimizer);
     ``require_free_stop`` (default True) gates it.
+
+    **"THE KEY IS PRESENT, NEVER OMITTED" WAS TOO WIDE AND IS NARROWED (round 5, P-2).**
+    It holds ON THE ``ok:True`` TAIL ONLY. If the scan faults and a LATER dry_run gate
+    then refuses, the key is ABSENT — measured, with a transient MFE fault arriving after
+    the preflight's ``NumberOfOperands`` read:
+
+    - per-config-thin (:150): ``ok False``, ``optimize_per_config_thin``, no ``ready``,
+      **no ``negative_weight_scan_fault``**;
+    - inert-DOF (:157): ``ok False``, ``optimize_inert_dof``, same silence;
+    - a bad param (``require_free_stop`` non-bool) raises ``OptimizeError`` out of this
+      handler BEFORE the scan runs, so there is nothing to disclose and nothing is.
+
+    This is the same scope as its sibling ``_negative_weight_disclosure``, whose docstring
+    WAS narrowed in round 4 while this one was left — the leave-the-sibling pattern. The
+    two now say the same thing.
 
     BREAKING CHANGE: ``dry_run`` REFUSES a stop on a glass vertex by
     DEFAULT (``require_free_stop=True``) — it returns the
@@ -90,8 +109,15 @@ def dry_run(session, params):
     ``optimize_merit_uncomputable`` envelope (``ok=False``, NO ``ready`` key) — the
     SAME agent-facing name ``optimize`` reports, mirroring the stop-vertex
     special-case. The legacy bare families (``no_variables``/``no_merit``) stay BARE
-    in dry_run (out of scope for this cycle); the asymmetry (legacy bare; stop +
+    in dry_run (out of scope for that cycle); the asymmetry (legacy bare; stop +
     merit-uncomputable prefixed-on-both) is intentional + precedented.
+
+    ROUND-10a — the "prefixed-on-both" clause above does NOT hold for
+    ``stop_indeterminate``: ``dry_run`` serves that family BARE while ``optimize``
+    serves ``optimize_stop_indeterminate``, so ONE condition reaches an agent under TWO
+    names depending on which door it knocked at. Recorded here rather than renamed:
+    changing either name is an agent-facing contract change and belongs to a round that
+    can carry the served-boundary and consumer sweep.
     """
     system = session.system
     require_free_stop = _bool_param(params, "require_free_stop", True)
@@ -126,6 +152,17 @@ def dry_run(session, params):
             number_of_operands=number_of_operands,
             merit=safe_float(merit),
         )
+    # The negative-weight gate, FIRST of the post-preflight gates. dry_run's own thin
+    # block does NOT mutate -- it only scans and refuses; the nudge exists solely in
+    # optimize, and the ordering here mirrors it so the two doors refuse in the same
+    # order rather than because this handler has something to protect. It reads merit
+    # rows only -- no MCE walk, no LDE walk -- which is a statement about WHAT it
+    # touches and NOT a claim that it is the cheapest of the three: on a merit with
+    # thousands of rows it does thousands of reads while the others do materially
+    # less. Ordering here is about the mutation boundary, never about cost.
+    nw = _oc._scan_negative_weights(system)
+    if nw["offenders"]:
+        return _negative_weight_envelope("dry_run", nw)
     # the per-config THIC<=0 gate (DISJOINT family optimize_per_config_thin),
     # AFTER the _preflight ok-pass, via the ONE shared predicate. Runs even under
     # require_free_stop=False (independent of the stop gate). NON-MUTATING.
@@ -148,7 +185,21 @@ def dry_run(session, params):
         "variables": variables,
         "number_of_operands": number_of_operands,
         "merit": safe_float(merit),
-        "ready": True,
+        # ``ready`` is PRESENT exactly when ``ok`` is True -- every ok:False exit above
+        # returns an error envelope with no such key -- and that implication is
+        # preserved, not broken by omitting the key on the new state.
+        #
+        # ``False`` is reachable on ONE thing: the negative-weight scan did not execute
+        # (a total MFE fault). A truthiness consumer fails closed on it; a consumer that
+        # indexes the key, or validates the envelope against a schema, keeps working.
+        #
+        # SAY WHAT IT DOES NOT MEAN. ``True`` does NOT certify that the OTHER gates
+        # executed: the per-config-thin and inert-DOF scans each return an empty
+        # offender list on their own internal faults, and an empty list is
+        # indistinguishable from a clean scan, so ``ready`` can ride one of those faults
+        # today and still can. This release makes execution machine-visible for the one
+        # gate it adds and changes nothing about the others.
+        "ready": nw["scan_completed"],
         "merit_spans_configs": span["merit_spans_configs"],
         "n_configs": span["n_configs"],
         "configs_covered": span["configs_covered"],
@@ -162,6 +213,8 @@ def dry_run(session, params):
     # The malformed-range linter, on the same non-blocking channel.
     merged, _s3_keys = _malformed_range_finding(system, merged)
     result.update(_s3_keys)
+    merged, _nw_keys = _negative_weight_disclosure(nw, merged)
+    result.update(_nw_keys)
     if merged is not None:
         result["warning"] = merged
     return result
@@ -308,10 +361,24 @@ def _bool_param(params, key, default):
 
     A bad value raises ``OptimizeError(family="optimize_param")`` (the
     param-class family).
+
+    ROUND-7 -- MEMBERSHIP AND LOOKUP GO THROUGH THE UNBOUND ``dict`` SLOTS, the rule
+    ``_optimize_common.range_headers_supplied`` already applies and documents and this
+    module never did. On a ``dict`` SUBCLASS with a lying ``__contains__``,
+    ``require_free_stop=False`` came back **True** and ``recover_thin=True`` came back
+    **False**; two of the three params this door serves are SAFETY flags.
+
+    REACHABILITY IS NIL TODAY AND THAT IS STATED, NOT ASSUMED: ``params`` arrives from
+    JSON deserialization, so a ``dict`` subclass is structurally impossible on the
+    shipped path. Fixed for the same reason round 2 fixed its own nil-reachability
+    siblings -- one rule at every door beats a door-by-door reachability argument that
+    goes stale the day a caller changes. The ``isinstance`` conjunct is what makes the
+    unbound calls type-safe; a non-``dict`` mapping now reads as "not supplied" (no
+    production or test caller passes one).
     """
-    if key not in params:
+    if not (isinstance(params, dict) and dict.__contains__(params, key)):
         return default
-    value = params[key]
+    value = dict.__getitem__(params, key)
     if not isinstance(value, bool):
         raise OptimizeError(
             f"{key!r} must be a bool, got {type(value).__name__} {value!r}",
@@ -417,6 +484,108 @@ def _inert_dof_envelope(tool, offenders):
     )
 
 
+def _negative_weight_envelope(tool, scan):
+    """Build the ``optimize_negative_weight`` refusal envelope. Opens NOTHING.
+
+    The OFFENDER LIST is derived from the scan, so the message can only name rows the
+    scan actually measured. The narrative and the two remedies around it are fixed
+    literals -- saying "the message is derived, never hardcoded" would claim more than
+    that. It states what was measured -- a negative-weight row has
+    been observed leaving the optimizer reporting success while moving nothing and
+    abandoning its co-resident objective, while the same row in isolation exerts the
+    same pressure as its positive twin -- and it does NOT claim THIS run would have
+    stalled. Composition is what decides that, the guard does not model composition, and
+    a refusal that overstated its own evidence would be the defect it exists to catch.
+    """
+    parts = ", ".join(
+        "row {} ({}) weight = {}".format(o.get("number"), o.get("type"), o.get("weight"))
+        for o in scan["offenders"]
+    )
+    residual = ""
+    if scan["unestablished_rows"]:
+        residual = (
+            " Separately, {} row(s) had no finite weight ESTABLISHED, so the guard did "
+            "not clear them; they are not offenders and were not counted as such."
+        ).format(scan["unestablished_rows"])
+    return _oc.error_envelope(
+        tool,
+        "optimize_negative_weight",
+        (
+            "a NEGATIVE merit weight: " + parts + ". A negative-weight row has been "
+            "measured to leave the optimizer reporting run / Succeeded / IsValid all "
+            "True while moving nothing and abandoning the objective beside it, and in "
+            "isolation the same row exerts the same pressure as its positive twin — so "
+            "the sign's effect depends on the rest of the merit, which this check does "
+            "not evaluate. It reads the sign, not the magnitude, and not the operand "
+            "type. Give the row the weight you meant with "
+            "edit_operand(number=N, weight=<positive>), or drop it with "
+            "remove_operand(number=N)." + residual
+        ),
+        negative_weight_rows=scan["offenders"],
+        unestablished_weight_rows=scan["unestablished_rows"],
+    )
+
+
+def _negative_weight_disclosure(scan, warning):
+    """``(merged_warning, additive_keys)`` for the NON-refusing halves of the gate.
+
+    REACHED ONLY ON A SUCCESS TAIL, and that bounds what the fail-open guarantee can
+    claim. If the scan faults and a LATER gate then refuses -- per-config-thin, inert
+    DOF, a bad parameter -- the returned envelope carries neither the fault record nor
+    the unestablished count, and reads exactly like a merit with nothing to disclose.
+    Measured, not inferred.
+
+    **THE "BOUNDED, NOT A HOLE" DISPOSITION WAS WRONG, AND IS WITHDRAWN (round 5, P-1).**
+    This paragraph used to argue that the loss was bounded because *"on those paths a
+    LATER gate refused, so nothing ran unmeasured -- the optimizer is never opened"*, and
+    concluded that the honest claim was *"never silent on a path that PROCEEDS"*. Both
+    halves are false, measured on ``optimize`` with a transient MFE fault arriving AFTER
+    the preflight's ``NumberOfOperands`` read (so the scan faults) :
+
+    - ``optimize_run_failed`` tail (``Succeeded`` False): ``ok`` False, ``open_count``
+      **1**, ``run_count`` **1** -- the optimizer was OPENED and cycles EXECUTED with the
+      weight check unrun -- and ``negative_weight_scan_fault`` is ABSENT, with
+      ``warning`` ``None``. No key, no sentence.
+    - ``optimize_merit_uncomputable`` tail (``opt.IsValid`` False): ``ok`` False,
+      ``open_count`` **1**, ``run_count`` 0 -- so no cycles here, but the optimizer WAS
+      opened, which is the clause the old text leaned on. Same silence.
+
+    So the loss is not confined to paths that refused before opening. What is true, and
+    all that is true, is the SCOPE: **the disclosure rides the SUCCESS tails only.** The
+    ``optimize_run_failed`` and ``opt.IsValid``-False tails return their error envelope
+    without ever calling this helper, and are silent about the unrun check even though
+    the run reached the engine. Fixing that means threading the scan into those two tails;
+    this module is at its locked size budget (948/948 statements) and the fix needs more,
+    so it is FILED (see ticket) rather than done here. A caller who needs the
+    guarantee on a failing run must read ``dry_run`` first.
+
+    (An earlier version of this paragraph argued from the fault sentence's old wording,
+    "the run was allowed to proceed unchecked". That wording was itself corrected --
+    ``dry_run`` opens no optimizer, so no run proceeds there either -- and a rationale
+    quoting a deleted sentence is worth less than no rationale.)
+
+    Both keys are ABSENT when the scan completed with nothing to say, so a clean call's
+    payload is byte-identical to today's. On a TOTAL scan fault the fault RECORD rides
+    as its own machine-readable key rather than only as a sentence: a consumer that has
+    to regex a warning string to learn that a gate did not run is a consumer that will
+    not do it.
+    """
+    keys = {}
+    if not scan["scan_completed"]:
+        keys["negative_weight_scan_fault"] = scan["fault"][1]
+        return _merge_warning(warning, scan["fault"][0]), keys
+    if scan["unestablished_rows"]:
+        keys["unestablished_weight_rows"] = scan["unestablished_rows"]
+        return _merge_warning(
+            warning,
+            "{} merit row(s) had no finite weight ESTABLISHED, so the negative-weight "
+            "check could not clear them; it makes no claim about those rows".format(
+                scan["unestablished_rows"]
+            ),
+        ), keys
+    return warning, keys
+
+
 def _stop_vertex_envelope(tool, stop_idx, stop_material):
     """Build the exact §6.4 ``optimize_stop_on_glass_vertex`` refusal envelope."""
     return _oc.error_envelope(
@@ -502,10 +671,12 @@ def _auto_normalize(session, params):
     """
     from . import lens_normalize
 
+    # ROUND-7 (sibling, found by this cycle's OWN class sweep rather than by the
+    # finding, which named three doors and there are six sites) -- unbound ``dict`` slots.
     normalize_params = {
-        k: params[k]
+        k: dict.__getitem__(params, k)
         for k in ("bound_kind", "min_air", "add_bounds", "free_gaps")
-        if k in params
+        if isinstance(params, dict) and dict.__contains__(params, k)
     }
     return lens_normalize.normalize_stop(session, normalize_params)
 
@@ -516,17 +687,28 @@ def _require_pos_int(params, key, default, *, cap=None):
     A bad value raises ``OptimizeError(family="optimize_param")`` (the
     param-class family). An integral float (a JSON round-trip can float an int) is
     accepted and coerced.
+
+    ROUND-7 -- unbound ``dict`` slots, see ``_bool_param``. Measured on a lying
+    ``__contains__``: ``max_passes=7`` came back **1**.
     """
-    if key not in params:
+    if not (isinstance(params, dict) and dict.__contains__(params, key)):
         return default
-    value = params[key]
+    value = dict.__getitem__(params, key)
     if isinstance(value, bool):
         raise OptimizeError(
             f"{key!r} must be an integer, not a bool ({value!r})",
             family="optimize_param",
         )
     if isinstance(value, float):
-        if value == int(value):
+        # ROUND-13 H-2 -- THE FINITENESS TEST COMES FIRST. ``int(nan)`` raises
+        # ``ValueError`` and ``int(+-inf)`` raises ``OverflowError``, so a non-finite
+        # float walked out of this door as something that is NOT an ``OptimizeError``;
+        # ``optimize`` catches only that family, so ``_classify`` binned it ``internal``
+        # and the docstring's promise of ``optimize_param`` was false. Reachable from an
+        # ordinary JSON payload: ``1e400`` deserializes to ``inf``. Affects ``cycles`` /
+        # ``max_passes`` / ``cores``. The ``_resolve_trials`` sibling in ``tolerance_run``
+        # already carries this exact guard. +0 statements.
+        if is_finite_number(value) and value == int(value):
             value = int(value)
         else:
             raise OptimizeError(
@@ -557,10 +739,12 @@ def _require_pos_float(params, key, default, *, cap=None):
     param-class family). An int is accepted and coerced to float; a bool / string /
     non-number is rejected; a non-finite (nan / +-inf) is rejected; ``<= 0`` is rejected; a
     value ``> cap`` (when a cap is given) is rejected.
+
+    ROUND-7 -- unbound ``dict`` slots, see ``_bool_param``.
     """
-    if key not in params:
+    if not (isinstance(params, dict) and dict.__contains__(params, key)):
         return default
-    value = params[key]
+    value = dict.__getitem__(params, key)
     if isinstance(value, bool):
         raise OptimizeError(
             f"{key!r} must be a number, not a bool ({value!r})",
@@ -571,11 +755,21 @@ def _require_pos_float(params, key, default, *, cap=None):
             f"{key!r} must be a number, got {type(value).__name__} {value!r}",
             family="optimize_param",
         )
-    value = float(value)
-    if not math.isfinite(value):
+    # ROUND-13 H-2 -- THE FINITENESS GATE MOVED ABOVE ``float(value)``, AND ASKS THE
+    # QUESTION WITHOUT CONVERTING. ``math.isfinite`` is not a total predicate: on an
+    # ``int`` too large for a float it RAISES ``OverflowError``, and so does the
+    # ``float(value)`` that used to run first -- so ``run_time_m=10**400`` left this door
+    # as an ``OverflowError``, not the ``OptimizeError(family="optimize_param")`` the
+    # docstring promises, and ``optimize``'s net let it out as ``internal``. Reachable
+    # from an ordinary JSON payload (a bare 400-digit integer literal). The value is
+    # rendered through ``safe_repr`` so a 400-digit int cannot make the message
+    # unbounded. +0 statements (a move, not an addition).
+    if not is_finite_number(value):
         raise OptimizeError(
-            f"{key!r} must be a finite number, got {value!r}", family="optimize_param"
+            f"{key!r} must be a finite number, got {safe_repr(value)}",
+            family="optimize_param",
         )
+    value = float(value)
     if value <= 0:
         raise OptimizeError(
             f"{key!r} must be > 0, got {value}", family="optimize_param"
@@ -597,7 +791,7 @@ def _resolve_algorithm(system, params):
     caller HARD-forks on it. Anything else -> ``OptimizeError(family="optimize_param")``.
     Returns ``(token, member)``.
     """
-    token = params.get("algorithm", "DLS")
+    token = dict.get(params, "algorithm", "DLS")  # base slot (selects the FORK)
     if token == _ALGORITHM_TOKEN_HAMMER:
         # Hammer is NOT an OptimizationAlgorithm member — validate the token, do NOT resolve
         # it against the enum (§2.1). The caller forks to _optimize_hammer_impl on member None.
@@ -613,7 +807,11 @@ def _resolve_algorithm(system, params):
     try:
         member = _resolve_enum(enum_type, _ALGORITHM_TOKEN_TO_MEMBER[token])
     except ToolParamError as exc:
-        raise OptimizeError(str(exc), family="optimize_param")
+        # ROUND-13: guarded render. A bare ``str(exc)`` inside an ``except`` re-enters
+        # the exception's own ``__str__``; if that throws, this door raises something that
+        # is NOT an ``OptimizeError`` and ``optimize``'s net (which catches only that)
+        # lets it out as ``internal``. +0 statements.
+        raise OptimizeError(safe_exc(exc), family="optimize_param")
     return token, member
 
 
@@ -715,7 +913,7 @@ def _snapshot(session, label, meta, trail):
             "path": None,
             "bytes": 0,
             "seq": None,
-            "error": f"snapshot raised: {exc!r}",
+            "error": f"snapshot raised: {safe_exc(exc, repr_form=True)}",
         }
     trail.append(row)
     return row
@@ -732,6 +930,7 @@ _ENVELOPE_FAMILIES = frozenset({
     "optimize_stop_on_glass_vertex",
     "optimize_stop_unfixable",
     "optimize_merit_uncomputable",   # NEW — defensive; current paths build it directly
+    "optimize_negative_weight",      # built directly at both gates; listed for the boundary
 })
 
 
@@ -764,7 +963,12 @@ def optimize(session, params):
     6. After Close, re-read ``mfe.CalculateMeritFunction()`` and cross-check it
        against the optimizer's ``CurrentMeritFunction`` (the tripwire;
        non-fatal — flags ``merit_readback_disagreement`` + a warning, never gates
-       the verdict).
+       the verdict). ROUND-13: "non-fatal" is now TRUE. The read is guarded
+       (``_io.safe_call``); a throw yields the string sentinel
+       ``"<the post-Close MFE re-read threw>"``, which reads as a disagreement and is
+       echoed verbatim in ``mfe_recalc`` — so the caller still gets its ``run_id``,
+       ``artifact_trail`` and verdict. Until this round the read sat outside every
+       ``try`` and a throw discarded all three.
     7. classify_verdict(merit_before, merit_after) and return the verdict dict
        (``ok=True`` even on stable/diverged).
 
@@ -789,7 +993,7 @@ def optimize(session, params):
     except OptimizeError as exc:
         family = getattr(exc, "family", "optimize")
         if family in _ENVELOPE_FAMILIES:
-            return _oc.error_envelope("optimize", family, str(exc))
+            return _oc.error_envelope("optimize", family, safe_exc(exc))
         raise
 
 
@@ -880,6 +1084,24 @@ def _optimize_impl(session, params):
     # hard refuse (the fail-closed guard). recover_thin=True -> nudge the collapsed
     # cells to 0.001, RE-SCAN (fail-closed), and refuse if any residual survives (naming what
     # was nudged + what could not be); the disclosure is stashed for the success echo (§2.5).
+    # (1a-neg) The negative-weight gate, BEFORE the thin block below -- which mutates
+    # under recover_thin=true (it nudges collapsed MCE cells, rescans, and only then
+    # decides). A refusal placed after that would return a design the refusing call had
+    # already written to. Declared precedence: this family fires ahead of
+    # optimize_per_config_thin and optimize_inert_dof. Zero measured callers author a
+    # negative weight into a merit that reaches a preflight.
+    #
+    # WHAT THIS DOES *NOT* MAKE THE REFUSAL, and the scope is exact: non-mutating with
+    # respect to the thin/nudge block. It is NOT non-mutating in general. Under
+    # ``auto_normalize=True`` the stop refactor has already run ABOVE the preflight and
+    # rewritten the design -- measured, surfaces 4 -> 5 and operands 105 -> 107 -- so a
+    # call that refuses here can still return a changed system. That is auto_normalize's
+    # own contract rather than a defect of this gate, and no placement available to this
+    # gate would change it; it is written down because "provably non-mutating" without
+    # the qualifier is false and a reader would rely on it.
+    nw = _oc._scan_negative_weights(system)
+    if nw["offenders"]:
+        return _negative_weight_envelope("optimize", nw)
     nudge_disclosure = None
     thin = _oc._scan_per_config_thin(system)
     if thin:
@@ -908,7 +1130,7 @@ def _optimize_impl(session, params):
         params, "max_passes", _DEFAULT_MAX_PASSES, cap=_MAX_PASSES_CAP
     )
     cores = None
-    if "cores" in params:
+    if isinstance(params, dict) and dict.__contains__(params, "cores"):  # base slot
         cores = _require_pos_int(params, "cores", None)
     algorithm_token, algorithm_member = _resolve_algorithm(system, params)
     # The Hammer wall-time cap (minutes). Validated here (before opening)
@@ -917,7 +1139,7 @@ def _optimize_impl(session, params):
     run_time_m = _require_pos_float(
         params, "run_time_m", _DEFAULT_RUN_TIME_M, cap=_RUN_TIME_M_CAP
     )
-    run_id = params.get("run_id") or f"optimize_{uuid.uuid4().hex[:12]}"
+    run_id = dict.get(params, "run_id") or f"optimize_{uuid.uuid4().hex[:12]}"
 
     mfe = system.MFE
     artifact_trail = []
@@ -940,7 +1162,35 @@ def _optimize_impl(session, params):
         artifact_trail,
     )
     if before_row is not None and not before_row["ok"]:
-        warning = f"pass00_before snapshot failed: {before_row.get('error')}"
+        # F-E (round 5) — MERGE, never overwrite. Every other merge site in this module
+        # already routes through ``_merge_warning``; this one did not, and a bare
+        # assignment here deletes whatever an earlier detection put in the channel.
+        #
+        # ROUND-7 — THE JUSTIFICATION THIS COMMENT USED TO CARRY WAS FALSE, AND ITS
+        # OWN TEST SAID SO IN THE SAME COMMIT. It read "an unwritable workspace root sets
+        # the sink warning 10 lines up AND makes this snapshot fail as a DIRECT
+        # consequence", i.e. it named a scenario where BOTH halves are populated and the
+        # bare assignment eats the more important one.
+        # ``test_fe_the_pass00_site_cannot_clobber_the_sink_warning_TODAY`` MEASURES the
+        # opposite and asserts ``"pass00_before snapshot failed" not in warning``: an
+        # unwritable root makes ``_resolve_sink`` return ``None``, ``_snapshot`` then
+        # returns ``None`` (no row at all), ``before_row is None``, and this branch never
+        # runs. The test is right. The two halves are MUTUALLY EXCLUSIVE on that input,
+        # not simultaneous.
+        #
+        # ROUND-7 — SO WHY KEEP THE MERGE? Because "unreachable today" rests on an
+        # unstated premise: that ``_resolve_sink`` is DETERMINISTIC across one
+        # ``optimize()`` call. It is called THREE times per call (here, and once inside
+        # each ``_snapshot``), and its fallback does filesystem work (``makedirs``) under
+        # a bare ``except``. If the FIRST call fails and a later one succeeds -- a root
+        # created mid-run, a transient permission or disk condition -- the sink warning
+        # IS set and a later snapshot CAN produce a failing row, both halves populate,
+        # and the merge is load-bearing rather than dead. The premise is not enforced
+        # anywhere, so it is stated here rather than assumed: the merge stays, and it
+        # stays for a reason that survives the test that falsified the old one.
+        warning = _merge_warning(
+            warning, f"pass00_before snapshot failed: {before_row.get('error')}"
+        )
 
     # (3b) The HARD Hammer fork. AFTER the shared preflight gates, the
     # param validation, the sink-warning, AND the pass00_before snapshot — Hammer opens a
@@ -961,6 +1211,7 @@ def _optimize_impl(session, params):
             wall_start=wall_start,
             nudge_disclosure=nudge_disclosure,
             grin_dn_max=grin_dn_max,
+            negative_weight_scan=nw,
         )
 
     # (4) open the optimizer ONCE; (5) run the bounded passes; (4-finally) reap.
@@ -970,7 +1221,7 @@ def _optimize_impl(session, params):
     try:
         cycles_member, cycles_member_name = _oc._resolve_cycles_member(system, cycles)
     except ToolParamError as exc:
-        raise OptimizeError(str(exc), family="optimize_param")
+        raise OptimizeError(safe_exc(exc), family="optimize_param")  # ROUND-13
     # §c step 3: capture merit_before from mfe.CalculateMeritFunction() AND
     # cross-check it against opt.InitialMeritFunction (equal). The MFE read is
     # taken here (the system pre-mutation snapshot); the optimizer's own
@@ -1062,9 +1313,14 @@ def _optimize_impl(session, params):
                 artifact_trail,
             )
             if after_row is not None and not after_row["ok"]:
-                warning = (
+                # F-E class (round 5) — MERGE. This ran inside the pass loop, so the bare
+                # assignment discarded the sink warning, the pass00_before failure AND
+                # every earlier pass's failure: on an unwritable root the caller saw only
+                # the LAST pass's snapshot error.
+                warning = _merge_warning(
+                    warning,
                     f"pass{pass_index:02d}_after snapshot failed: "
-                    f"{after_row.get('error')}"
+                    f"{after_row.get('error')}",
                 )
 
             # early-stop on a PASS-TO-PREVIOUS stable verdict (no further
@@ -1083,12 +1339,31 @@ def _optimize_impl(session, params):
 
     # (6) tripwire: re-read the MFE AFTER Close (it survives teardown)
     # and cross-check the optimizer's captured CurrentMeritFunction. Non-fatal.
-    mfe_recalc = mfe.CalculateMeritFunction()
+    #
+    # ROUND-13 H-3 -- AND IT IS NOW ACTUALLY NON-FATAL. This read sat OUTSIDE every
+    # ``try`` while step 6 of the docstring called it "non-fatal". A throw here (the
+    # engine channel dying between the optimizer's Close and this read is exactly the
+    # window it happens in) stranded the caller with a MUTATED design, no ``run_id``, no
+    # ``artifact_trail`` and no verdict -- everything this function had already earned,
+    # discarded at the last step. The ``lambda`` is load-bearing: a bridged .NET handle
+    # after teardown can fail on the ATTRIBUTE lookup, not only on the call, and
+    # ``safe_call(mfe.CalculateMeritFunction)`` would resolve the attribute BEFORE the
+    # guard. The sentinel is a string, so ``_readback_disagreement`` sees a non-number
+    # (True, via ``_is_nonfinite``) and the disagreement warning fires naming it, while
+    # ``safe_float`` passes it through to ``mfe_recalc`` in the envelope unchanged.
+    # +0 statements.
+    mfe_recalc = safe_call(lambda: mfe.CalculateMeritFunction(),
+                           "<the post-Close MFE re-read threw>")
     disagreement = _oc._readback_disagreement(merit_after, mfe_recalc)
     if disagreement:
-        warning = (
+        # F-E class (round 5) — MERGE. The Hammer tail's twin of this block ALREADY merges
+        # (``_merge_warning(warning, "merit read-back disagreement: ham...")``); the DLS
+        # tail overwrote, so on this path a read-back disagreement erased the sink and
+        # snapshot warnings. Sibling divergence, fixed toward the correct sibling.
+        warning = _merge_warning(
+            warning,
             "merit read-back disagreement: opt.CurrentMeritFunction="
-            f"{merit_after!r} vs mfe.CalculateMeritFunction()={mfe_recalc!r}"
+            f"{merit_after!r} vs mfe.CalculateMeritFunction()={mfe_recalc!r}",
         )
 
     # (7) classify the verdict from the OPTIMIZER's OWN pair (Initial-vs-Current) —
@@ -1100,10 +1375,15 @@ def _optimize_impl(session, params):
     # before-read; the optimizer's own pair is authoritative.
     verdict = _oc.classify_verdict(opt_initial, merit_after)
     if desync:
-        warning = (
+        # F-E class (round 5) — MERGE. ``disagreement`` (merit_after vs the post-Close MFE
+        # recalc) and ``desync`` (opt_initial vs the pre-run MFE read) are INDEPENDENT
+        # predicates that can both hold; the bare assignment here clobbered the
+        # disagreement sentence six lines up, and the sink/snapshot warnings with it.
+        warning = _merge_warning(
+            warning,
             "optimizer InitialMeritFunction desync: opt.InitialMeritFunction="
             f"{opt_initial!r} vs mfe.CalculateMeritFunction()={merit_before!r}; "
-            "verdict classified from the optimizer's own Initial-vs-Current pair"
+            "verdict classified from the optimizer's own Initial-vs-Current pair",
         )
     # The reported delta uses the optimizer's own pre/post pair (the consistent source)
     # so improvement_abs/pct never mixes the MFE before with the optimizer after.
@@ -1191,6 +1471,16 @@ def _optimize_impl(session, params):
         "warning": warning,
     }
     result.update(_s3_keys)    # the structured malformed-range finding (additive)
+    # The gate's own scan, disclosed on the success side. It is the result captured
+    # BEFORE the run, deliberately: re-scanning here would answer a different question
+    # and could disagree with the gate that let this run start.
+    warning, _nw_keys = _negative_weight_disclosure(nw, warning)
+    result.update(_nw_keys)
+    # WRITE IT BACK. ``result`` was constructed above with the warning as it stood THEN,
+    # so reassigning the local alone ships the machine-readable key with its human
+    # sentence silently dropped — half a disclosure, which is worse than none because
+    # the key's presence reads as "this was reported".
+    result["warning"] = warning
     result.update(edge_audit)  # 0-6 additive geometry-audit keys; never overwrites a base key
     # GRIN §4.4: the post-optimize GRIN index audit — ONCE on the RESULT, after the
     # edge audit (the both-tails drift-pin). Additive keys, never flips ok,
@@ -1211,7 +1501,8 @@ def _optimize_impl(session, params):
 
 def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, run_id,
                           artifact_trail, guard_warning, warning, variables, wall_start,
-                          nudge_disclosure=None, grin_dn_max=None):
+                          nudge_disclosure=None, grin_dn_max=None,
+                          negative_weight_scan=None):
     """The Hammer (global-search) fork of ``optimize`` (§2.4/§2.5).
 
     Hammer opens ``Tools.OpenHammerOptimization()`` (NOT the local optimizer), sets
@@ -1301,7 +1592,7 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
                     status = str(getattr(ham, "Status", ""))
             except Exception as exc:  # noqa: BLE001 — a mid-run/read throw routes to restore
                 run_failed = True
-                run_failed_msg = f"hammer run raised: {exc!r}"
+                run_failed_msg = f"hammer run raised: {safe_exc(exc, repr_form=True)}"
         # --- after Close (the Hammer handle is released) ---
         if run_failed:
             # restore the entry design (the failed run may have mutated it), guarded
@@ -1337,9 +1628,33 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
         # classify_verdict bins it "stable" (within tol), OR on a NON-FINITE result — NOT
         # merely verdict=="diverged" (which misses a marginally-worse-but-stable result).
         # An IMPROVED (merit_after < merit_before) or exactly-equal result never restores.
+        # ROUND-10a P-1 -- THE NEVER-WORSE COMPARISON GOES THROUGH THE BASE SLOT.
+        # ``>`` DISPATCHES ``__gt__`` to the object, so a ``float`` SUBCLASS decided
+        # whether Hammer restores. MEASURED: a genuinely worse result whose ``__gt__``
+        # lies False SUPPRESSES ``should_restore``, and the WORSE design is kept and
+        # returned -- the one guarantee this branch exists to make. Each conversion is
+        # reached only after the matching ``_finite`` conjunct has established a non-bool
+        # ``int``/``float``, so the two-branch ``_finite_below`` shape is type-safe.
+        # +0 statements.
+        # ROUND-13 -- AN UNCOMPARABLE ENTRY MERIT NOW RESTORES INSTEAD OF COMMITTING.
+        # ``or (_finite(merit_before) and ...)`` made ``should_restore`` False whenever
+        # the ENTRY merit was non-finite or non-numeric -- including for a Hammer result
+        # that is genuinely worse. The worse design was committed in place, returned
+        # ``ok=True``, with no warning. This branch exists to make ONE guarantee ("Hammer
+        # never returns worse than entry"); if entry is uncomparable the guarantee cannot
+        # be established, so the conservative answer is to end where we started, not to
+        # keep an unverifiable result. The restore block then emits ``warning_restore``
+        # when its read-back cannot match a non-finite ``merit_before``, so the caller is
+        # told rather than silently handed back the entry design. The two conversions
+        # stay type-safe: the third disjunct is reached only when BOTH ``_finite``
+        # conjuncts are True. +0 statements.
         should_restore = checkpoint_ok and (
             not _finite(merit_after)
-            or (_finite(merit_before) and merit_after > merit_before)
+            or not _finite(merit_before)
+            or ((float.__float__(merit_after) if isinstance(merit_after, float)
+                 else int.__index__(merit_after))
+                > (float.__float__(merit_before) if isinstance(merit_before, float)
+                   else int.__index__(merit_before)))
         )
         if should_restore:
             try:
@@ -1364,7 +1679,11 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
             _ckpt_reap(ckpt_fwd)                      # #59 glob the stem incl. .ZDA
 
     # Post-run snapshot (trail parity with the DLS pass loop).
-    _snapshot(
+    # ROUND-13 -- AND WARNING PARITY. The return was discarded, so on an unwritable sink
+    # the Hammer tail got the DLS tail's trail row and NOT its warning: the DLS twin
+    # captures ``after_row`` and merges a ``passNN_after snapshot failed`` note. Captured
+    # here and folded into the existing ``_merge_warning`` call below (+0 statements).
+    after_row = _snapshot(
         session,
         "pass00_after",
         {
@@ -1382,13 +1701,24 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
     verdict = _oc.classify_verdict(opt_initial, merit_after)
     if hammer_restored:
         verdict = "stable"                            # merit_after == merit_before
-    mfe_recalc = mfe.CalculateMeritFunction()
+    # ROUND-13 H-3 -- guarded, see the DLS tail. WORSE HERE: the checkpoint has already
+    # been reaped by the ``finally`` above, so a throw at this line also destroys the
+    # only copy of the entry design AND loses ``warning_restore`` -- the sentence saying
+    # whether the restore succeeded. +0 statements.
+    mfe_recalc = safe_call(lambda: mfe.CalculateMeritFunction(),
+                           "<the post-Close MFE re-read threw>")
     disagreement = _oc._readback_disagreement(merit_after, mfe_recalc)
     improvement_abs = _improvement_abs(opt_initial, merit_after)
     improvement_pct = _improvement_pct(opt_initial, merit_after)
 
     # Merge the guard note + run-time warning + the checkpoint/restore/disagreement notes.
-    warning = _merge_warning(guard_warning, warning)
+    # The snapshot note is NESTED into this existing call rather than added as its own
+    # statement -- this file is at its locked size budget (ROUND-13).
+    warning = _merge_warning(
+        _merge_warning(guard_warning, warning),
+        None if after_row is None or after_row["ok"] else
+        f"pass00_after snapshot failed: {after_row.get('error')}",
+    )
     warning = _merge_warning(warning, warning_restore)
     if not checkpoint_ok:
         warning = _merge_warning(
@@ -1481,7 +1811,20 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
         "warning": warning,
     }
     result.update(_s3_keys)    # the structured malformed-range finding (additive)
-    result.update(edge_audit)  # 0-6 additive geometry-audit keys; never overwrites a base key
+    # The gate's scan, threaded in from the caller that ran it before the fork -- the
+    # gate is upstream of both algorithms and is never re-run per fork.
+    if negative_weight_scan is not None:
+        warning, _nw_keys = _negative_weight_disclosure(negative_weight_scan, warning)
+        result.update(_nw_keys)
+        result["warning"] = warning      # see the DLS tail: the dict predates the merge
+    # ROUND-13: 1..10 additive keys, not "0-6". ``geometry_audit`` is MANDATORY on every
+    # exit of ``_edge_audit_warnings``, so the floor is 1, never 0; the ten
+    # top-level names are geometry_audit, geometry_not_audited, grin_geometric_audit,
+    # grin_not_audited, thin_edge_warning, thin_edge_warning_provisional,
+    # thin_edge_net_withheld_warning, buried_center_warning, negative_air_gap_warning,
+    # negative_bfl_warning. Ten is the ENUMERATED bound, not a claim that all ten can
+    # co-occur.
+    result.update(edge_audit)  # 1..10 additive geometry-audit keys; never overwrites a base key
     # GRIN §4.4: the post-optimize GRIN index audit rides a Hammer result too (the
     # both-tails drift-pin — the same leaf helper as the DLS tail).
     result.update(_grin_index_audit_warnings(session, grin_dn_max))
@@ -1492,7 +1835,9 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
     # ran BEFORE the algorithm fork), so a recover_thin nudge is never silently undisclosed.
     result = _apply_nudge_disclosure(result, nudge_disclosure)
     # optimize-verdict-qualification : the SAME qualifier on the Hammer tail (the
-    # both-tails drift-pin — C1/C2). The Hammer `"stable"` forcing at :1302 rides it, so a
+    # both-tails drift-pin -- C1/C2). The Hammer `verdict = "stable"` forcing on the
+    # `hammer_restored` branch rides it (ROUND-10a: the old `:1302` pin had drifted to
+    # 1638; re-anchored on the symbol), so a
     # best-restored run over nonphysical ENTRY geometry reads `stable_unphysical` (R9).
     result = _qualify_verdict(result)
     return result
@@ -1519,23 +1864,53 @@ def _improvement_pct(before, after):
 
 
 def _finite(value):
-    """True if ``value`` is a finite real number (not bool/non-number/non-finite)."""
+    """True if ``value`` is a finite real number (not bool/non-number/non-finite).
+
+    ROUND-10a P-1 -- the ``isfinite`` READ goes THROUGH THE BASE SLOT, for the reason
+    ``_finite_below``'s docstring already records: ``math.isfinite`` DISPATCHES
+    ``__float__`` on a ``float`` subclass, so a lying ``__float__`` returning inf
+    disqualifies a real finite reading. +0 statements.
+    """
     return (
         isinstance(value, (int, float))
         and not isinstance(value, bool)
-        and math.isfinite(value)
+        and math.isfinite(float.__float__(value) if isinstance(value, float)
+                          else int.__index__(value))
     )
 
 
 def _finite_below(v, floor):
-    """True iff ``v`` and ``floor`` are both finite real numbers and ``v < floor``."""
+    """True iff ``v`` and ``floor`` are both finite real numbers and ``v < floor``.
+
+    ROUND-7 -- THE COMPARISON AND THE FINITE TEST BOTH GO THROUGH THE BASE SLOT, and
+    this is the VERBATIM shape ``_optimize_common._row_weight_state`` already records as
+    measured and fixed. This one gates ALL FOUR manufacturability warnings
+    (``thin_edge`` / ``buried_center`` / ``negative_air_gap`` / ``negative_bfl``) AND the
+    ``nonphysical`` evidence list ``_qualify_verdict`` consumes, so a subclass deciding
+    ``<`` here decides whether ``optimize`` certifies a destroyed lens.
+
+    MEASURED end to end through ``_edge_audit_warnings``: a true -0.4 mm glass edge whose
+    ``__lt__`` lies False yields ``geometry_audit.status == "no_findings"`` and
+    ``_qualify_verdict`` leaves the verdict ``improved``; a real 0.5 mm sub-floor edge
+    likewise ships with no ``thin_edge_warning``. ``math.isfinite`` is part of it: on an
+    ``int`` SUBCLASS it DISPATCHES ``__float__``, so a lying ``__float__`` returning inf
+    disqualified a real finite reading before any comparison ran -- which is why the
+    walruses normalize INSIDE the ``isfinite`` calls rather than after them (the exact
+    ordering bug round 4 bred and killed in the weight arm).
+
+    The isinstance/bool conjuncts ahead of the walruses are what make the unbound slot
+    calls type-safe; a huge ``int`` still raises ``OverflowError`` out of ``isfinite``
+    exactly as before, into the caller's guard.
+    """
     return (
         isinstance(v, (int, float))
         and not isinstance(v, bool)
         and isinstance(floor, (int, float))
         and not isinstance(floor, bool)
-        and math.isfinite(v)
-        and math.isfinite(floor)
+        and math.isfinite(v := float.__float__(v) if isinstance(v, float)
+                          else int.__index__(v))
+        and math.isfinite(floor := float.__float__(floor) if isinstance(floor, float)
+                          else int.__index__(floor))
         and v < floor
     )
 
@@ -2189,13 +2564,18 @@ def _glass_band_findings(gaps, lo, hi):
     total = len(gaps)
     for j in range(total):
         g = gaps[j]
-        if not isinstance(g, dict) or g.get("kind") != "glass":
+        # ROUND-7 -- every ``kind`` compare in this module goes through the base slot.
+        # ``check_clearance``'s gap dicts carry engine-derived strings, so a ``str``
+        # SUBCLASS decides these ``==``/``!=`` itself: a real glass gap whose
+        # ``kind.__eq__`` lies False makes a -0.4 mm edge read ``no_findings``, and an air
+        # gap lying True gets graded against the GLASS floor.
+        if not isinstance(g, dict) or _oc._base_token(g.get("kind")) != "glass":
             continue
         edge = g.get("edge_thickness")
         if _finite_below(edge, hi) and not _finite_below(edge, lo):
             found.append((g, "edge", edge))
         nxt = gaps[j + 1] if j + 1 < total else None
-        if isinstance(nxt, dict) and nxt.get("kind") == "glass":
+        if isinstance(nxt, dict) and _oc._base_token(nxt.get("kind")) == "glass":
             center = g.get("center_thickness")
             if _finite_below(center, hi) and not _finite_below(center, lo):
                 found.append((g, "center", center))
@@ -2262,15 +2642,32 @@ def _edge_audit_warnings(session, glass_floor, air_floor,
     at target and evaluates at Surf1's larger aperture, ~40% divergent from
     ``check_clearance``'s ``min(semi)`` convention).
 
-    NEVER raises, NEVER flips ``ok``, runs ONCE. It NO LONGER returns ``{}``: an absent
-    audit key never meant clean, so a refusal / vacuity / fold / throw is DISCLOSED
-    (``status: "not_audited"`` + a ``reason``), never silent.
+    NEVER raises, NEVER flips ``ok``, runs ONCE. On every REACHED exit it discloses
+    rather than falling silent: a refusal / vacuity / fold is reported as
+    ``status: "not_audited"`` + a ``reason``, never as an absent key that a reader would
+    take for clean.
+
+    ROUND-10a — this paragraph used to read "It NO LONGER returns ``{}``" while the
+    comment directly below it says "NEVER raises -> {} on any throw". BOTH describe the
+    shipped code and they contradicted each other as written. The reconciliation: the
+    ``{}`` return is the OUTER never-raise backstop ONLY — a throw out of the classifier
+    or the message f-strings, where nothing about the geometry is known and the
+    alternative is aborting a successful optimize. Every path that REACHES a verdict
+    discloses. So ``{}`` still happens, and it means *the audit itself faulted*, never
+    that the geometry was sound. ``_qualify_verdict`` reads that absence as
+    ``not_audited``, which is why the backstop is safe.
+
+    (The retired status token is deliberately NOT spelled here: ``test_b18b`` is a
+    source-text guard forbidding that literal inside this function, it caught this
+    paragraph's first draft, and the guard is right.)
     """
     # (§2.4 "NEVER raises -> {} on any throw / non-dict / missing field"): the
     # WHOLE body is guarded, not just the check_clearance CALL. A malformed-but-truthy
     # envelope (a firing glass gap missing surface/next_surface, or a truthy NON-DICT
     # global_bfd) would otherwise raise in the classifier / message f-strings / bfd.get()
-    # and ABORT a successful optimize at this hook. Any failure -> {} (additive-nothing),
+    # and ABORT a successful optimize at the audit hook on the success tail (ROUND-10a:
+    # the old "L869" pin had drifted to ~1390; re-anchored on the description). Any
+    # failure -> {} (additive-nothing),
     # never propagates. (The inner .get() / isinstance guards are belt-and-suspenders; the
     # outer try is the load-bearing never-raise guarantee.)
     try:
@@ -2347,7 +2744,7 @@ def _edge_audit_warnings(session, glass_floor, air_floor,
             g
             for g in gaps
             if isinstance(g, dict)
-            and g.get("kind") == "glass"
+            and _oc._base_token(g.get("kind")) == "glass"  # base slot
             and _finite_below(g.get("edge_thickness"), g.get("threshold"))
         ]
         if thin:
@@ -2369,8 +2766,8 @@ def _edge_audit_warnings(session, glass_floor, air_floor,
             if (
                 isinstance(g, dict)
                 and isinstance(gnext, dict)
-                and g.get("kind") == "glass"
-                and gnext.get("kind") == "glass"
+                and _oc._base_token(g.get("kind")) == "glass"  # base slot
+                and _oc._base_token(gnext.get("kind")) == "glass"  # base slot
                 and _finite_below(g.get("center_thickness"), g.get("threshold"))
             ):
                 buried.append(g)
@@ -2448,7 +2845,7 @@ def _edge_audit_warnings(session, glass_floor, air_floor,
             g
             for g in gaps
             if isinstance(g, dict)
-            and g.get("kind") == "air"
+            and _oc._base_token(g.get("kind")) == "air"  # base slot
             and not g.get("is_back_airgap")
             and _finite_below(g.get("center_thickness"), 0.0)
         ]
@@ -2476,7 +2873,9 @@ def _edge_audit_warnings(session, glass_floor, air_floor,
         for g in gaps:
             if not isinstance(g, dict):
                 continue
-            gkind = g.get("kind")
+            # ONE base-slot bind feeds BOTH compares below, so the two arms of this
+            # if/elif cannot acquire the hole separately.
+            gkind = _oc._base_token(g.get("kind"))
             if gkind == "air":
                 # The is_back_airgap exclusion is preserved VERBATIM from the clause
                 # above: a negative BACK air gap is owned by negative_bfl_warning, so it
@@ -2973,7 +3372,10 @@ def _qualify_verdict(result):
 
     ``ok`` NEVER flips. ``merit_verdict`` always carries the raw ``classify_verdict``
     answer, so no caller loses the old fact. ``improved`` stays the SAME derived
-    expression as ``:1087`` / ``:1340``. NEVER raises: the final fail-closed ``except``
+    expression as the DLS and Hammer tails build inline (search
+    ``"improved": verdict == "improved"`` — two sites; ROUND-10a re-anchored these on
+    the expression because the old ``:1087`` / ``:1340`` pins had drifted to 1396 / 1702,
+    and a line pin is not an anchor). NEVER raises: the final fail-closed ``except``
     resolves toward ``_unverified`` + disclosure, never toward ``improved``.
     """
     if not isinstance(result, dict):
@@ -3054,7 +3456,7 @@ def _qualify_verdict(result):
     # exactly `str`, so the comparison can no longer raise and a guard would be dead code.
     if type(verdict) is not str:
         verdict = _STATIC_UNVERIFIED
-    result["improved"] = (verdict == "improved")   # the SAME expression as :1087/:1340
+    result["improved"] = (verdict == "improved")   # the SAME expression as both tails
     if summary is not None:
         try:
             result["warning"] = _merge_warning(result.get("warning"), summary)
@@ -3254,9 +3656,13 @@ def _grin_dn_max_param(params):
     ``OptimizeError(family="optimize_param")`` — raised EARLY in ``_optimize_impl`` (before
     the preflight; a bad value opens NOTHING — the ``recover_thin`` precedent).
     """
-    if "grin_dn_max" not in params:
+    # ROUND-7 -- unbound ``dict`` slots, see ``_bool_param``. This door raises EARLY in
+    # ``_optimize_impl``, so a lying ``__contains__`` here silently drops an authored GRIN
+    # index envelope and the NO-FLOOR spread check never runs.
+    if not (isinstance(params, dict)
+            and dict.__contains__(params, "grin_dn_max")):
         return None
-    value = params["grin_dn_max"]
+    value = dict.__getitem__(params, "grin_dn_max")
     if isinstance(value, bool):
         raise OptimizeError(
             f"'grin_dn_max' must be a number, not a bool ({value!r})",
@@ -3267,11 +3673,16 @@ def _grin_dn_max_param(params):
             f"'grin_dn_max' must be a number, got {type(value).__name__} {value!r}",
             family="optimize_param",
         )
-    value = float(value)
-    if not math.isfinite(value):
+    # ROUND-13 -- the ``_require_pos_float`` sibling, fixed with it (the same
+    # defect at two sites is one defect). ``float(10**400)`` raises ``OverflowError``
+    # past a door whose docstring promises ``optimize_param``; ask finiteness WITHOUT
+    # converting. +0 statements (a move).
+    if not is_finite_number(value):
         raise OptimizeError(
-            f"'grin_dn_max' must be a finite number, got {value!r}", family="optimize_param"
+            f"'grin_dn_max' must be a finite number, got {safe_repr(value)}",
+            family="optimize_param",
         )
+    value = float(value)
     if value <= 0:
         raise OptimizeError(
             f"'grin_dn_max' must be > 0, got {value}", family="optimize_param"
@@ -3318,11 +3729,23 @@ def _grin_box_violation_message(surf, violations):
 
 
 def _grin_index_audit_warnings(session, grin_dn_max):
-    """The §4.2/§4.3 post-run GRIN index audit -> ``dict[str, str]`` (0..6 additive keys).
+    """The §4.2/§4.3 post-run GRIN index audit -> ``dict[str, str]`` additive keys.
 
     NEVER flips ``ok``, NEVER overwrites a base key, NEVER aborts a successful optimize;
-    runs ONCE per successful return. Every fired key carries ``_GRIN_SAMPLED_COVERAGE_NOTE``
-    (the audit never presents itself as a full-field verdict).
+    runs ONCE per successful return.
+
+    ROUND-13 corrects two counts in this paragraph. The normal path emits 0..5 keys — the
+    four buckets (nonphysical / box_violated / dn_exceeds_envelope / unread) plus
+    ``grin_axial_monotonicity_not_audited`` — and the total-body-throw path emits EXACTLY
+    ONE, ``grin_index_audit_failed``. Six was never simultaneously reachable, because the
+    sixth name is the one that REPLACES the other five.
+
+    And "every fired key carries ``_GRIN_SAMPLED_COVERAGE_NOTE``" is false for exactly
+    that key: ``grin_index_audit_failed`` is the STATIC ``_GRIN_AUDIT_FAILED_MSG`` with no
+    note appended — deliberately, since a sampled-coverage caveat on a message that says
+    "the audit did not run" would be describing coverage the audit never had. Every key
+    the SUCCESS path emits does carry it (the audit never presents itself as a
+    full-field verdict).
 
     STRUCTURE: a PER-SURFACE try — a per-surface throw / malformed summary routes THAT
     surface to ``grin_index_unread_warning`` and the loop CONTINUES (one bad surface never
@@ -3477,9 +3900,21 @@ DRY_RUN_SPEC = ToolSpec(
     description=(
         "Preflight an optimization without running it: confirm variables + a merit "
         "are set (ready:True) and the stop is optimizable, without opening the "
-        "optimizer or mutating anything. Gotcha: require_free_stop defaults True, so "
+        "optimizer or mutating anything. ready:False (carrying a "
+        "negative_weight_scan_fault record) means the negative-weight check could "
+        "NOT run, so the merit was not cleared — it is not a pass. "
+        "ready:True does NOT certify the OTHER gates ran: the per-config-thin and "
+        "inert-DOF scans have no fault channel — each returns an empty offender list "
+        "on its own internal fault (a wedged MCE, an unreadable LDE), which is "
+        "indistinguishable from a clean scan, so ready:True can ride a gate that "
+        "did not run. "
+        "Gotcha: require_free_stop defaults True, so "
         "this REFUSES a glass-vertex stop — run normalize_stop first (or pass "
-        "auto_normalize). See optimize, normalize_stop, build_merit."
+        "auto_normalize). "
+        "Also REFUSES (optimize_negative_weight) a merit carrying a NEGATIVE weight: "
+        "the sign has been measured to leave a run reporting success while moving "
+        "nothing — fix with edit_operand(number=N, weight=<positive>) or remove_operand(number=N). "
+        "See optimize, normalize_stop, build_merit."
     ),
 )
 
@@ -3515,9 +3950,9 @@ OPTIMIZE_SPEC = ToolSpec(
         "confirmed physically-impossible measurement — exactly three: a negative interior "
         "air-gap CENTRE, a negative glass edge or centre, and a negative back focal "
         "distance. A negative interior air-gap EDGE is deliberately NOT among them (it "
-        "cannot be told from a zero-thickness dummy/reference plane at this layer; see "
-        "), so a *_unphysical verdict is not "
-        "a complete physicality check. A *_unverified "
+        "cannot be told from a zero-thickness dummy/reference plane at this "
+        "layer), so a *_unphysical verdict is not a complete physicality "
+        "check. A *_unverified "
         "suffix means the audit did not establish anything — either it provably did not "
         "run (folded system / refused / threw / returned no gaps) or its result could not "
         "be READ (reason 'qualifier_failed'); read geometry_audit.reason to tell which. "
@@ -3539,7 +3974,11 @@ OPTIMIZE_SPEC = ToolSpec(
         "(well under a second on a small or already-good system) with real merit improvement "
         "is the expected early-stop, NOT a dropped cap. Gotcha: require_free_stop defaults True, so this REFUSES a "
         "glass-vertex stop with no optimizer opened — run normalize_stop first (or pass "
-        "auto_normalize). Persist the result with save_candidate. "
+        "auto_normalize). Also REFUSES (optimize_negative_weight) a merit "
+        "carrying a NEGATIVE weight, with nothing opened: the sign has been "
+        "measured to leave a run reporting success while moving nothing — "
+        "fix with edit_operand(number=N, weight=<positive>) or "
+        "remove_operand(number=N). Persist the result with save_candidate. "
         "If a run is refused optimize_merit_uncomputable (merit 9e9 — a corner ray cannot "
         "trace at full pupil), the envelope's merit_row_diagnostics.suspects names the "
         "wide-field/high-pupil rows (config + Hx/Hy/Px/Py, corner-first). ESCAPE: edit the "

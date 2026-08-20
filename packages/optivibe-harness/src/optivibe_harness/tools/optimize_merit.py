@@ -73,7 +73,11 @@ def _is_mtf_family(operand) -> bool:
     False, so the guard is strictly MTF-scoped (the non-MTF authoring path stays
     byte-identical).
     """
-    return str(operand).upper()[:3] in _MTF_FAMILY_PREFIXES
+    # ROUND-10a P-4 (class sweep) -- THROUGH THE BASE SLOT. ``str(x)`` honours
+    # ``__str__``'s RETURN TYPE, so the token could arrive as a ``str`` SUBCLASS and its
+    # own ``upper``/``__eq__``/``__hash__`` would decide this classification -- which
+    # gates the MTF field-slot guard (the silent on-axis ``Field=0`` warning).
+    return _oc._base_token(operand).upper()[:3] in _MTF_FAMILY_PREFIXES
 
 
 def _mtf_field_miswrite_name(operand, exc):
@@ -146,7 +150,10 @@ def _reap_leading_conf_to(mfe, count_before):
         while int(mfe.NumberOfOperands) > count_before and guard < 4:
             guard += 1
             top = mfe.GetOperandAt(1)
-            if str(top.TypeName) != "CONF":
+            # ROUND-10a P-4 -- base slot. This compare is the ONLY firewall standing
+            # between the reap loop and REAL CONTENT: a lying ``__ne__`` answering False
+            # on a non-CONF leading row lets the loop DELETE a user operand.
+            if _oc._base_token(top.TypeName) != "CONF":
                 break  # a non-CONF leading row is real content — never reap it
             mfe.RemoveOperandAt(1)
     except Exception:  # noqa: BLE001 — best-effort baseline restore; never raise
@@ -175,7 +182,8 @@ def _reap_config_bracket_to(mfe, count_before):
         while int(mfe.NumberOfOperands) > count_before and guard < 4:
             guard += 1
             top_index = int(mfe.NumberOfOperands)
-            if str(mfe.GetOperandAt(top_index).TypeName) != "CONF":
+            # ROUND-10a P-4 -- base slot, same firewall as ``_reap_leading_conf_to``.
+            if _oc._base_token(mfe.GetOperandAt(top_index).TypeName) != "CONF":
                 break  # a non-CONF top row is the operand orphan (removed elsewhere) / content
             mfe.RemoveOperandAt(top_index)
     except Exception:  # noqa: BLE001 — best-effort; the leading reap below still runs
@@ -307,10 +315,29 @@ def _author_config_bracket(session, mfe, cfg, count_before):
 
 
 def _bool_param(params, key, default):
-    """Pull an optional bool param; reject a non-bool (a client miswrite)."""
-    if key not in params:
+    """Pull an optional bool param; reject a non-bool (a client miswrite).
+
+    ROUND-8 -- MEMBERSHIP AND LOOKUP GO THROUGH THE UNBOUND ``dict``
+    SLOTS. Round 7 applied this rule to ``optimize_run``'s copy of this door and left
+    ``optimize_merit`` / ``analysis_measure`` / ``tolerance_run`` on ``key not in
+    params``, so four copies that used to AGREE started disagreeing. On a ``dict``
+    SUBCLASS with a lying ``__contains__`` the door silently substitutes the default;
+    measured in the ``optimize_run`` twin, ``require_free_stop=False`` came back
+    **True**. The rule ``_optimize_common.range_headers_supplied`` documents (:2772) is
+    now at every copy of the door.
+
+    REACHABILITY IS NIL TODAY AND THAT IS STATED, NOT ASSUMED: ``params`` arrives from
+    JSON deserialization (and ``server.Dispatcher.call_tool`` coerces any non-``dict``
+    to ``{}`` at :517), so a ``dict`` subclass is structurally impossible on the shipped
+    path. Fixed for the same reason rounds 2 and 7 fixed their own nil-reachability
+    siblings -- one rule at every door beats a door-by-door reachability argument that
+    goes stale the day a caller changes. The ``isinstance`` conjunct is what makes the
+    unbound calls type-safe (it matches ``optimize_run._bool_param``); a non-``dict``
+    mapping now reads as "not supplied".
+    """
+    if not (isinstance(params, dict) and dict.__contains__(params, key)):
         return default
-    value = params[key]
+    value = dict.__getitem__(params, key)
     if not isinstance(value, bool):
         raise ToolParamError(
             f"{key!r} must be a bool, got {type(value).__name__} {value!r}"
@@ -323,10 +350,15 @@ def _num_param(params, key, default):
 
     ``default`` of ``None`` means "leave the engine default" (the caller skips the
     write when this returns ``None``).
+
+    ROUND-8 -- unbound ``dict`` slots, see ``_bool_param``. This door serves
+    ``target`` / ``weight`` on ``add_operand`` and ``edit_operand``, so a lying
+    ``__contains__`` would silently retarget an operand to the default instead of the
+    caller's value. Nil reachability today (JSON params + the :517 dispatch coercion).
     """
-    if key not in params:
+    if not (isinstance(params, dict) and dict.__contains__(params, key)):
         return default
-    value = params[key]
+    value = dict.__getitem__(params, key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ToolParamError(
             f"{key!r} must be a number, got {type(value).__name__} {value!r}"
@@ -360,10 +392,12 @@ def _int_count_param(params, key):
     ``isinstance(int)`` trap), a non-integral float (``3.5``) is rejected, a string is
     rejected. Returns ``None`` when the param is absent (leave the wizard default).
     Raises ``ToolParamError`` (converted to ``optimize_param`` by the caller).
+
+    ROUND-8 -- unbound ``dict`` slots, see ``_bool_param``. Nil reachability today.
     """
-    if key not in params:
+    if not (isinstance(params, dict) and dict.__contains__(params, key)):
         return None
-    value = params[key]
+    value = dict.__getitem__(params, key)
     if isinstance(value, bool):
         raise ToolParamError(f"{key!r} must be an integer count, got {value!r}")
     if isinstance(value, int):
@@ -442,10 +476,15 @@ def _criterion_param(params):
     (the caller converts it to the ``optimize_param`` envelope). Validated in the
     ``build_merit`` param block BEFORE the wizard is touched, so a bad token mutates
     NOTHING (§3.1).
+
+    ROUND-8 -- unbound ``dict`` slots, see ``_bool_param``. A lying ``__contains__``
+    here would silently substitute ``"spot"`` for an explicit ``"wavefront"``, i.e.
+    build a DIFFERENT merit than the caller asked for under an ok:true envelope. Nil
+    reachability today.
     """
-    if "criterion" not in params:
+    if not (isinstance(params, dict) and dict.__contains__(params, "criterion")):
         return "spot"
-    value = params["criterion"]
+    value = dict.__getitem__(params, "criterion")
     # ``value in tuple`` is exact + type-safe: ``True``/``5``/``""``/``"Spot"`` all miss.
     if not isinstance(value, str) or value not in _CRITERION_TOKENS:
         raise ToolParamError(
@@ -469,7 +508,13 @@ def _resolve_data_index(wizard, target_name, *, count_attr="NumberOfDataTypes",
     valid = []
     getter = getattr(wizard, getter_name)
     for i in range(n):
-        name = str(getter(i))
+        # ROUND-12 (H-3 triage, owned file). BASE SLOT on the enumerated wizard NAME.
+        # This is a decision read, not a display one: the matched ``i`` is what gets
+        # written to ``wizard.Data`` / ``wizard.Type``, so a forging name resolves the
+        # WRONG index — the merit is built to a criterion the user did not ask for while
+        # the ``criterion_data``/``criterion_type`` echo (read back through the same
+        # forging getter) confirms the one they did.
+        name = _oc._base_token(getter(i))
         valid.append(name)
         if name == target_name:
             return i
@@ -477,6 +522,33 @@ def _resolve_data_index(wizard, target_name, *, count_attr="NumberOfDataTypes",
         f"{label} target {target_name!r} is not an available wizard {label}; "
         f"the wizard offers {valid}"
     )
+
+
+def _guarded_readback(label, fn, faults):
+    """Run a POST-COMMIT read-back echo guarded: its value, or ``None`` plus a named fault.
+
+    ROUND-12 F-6. ``build_merit``'s four wizard read-back echoes used to be inline
+    expressions inside the ``result`` dict literal, with no enclosing ``try`` anywhere in
+    the function -- while ``wizard.Apply()`` / ``wizard.OK()`` are ALREADY COMMITTED far
+    above. A throw from ``GetDataTypeAt`` / ``GetTypeAt`` / ``GetRingAt`` / ``GetArmAt``
+    (or from ``_base_token`` on a wedged ``__str__``, or ``int()`` on a wedged
+    ``__index__``) therefore took out the WHOLE ENVELOPE for a merit function that HAD
+    been rebuilt: the caller got an opaque dispatch ``internal`` and no record of what the
+    engine now contains. The worst possible moment to lose the envelope is after the
+    mutation landed.
+
+    A read-back that did not read back is ``None`` -- ABSENT, never a fabricated
+    confirmation -- and ``faults`` collects a NAMED entry so a consumer treating these as
+    proof can tell "unproven" from "proved". It is a MODULE-LEVEL function rather than a
+    closure so a test can drive the shipped body: mutation census found the
+    first cut's row re-implementing the closure in the test file, which meant mutating the
+    production copy left the row green.
+    """
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001 -- post-commit: NEVER lose the envelope
+        faults.append(f"{label}: {_oc._safe_exception_text(exc)}")
+        return None
 
 
 def _glass_floor_warning(system, last_surface=_oc._UNSET_LAST_SURFACE):
@@ -738,10 +810,26 @@ def _author_etgt_edge_floors(system, mfe, min_glass):
             op.Target = target
             op.Weight = _ETGT_EDGE_WEIGHT
             # READ-BACK-AS-PROOF on Target/Weight: a silent no-op -> per-row hiccup.
+            # ROUND-10a P-4 -- THE READ-BACK-AS-PROOF GOES THROUGH THE BASE SLOT.
+            # ``float(x)`` DISPATCHES ``__float__``, so a subclass could satisfy the very
+            # canary that exists to catch a silent no-op: the row would be counted as an
+            # authored ETGT edge floor while the cell holds something else.
+            # BOOL IS A DELIBERATE EXCLUSION, NOT AN OVERSIGHT. ``isinstance(True,
+            # float)`` is False, so a bool still falls to ``float(_w)`` -> 1.0 -- EXACTLY
+            # what the pre-fix ``float(op.Weight)`` did. That is the point: this fix is a
+            # strict no-op on every honest shape and bites only a LYING subclass.
+            # Rejecting bool here would be a NEW refusal, out of this round's scope, and
+            # it would move the W-9 divergence the fakes currently PIN as live behaviour.
+            # ``_optimize_common``'s numeric guards DO treat bool as a distinct rejected
+            # case; the two conventions differ on purpose -- there the value gates a
+            # refusal, here it is a read-back comparison whose pre-existing answer is
+            # being preserved.
             if not (
-                math.isclose(float(op.Target), target, rel_tol=1e-9, abs_tol=1e-12)
+                math.isclose(float.__float__(_t) if isinstance(_t := op.Target, float)
+                             else float(_t), target, rel_tol=1e-9, abs_tol=1e-12)
                 and math.isclose(
-                    float(op.Weight), _ETGT_EDGE_WEIGHT, rel_tol=1e-9, abs_tol=1e-12
+                    float.__float__(_w) if isinstance(_w := op.Weight, float)
+                    else float(_w), _ETGT_EDGE_WEIGHT, rel_tol=1e-9, abs_tol=1e-12
                 )
             ):
                 _remove_orphan(mfe, op, count_before=count_before)
@@ -883,10 +971,16 @@ def _reweight_per_config_thic_floors(system, mfe, weight):
     ``(n_reweighted:int, reweighted_surfaces:list[int], unfloored_thic_surfaces:list[int],
     reweight_failed_surfaces:list[int], fault:bool)``.
 
-    1. THIC-surface set — walk ``system.MCE`` 1..NumberOfOperands, collect ``int(op.Param1)``
-       for each ``str(op.TypeName)=="THIC"`` (the SAME read ``_scan_per_config_thin`` uses).
-       Guarded per row.
-    2. For each MFE row 1..NumberOfOperands keep iff ``str(op.TypeName) in _THIC_FLOOR_TYPES``
+    1. THIC-surface set — walk ``system.MCE`` 1..NumberOfOperands, collect ``op.Param1``
+       for each ``_oc._base_token(op.TypeName) == "THIC"``. This is NOW the same read
+       ``_scan_per_config_thin`` uses; until ROUND-10a P-4 it was NOT, and this clause
+       asserted an agreement that did not hold. The scanner was base-slotted at round 5
+       and this walk was left bare, so a ``TypeName`` returning a lying ``str`` subclass
+       was INVISIBLE here while the scanner still saw the row — the floor neither
+       strengthened nor disclosed on a design the scanner would refuse. Both reads, and
+       the ``Param1`` index beside them, now go through the base slot. Guarded per row.
+    2. For each MFE row 1..NumberOfOperands keep iff the base-slot ``TypeName`` is in
+       ``_THIC_FLOOR_TYPES``
        AND its ``Surf1==Surf2 == k in THIC-surfaces`` (read Surf1/Surf2 via
        ``_mc.read_param_map(op)`` by Header — NEVER ``op.Value``, which reads 0.0 standalone
        even when correct, §3). Bump ``op.Weight = weight`` + read-back-prove
@@ -913,9 +1007,19 @@ def _reweight_per_config_thic_floors(system, mfe, weight):
     for row in range(1, n_mce + 1):
         try:
             op = mce.GetOperandAt(row)
-            if str(op.TypeName) != "THIC":
+            # ROUND-10a P-4 -- base slot. THE NAMED SITE: this read is BARE while
+            # ``_optimize_common._scan_per_config_thin`` — which the docstring above
+            # claims is "the SAME read" — was base-slotted at round 5. MEASURED: a
+            # ``TypeName`` whose ``__str__`` returns a lying subclass BLINDS the
+            # reweighter to the very THIC row the normalized scanner still sees, so the
+            # per-config floor is neither strengthened NOR disclosed while the scanner
+            # would refuse the same design.
+            if _oc._base_token(op.TypeName) != "THIC":
                 continue
-            thic_surfaces.add(int(op.Param1))
+            # ``int(x)`` DISPATCHES ``__int__``; a lying surface index sends the whole
+            # reweight at the WRONG surface set.
+            thic_surfaces.add(int.__index__(_p) if isinstance(_p := op.Param1, int)
+                              and not isinstance(_p, bool) else int(_p))
         except Exception:  # noqa: BLE001 — an unreadable THIC row contributes nothing
             continue
     if not thic_surfaces:
@@ -933,7 +1037,10 @@ def _reweight_per_config_thic_floors(system, mfe, weight):
     for i in range(1, n_mfe + 1):
         try:
             op = mfe.GetOperandAt(i)
-            if str(op.TypeName) not in _THIC_FLOOR_TYPES:
+            # ROUND-10a P-4 -- base slot. A ``set`` membership hashes FIRST and only then
+            # compares, and a ``str`` subclass inherits ``str.__hash__``, so its
+            # ``__eq__`` still decides -- the same shape ``LyingStr`` exercises.
+            if _oc._base_token(op.TypeName) not in _THIC_FLOOR_TYPES:
                 continue
             pmap = _mc.read_param_map(op)
             s1 = pmap.get("Surf1")
@@ -949,7 +1056,11 @@ def _reweight_per_config_thic_floors(system, mfe, weight):
         surfaces_with_floor.add(k1)  # a matching floor EXISTS on this THIC surface
         try:
             op.Weight = weight
-            if not math.isclose(float(op.Weight), weight, rel_tol=1e-9, abs_tol=1e-12):
+            # ROUND-10a P-4 -- base slot on the read-back canary (see the ETGT site,
+            # including its note on why a bool is DELIBERATELY left on the ``float(_w)``
+            # path -- byte-identical to the pre-fix answer).
+            if not math.isclose(float.__float__(_w) if isinstance(_w := op.Weight, float)
+                                else float(_w), weight, rel_tol=1e-9, abs_tol=1e-12):
                 continue  # a silent no-op read-back -> per-row hiccup, NOT counted
         except Exception:  # noqa: BLE001 — a per-row write hiccup is skipped (not counted)
             continue
@@ -1010,10 +1121,15 @@ _GRIN_MULTICONFIG_NOTE = (
 def _grin_dn_max_param_build(params):
     """Pull the optional ``grin_dn_max`` (§3.1): finite, non-bool, ``> 0`` -> float; else
     ``ToolParamError`` (the caller converts it to the ``optimize_param`` envelope, mutating
-    nothing). ``None`` when absent (the opt-in, NO safe default)."""
-    if "grin_dn_max" not in params:
+    nothing). ``None`` when absent (the opt-in, NO safe default).
+
+    ROUND-8 -- unbound ``dict`` slots, see ``_bool_param``. This is an OPT-IN safety
+    floor: a lying ``__contains__`` reads it as absent and authors NO index box, so the
+    caller's floor silently vanishes. Nil reachability today. (The ``optimize``-side twin
+    ``optimize_run._grin_dn_max_param`` was swept in round 7.)"""
+    if not (isinstance(params, dict) and dict.__contains__(params, "grin_dn_max")):
         return None
-    value = params["grin_dn_max"]
+    value = dict.__getitem__(params, "grin_dn_max")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ToolParamError(
             f"'grin_dn_max' must be a number, got {type(value).__name__} {value!r}"
@@ -1027,10 +1143,14 @@ def _grin_dn_max_param_build(params):
 def _grin_min_index_param_build(params):
     """Pull the optional ``grin_min_index`` (§3.1, default ``1.0``): finite, non-bool,
     ``>= 1.0`` -> float; else ``ToolParamError``. Returns ``(value, supplied)`` — ``supplied``
-    lets the caller enforce the "``grin_min_index`` without ``grin_dn_max`` -> refusal" rule."""
-    if "grin_min_index" not in params:
+    lets the caller enforce the "``grin_min_index`` without ``grin_dn_max`` -> refusal" rule.
+
+    ROUND-8 -- unbound ``dict`` slots, see ``_bool_param``. The ``supplied`` flag IS
+    the membership answer, so a lying ``__contains__`` does not merely default the value,
+    it defeats the pairing refusal. Nil reachability today."""
+    if not (isinstance(params, dict) and dict.__contains__(params, "grin_min_index")):
         return 1.0, False
-    value = params["grin_min_index"]
+    value = dict.__getitem__(params, "grin_min_index")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ToolParamError(
             f"'grin_min_index' must be a number, got {type(value).__name__} {value!r}"
@@ -1052,7 +1172,10 @@ def _grin_floor_row_view(op):
     the operand display field (an ``I#GT``/``I#LT`` displays 0.0 satisfied). NEVER raises.
     """
     try:
-        token = str(op.TypeName)
+        # ROUND-10a P-4 -- base slot AT CAPTURE. ``token`` is compared against the
+        # expected GRIN floor token by ``_gic._row_floor_acceptance`` AND echoed, so a
+        # ``str`` SUBCLASS decides an acceptance and rides onto the wire.
+        token = _oc._base_token(op.TypeName)
     except Exception:  # noqa: BLE001 — an unreadable TypeName -> not a floor row
         return None
     try:
@@ -1071,12 +1194,22 @@ def _grin_floor_row_view(op):
             return None
 
     try:
-        t = float(op.Target)
+        # ROUND-10a P-4 -- base slot: both values feed ``_row_floor_acceptance`` (a GATE)
+        # and the caller's ``math.isclose`` target check.
+        #
+        # A BOOL IS A DELIBERATE EXCLUSION HERE. ``isinstance(True, float)`` is False, so
+        # a bool falls to ``float(_t)`` -> 1.0, which is EXACTLY the pre-fix answer. The
+        # fix is a strict no-op on every honest shape and bites only a LYING subclass;
+        # rejecting bool would be a new refusal and would move the W-9 divergence the
+        # fakes PIN as live behaviour. (``_optimize_common``'s numeric guards reject bool
+        # explicitly -- a different convention, on purpose: those gate a refusal, this
+        # preserves a read-back comparison.)
+        t = (float.__float__(_t) if isinstance(_t := op.Target, float) else float(_t))
         target = t if math.isfinite(t) else None
     except Exception:  # noqa: BLE001
         target = None
     try:
-        w = float(op.Weight)
+        w = (float.__float__(_w) if isinstance(_w := op.Weight, float) else float(_w))
         weight = w if math.isfinite(w) else None
     except Exception:  # noqa: BLE001
         weight = None
@@ -1783,6 +1916,37 @@ def build_merit(session, params):
             except Exception:  # noqa: BLE001 — §3.4 NEVER raises: keep the best-known echo
                 pass
 
+    # ROUND-12 F-6 — THE FOUR READ-BACK ECHOES ARE COMPUTED HERE, GUARDED, BEFORE THE
+    # ENVELOPE IS BUILT. They used to be inline expressions inside the ``result`` dict
+    # literal below, with no enclosing ``try`` anywhere in ``build_merit`` — and
+    # ``wizard.Apply()`` / ``wizard.OK()`` are ALREADY COMMITTED ~150 lines above. So a
+    # throw from any of ``GetDataTypeAt`` / ``GetTypeAt`` / ``GetRingAt`` / ``GetArmAt``
+    # (or from ``_base_token`` on a wedged ``__str__``, or from ``int()`` on a wedged
+    # ``__index__``) took out the whole envelope for a merit function that HAD been
+    # rebuilt: the caller got an opaque dispatch ``internal`` and no record of what the
+    # engine now contains. The worst possible moment to lose the envelope is after the
+    # mutation landed.
+    #
+    # A read-back that did not read back is ``None`` — ABSENT, never a fabricated
+    # confirmation — and ``criterion_readback_faults`` NAMES which ones, so a consumer
+    # treating these as proof (the enumeration guard and the PERMUTED-``GetDataTypeAt``
+    # falsifier both do) can tell "proved" from "unproven" instead of guessing.
+    _readback_faults = []
+
+    def _echo(label, fn):
+        return _guarded_readback(label, fn, _readback_faults)
+
+    criterion_data = _echo(
+        "criterion_data", lambda: _oc._base_token(wizard.GetDataTypeAt(int(wizard.Data))))
+    criterion_type = _echo(
+        "criterion_type", lambda: _oc._base_token(wizard.GetTypeAt(int(wizard.Type))))
+    rings_echo = _echo("rings", lambda: (
+        int.__index__(_r) if isinstance(_r := wizard.GetRingAt(int(wizard.Ring)), int)
+        and not isinstance(_r, bool) else int(_r)))
+    arms_echo = _echo("arms", lambda: (
+        int.__index__(_a) if isinstance(_a := wizard.GetArmAt(int(wizard.Arm)), int)
+        and not isinstance(_a, bool) else int(_a)))
+
     # Echo the APPLIED settings (read-back-as-proof). The resolved ring/arm COUNTS are
     # read back off the wizard index via GetRingAt/GetArmAt (proves the index landed).
     result = {
@@ -1793,13 +1957,18 @@ def build_merit(session, params):
         "air": air,
         "min_air": min_air,
         "min_glass": min_glass,
-        "rings": int(wizard.GetRingAt(int(wizard.Ring))),
-        "arms": int(wizard.GetArmAt(int(wizard.Arm))),
+        # ROUND-10a P-4 -- base slot on the wizard READ-BACK echoes. These are proofs,
+        # not decoration (the enumeration guard + the PERMUTED-``GetDataTypeAt``
+        # falsifier rest on them), so a lying ``__int__``/``__str__`` would publish a
+        # fabricated confirmation that the write landed. ROUND-12 F-6: computed above,
+        # guarded -- ``None`` means the proof was not obtainable, not that it failed.
+        "rings": rings_echo,
+        "arms": arms_echo,
         # Echo the applied criterion + the READ-BACK of the Data/Type
         # index (proves the write landed, mirrors the rings/arms GetRingAt read-back).
         "criterion": criterion,
-        "criterion_data": str(wizard.GetDataTypeAt(int(wizard.Data))),
-        "criterion_type": str(wizard.GetTypeAt(int(wizard.Type))),
+        "criterion_data": criterion_data,
+        "criterion_type": criterion_type,
         # MCE additive keys (byte-compatible add — a 1-config system echoes
         # span_configs:false, configs_covered:[], spans_all_configs:true).
         "span_configs": span_configs,
@@ -1814,6 +1983,12 @@ def build_merit(session, params):
             span_configs and (min_air > 0 or min_glass > 0)
         ),
     }
+    if _readback_faults:
+        # ROUND-12 F-6. ABSENT on the healthy path (byte-compatible additive key), so its
+        # PRESENCE is the disclosure: one or more read-back proofs above are ``None``
+        # because the read faulted, not because the wizard reported nothing. It does NOT
+        # flip ``ok`` — the merit was built and committed; what failed is the evidence.
+        result["criterion_readback_faults"] = _readback_faults
     if max_air is not None:
         result["max_air"] = max_air
     if max_glass is not None:
@@ -1933,7 +2108,11 @@ def _wizard_sig(mfe, count):
     prior boundary; at preserve time it refuses rather than mis-slicing).
     """
     joined = "\n".join(
-        str(mfe.GetOperandAt(i).TypeName) for i in range(1, count + 1)
+        # ROUND-10a P-4 -- base slot. ``str.join`` accepts a ``str`` SUBCLASS verbatim,
+        # so a lying token would be fingerprinted as itself and the staleness sha1 --
+        # the guard that refuses a mis-slicing ``preserve_custom`` rebuild -- would
+        # agree with it.
+        _oc._base_token(mfe.GetOperandAt(i).TypeName) for i in range(1, count + 1)
     )
     return hashlib.sha1(joined.encode()).hexdigest()
 
@@ -2264,9 +2443,13 @@ def _preserve_custom_rebuild(session, params):
       **first-use** and **empty-tail** call sites. The rebuild handler's own comment
       (below) states these are unguarded — and then guards ONE of the THREE call sites.
       Same throw, same function, two sites with no ``try``;
-    * a corrupt stored boundary (``stored`` not a dict, or ``B`` non-numeric) and a
-      hostile caller ``params.items()`` in the ``inner_params`` comprehension — both
-      in-process-reachable, neither reachable through the MCP adapter;
+    * a corrupt stored boundary (``stored`` not a dict, or ``B`` non-numeric) —
+      in-process-reachable, not reachable through the MCP adapter. **The hostile-caller
+      ``params.items()`` escape this bullet also named is CLOSED as of round 8**: the
+      ``inner_params`` comprehension now iterates ``dict.items(params)``, the unbound base
+      slot, so a subclass whose ``items`` raises never runs. Recorded rather than deleted
+      because the escape was MEASURED here, and a probe that stops reproducing because
+      the code changed is a different fact from a probe that never reproduced;
     * ``_unlink_quiet`` in the ``finally``. Its own contract forbids raising, so this one
       is SYNTHETIC — but it is the worst shape: made to throw, it converts a rebuild that
       FULLY SUCCEEDED (measured: the merit really was rebuilt and the tail re-appended)
@@ -2303,7 +2486,10 @@ def _preserve_custom_rebuild(session, params):
 
     # The inner rebuild runs the build body verbatim (preserve_custom stripped so it
     # cannot re-enter this wrapper; the body's :store site fingerprints the new wizard).
-    inner_params = {k: v for k, v in params.items() if k != "preserve_custom"}
+    # ROUND-8 -- unbound ``dict.items`` (see ``_bool_param``). A lying ``items()``
+    # is the ONE slot in this module that can smuggle ``preserve_custom`` PAST the strip
+    # (re-entering this wrapper) or drop a caller's build param from the inner rebuild.
+    inner_params = {k: v for k, v in dict.items(params) if k != "preserve_custom"}
 
     # ---- §4 no-boundary handling: first-use (empty) vs non-empty (refuse). ----
     if stored is None:
@@ -2508,17 +2694,22 @@ def add_operand(session, params):
     system = session.system
     mfe = system.MFE
 
-    operand = params.get("operand")
+    # ROUND-8 -- unbound ``dict.get`` on all three reads below (see ``_bool_param``);
+    # ``operand`` selects the operand TYPE and ``config`` selects the CONF bracket, so a
+    # lying ``get`` authors a different row than the caller asked for. Bare base slot (no
+    # ``isinstance`` conjunct) matches ``optimize_run._resolve_algorithm``:769 and keeps
+    # today's non-``dict`` behaviour a raise. Nil reachability today.
+    operand = dict.get(params, "operand")
     if not isinstance(operand, str) or operand == "":
         raise ToolParamError(f"operand must be a non-empty string, got {operand!r}")
 
     target = _num_param(params, "target", 0.0)
     weight = _num_param(params, "weight", 1.0)
-    cell_params = params.get("params")  # OPTIONAL — None = byte-identical old path
+    cell_params = dict.get(params, "params")  # OPTIONAL — None = byte-identical old path
 
     # ---- NEW: validate config=k PRE-mutation (E0 — a bad config opens NOTHING).
     #      ``config`` absent (None) is BYTE-IDENTICAL to the old path. ----
-    config = params.get("config")
+    config = dict.get(params, "config")
     cfg = None
     if config is not None:
         cfg, cfg_err = _require_config_number(system, config)
@@ -2863,7 +3054,15 @@ def add_operand(session, params):
             op.Weight = weight
 
             # Read-back-as-proof off the DIRECT properties (the silent-no-op canary). A
-            # mismatch / read THROW raises SurfaceWriteError.
+            # MISMATCH raises ``SurfaceWriteError``.
+            #
+            # ROUND-10a P-2 -- the old text read "a mismatch / read THROW raises
+            # SurfaceWriteError", and the read-THROW half was FALSE: a degraded
+            # ``float(op.Target)`` raises whatever the engine raised, which reaches the
+            # agent as dispatch ``internal``, not ``surface_write``. Only the PROSE was
+            # wrong here — the M4 ``except Exception`` arm below already reaps the orphan
+            # row on any escape, so the transactional promise held. (``edit_operand`` had
+            # the same sentence over a NARROW catch, and there it was a real defect.)
             actual_target = float(op.Target)
             actual_weight = float(op.Weight)
             _lc._verify_or_raise("target", target, actual_target, surface=None)
@@ -2980,7 +3179,9 @@ def dump_merit_function(session, params):
         operands.append(
             {
                 "number": i,
-                "type": str(op.TypeName),
+                # ROUND-10a P-4 -- NORMALIZED AT CAPTURE (boundary rule): a
+                # ``str`` SUBCLASS on the wire carries caller code into every consumer.
+                "type": _oc._base_token(op.TypeName),
                 "target": safe_float(op.Target),
                 "weight": safe_float(op.Weight),
                 "value": safe_float(op.Value),
@@ -3027,8 +3228,12 @@ def _require_operand_number(params, n_operands):
 
     Rejects bool / non-int / non-integral float / out-of-range. An integral float (a JSON
     round-trip can float an int) is coerced. The range is ``1..n_operands`` inclusive.
+
+    ROUND-8 -- unbound ``dict.get`` (see ``_bool_param``). ``number`` is the 1-based
+    ROW an in-place ``op.Target``/``op.Weight`` write lands on, so a lying ``get`` edits
+    the wrong operand under an ok:true envelope. Nil reachability today.
     """
-    value = params.get("number")
+    value = dict.get(params, "number")
     if isinstance(value, bool):
         raise ToolParamError(f"number must be an integer, not a bool ({value!r})")
     if isinstance(value, float):
@@ -3074,9 +3279,17 @@ def edit_operand(session, params):
     -> ``merit_param``; a read-back firewall failure -> ``surface_write`` (dispatch envelope).
 
     ATOMIC: a target+weight edit captures the OLD Target/Weight first and, on
-    ANY read-back firewall failure (e.g. the second write does not take), RESTORES both before
-    re-raising — so a partial two-write failure leaves the row UNCHANGED, never a half-applied
-    edit. (Restore is best-effort; the read-back firewall raise is the authoritative signal.)
+    Target/Weight first and, on ANY exception out of the write/read-back block, RESTORES
+    both before re-raising — so a partial two-write failure leaves the row UNCHANGED, never
+    a half-applied edit. (Restore is best-effort; the raise is the authoritative signal.)
+
+    The catch used to be ``except SurfaceWriteError`` while this paragraph said "ANY", and
+    the gap was reachable WITHOUT a hostile subclass: a RAW THROW out of the read-back
+    ``float(op.Target)`` — a cell whose read degrades AFTER the write took — left the first
+    write COMMITTED with no restore, and reached the agent as dispatch ``internal`` rather
+    than ``surface_write``. A raw read throw still reaches dispatch as ``internal`` (the
+    exception class is preserved, not re-labelled); what changed is that the row is
+    RESTORED first, so the claim above is now true of the code.
     """
     system = session.system
     mfe = system.MFE
@@ -3087,8 +3300,11 @@ def edit_operand(session, params):
     except ToolParamError as exc:
         return _oc.error_envelope("edit_operand", "merit_param", str(exc))
 
-    has_target = "target" in params
-    has_weight = "weight" in params
+    # ROUND-8 -- unbound ``dict.__contains__`` (see ``_bool_param``). These two flags
+    # gate BOTH the "nothing to edit" refusal AND which cell is written, so a lying
+    # ``__contains__`` turns a real edit into a refusal (or drops half a paired edit).
+    has_target = dict.__contains__(params, "target")
+    has_weight = dict.__contains__(params, "weight")
     if not has_target and not has_weight:
         return _oc.error_envelope(
             "edit_operand", "merit_param",
@@ -3111,7 +3327,9 @@ def edit_operand(session, params):
 
     op = mfe.GetOperandAt(number)
     try:
-        type_name = str(op.TypeName)
+        # ROUND-10a P-4 -- base slot. ``type_name`` GATES the value-less-control
+        # (``CONF``) refusal via ``_mc.is_valueless_control`` and is echoed on the wire.
+        type_name = _oc._base_token(op.TypeName)
     except Exception:  # noqa: BLE001 — an unreadable type still allows the edit; label unknown
         type_name = "<unknown>"
 
@@ -3141,7 +3359,17 @@ def edit_operand(session, params):
             op.Weight = weight
             actual_weight = float(op.Weight)
             _lc._verify_or_raise("weight", weight, actual_weight, surface=None)
-    except SurfaceWriteError:
+    except Exception:  # noqa: BLE001 — ROUND-10a P-2: restore on ANY escape, then re-raise
+        # ROUND-10a P-2 -- THE CATCH IS NOW AS WIDE AS THE CONTRACT. It caught
+        # ``SurfaceWriteError`` only, so a RAW THROW FROM THE READ-BACK ITSELF --
+        # ``float(op.Target)`` on a cell whose read degrades AFTER the write landed --
+        # escaped with the FIRST WRITE COMMITTED, no restore, and the family degraded to
+        # dispatch ``internal``. The docstring above promised the opposite. This needs no
+        # hostile subclass: a degraded engine read mid-call is a class this codebase
+        # documents and handles elsewhere (``_safe_error_message``).
+        # Re-raised BARE so the ORIGINAL exception and its diagnosis continue unchanged
+        # (the M4 arm in ``add_operand`` above sets the precedent); ``BaseException`` is
+        # deliberately NOT caught -- an abort keeps travelling.
         _restore_target_weight(op, old_target, old_weight)
         raise
 

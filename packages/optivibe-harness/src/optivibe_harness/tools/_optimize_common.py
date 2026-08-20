@@ -8,8 +8,10 @@ tools (``tools/optimize_*.py``) reuse it.
 - ``_preflight(system)`` — the NON-MUTATING dry-run gate (§e): counts LDE
   variable cells (``GetSolveData().Type == SolveType.Variable``) and checks the
   merit (``NumberOfOperands > 0`` AND a finite ``CalculateMeritFunction() > 0``).
-  Opens NO optimizer. Returns ``(ok, family, variables, number_of_operands,
-  merit)``.
+  Opens NO optimizer. Returns a **7-tuple** ``(ok, family, variables,
+  number_of_operands, merit, stop_idx, stop_material)`` — this header said 5 while all
+  five return sites and ``_preflight``'s own docstring said 7, so a caller unpacking per
+  the header raised. Corrected ROUND-10a.
 - ``_count_variables(lde, variable_member, system=None)`` — scan the LDE for cells
   set Variable (Radius/Thickness; with ``system`` ALSO asphere coefficient Par cells).
 - ``classify_verdict(before, after, ...)`` — the verdict classifier (§d),
@@ -87,7 +89,16 @@ def _merit_is_uncomputable(merit):
     """
     if isinstance(merit, bool) or not isinstance(merit, (int, float)):
         return False
-    if not math.isfinite(merit):
+    # ROUND-10a P-1 -- THROUGH THE BASE SLOT, the ``_finite_below`` idiom, +0 statements.
+    # ``>=`` DISPATCHES ``__ge__`` to the object, so a ``float`` SUBCLASS decided this
+    # predicate's own answer. MEASURED: a true 9e9 whose ``__ge__`` lies False returns
+    # ``False`` here, so ``_preflight`` never fires ``optimize_merit_uncomputable`` and
+    # ``dry_run`` reports ``ready`` on an UNCOMPUTABLE merit -- the exact false
+    # ready->hard-fail this predicate exists to stop. ``isfinite`` is normalized in the
+    # SAME expression (round 7's ordering lesson: a lying ``__float__`` returning inf
+    # would disqualify a real finite reading before any comparison ran).
+    if not math.isfinite(merit := float.__float__(merit) if isinstance(merit, float)
+                         else int.__index__(merit)):
         return False
     return merit >= _MERIT_UNCOMPUTABLE_CEILING
 
@@ -95,6 +106,67 @@ def _merit_is_uncomputable(merit):
 # --------------------------------------------------------------------------- #
 # Live-enum resolvers (the ``_enum_types`` injection seam).
 # --------------------------------------------------------------------------- #
+def _base_token(value):
+    """An engine cell's token read through the BASE slot. Defeats BOTH hostile shapes.
+
+    ROUND-10a. The idiom this replaces, ``str.__str__(str(x))``, was shipped at round 5
+    and **is not a base-slot read**. The INNER ``str(x)`` dispatches
+    ``type(x).__str__`` and FORGES the value; the outer call only re-types the already-
+    forged result and cannot recover the truth. MEASURED:
+
+    ======================================  =========  ======================
+    shape                                   forging    lying-compare subclass
+                                            subclass   behind a non-str cell
+    ======================================  =========  ======================
+    ``str(x)``                              FORGED     LIE RIDES ONWARD
+    ``str.__str__(str(x))``  (was shipped)  FORGED     defeated
+    ``str.__str__(x)``                      defeated   **raises TypeError**
+    ``str.__str__(x) if str else str(x)``   defeated   **LIE RIDES ONWARD**
+    **this helper**                         defeated   defeated
+    ======================================  =========  ======================
+
+    The two obvious one-line replacements are BOTH wrong, and both were measured wrong
+    before this was written — which is why the shape lives behind one name instead
+    of being inlined at every site. ``str.__str__(x)`` alone is right ONLY where the value
+    is already known to be a ``str`` (``str.__str__(repr(v))`` in the solve layer is the
+    legitimate case); an ENGINE cell is not.
+
+    **ROUND-12 — TWO SENTENCES HERE WERE WRONG AND ARE CORRECTED RATHER THAN SOFTENED.**
+
+    * The site COUNT. This docstring said "42 sites" twice (once above, once below), and no
+      such number is asserted here any more — because none was ever measured, and because a
+      count written into prose is correct for exactly one commit. When round 12 counted over
+      ``ast.Call`` (which excludes this ``def`` line and every prose mention of the name) the
+      answer was **41**, not 42; round 12's own fixes then moved it again by adding sites
+      UPSTREAM in ``_merit_cells`` and ``freeze_semi``. The live per-module figure lives in
+      ONE place, the ``_R12_BASE_TOKEN_SITES`` ledger pinned by
+      ``test_r12_the_base_token_site_count_is_derived_not_asserted``, which reddens on any
+      addition or removal.
+    * *"Returns an EXACT ``str`` on every path"* was FALSE, and false in the direction that
+      matters: it RAISES on six measured shapes rather than returning anything — a
+      ``__str__`` that raises (the exception travels), a ``__repr__`` that raises, a
+      ``__str__`` returning a non-``str`` (``TypeError``), a ``__class__`` property lying
+      ``str`` (``TypeError: descriptor '__str__' requires a 'str' object``), a ``__class__``
+      that raises, and ``__str__ = None``. The correct wording is: **every SUCCESSFUL return
+      is an exact** ``str``, so no subclass comparison, hash or method can ride onward into a
+      caller — and callers that promise "never raises" must therefore keep their
+      ``_base_token`` calls INSIDE their guard (F-4 was one that did not).
+
+    **``_base_token(None)`` RETURNS THE STRING ``"None"``, DELIBERATELY.** Round 12 raised
+    it as a possible ABSENT/present collapse at the ``_base_token(g.get("kind"))`` sites,
+    and the answer is to KEEP the current behaviour, for a reason that is checkable rather
+    than a preference: every one of those sites compares the result to a POSITIVE token
+    (``"glass"`` / ``"air"``), so a missing ``kind`` answers "not glass" — which is what an
+    absent kind means. No shipped site compares against the literal ``"None"``, and
+    ``test_r12_base_token_on_None_is_a_deliberate_string`` pins both halves so the day one
+    does, it reddens. Returning ``None`` instead would break the exact-``str`` contract this
+    helper exists to provide and would make every ``.strip()`` / membership caller
+    conditional.
+    """
+    return (str.__str__(value) if isinstance(value, str)
+            else str.__str__(str(value)))
+
+
 def _merit_operand_enum(system):
     """Resolve the live ``MeritOperandType`` enum TYPE.
 
@@ -219,6 +291,118 @@ def _solve_type_variable_enum(system):
         )
 
 
+# --------------------------------------------------------------------------- #
+# The WEIGHT tri-state -- the one weight-state reader for THIS MODULE's consumers.
+#
+# NOT a repo-wide invariant, and the boundary is stated because claiming the wider one
+# would be false: ``optimize_merit``'s serializer reads a weight with a bare
+# ``float(op.Weight)`` under a finite-only filter, so it maps a ``bool`` to ``1.0``
+# where this reader maps it UNREADABLE. That disagreement is PINNED by a test rather
+# than harmonised -- a partial harmonisation of either side reddens it. The authoring
+# door is likewise outside: ``add_operand`` still writes the shape ``optimize`` refuses.
+#
+# The vocabulary exists because ONE bare ``continue`` used to carry two disjoint
+# meanings ("a deliberate weight-0 opt-out" and "I could not read the weight"), which
+# is the defect the arms below were split to fix. A status token cannot collapse that
+# way.
+# --------------------------------------------------------------------------- #
+WEIGHT_POSITIVE = "POSITIVE"        #: read as a finite real > 0.0 (``bool`` rejected)
+WEIGHT_ZERO = "ZERO"                #: read as a finite real == 0.0 (``0.0`` and ``-0.0``)
+WEIGHT_NEGATIVE = "NEGATIVE"        #: read as a finite real < 0.0
+WEIGHT_UNREADABLE = "UNREADABLE"    #: no finite real ESTABLISHED (non-finite / None /
+                                    #: str sentinel / bool / Decimal / a throwing read)
+
+#: Rows whose non-finite Weight is STRUCTURAL, not a fault -- measured over 28 curated
+#: designs: ``DMFS`` 28 rows, ``BLNK`` 178, ``CONF`` 74, with ZERO finite-weight rows
+#: among them. They are excluded from the unestablished COUNT and never from the SCAN:
+#: a finite negative weight on one of these rows still refuses, because the refusal
+#: never consults the token at all.
+#:
+#: Deliberately NOT ``_RANGE_STRUCTURAL_TOKENS``. The two sets answer different
+#: questions -- that one is the range scanner's layout set -- and they coincide on
+#: ``BLNK``/``DMFS`` by measurement, not by identity. Adding a member requires a corpus
+#: measurement, never a judgement: the whole point of the set is that it names carriers
+#: somebody counted.
+_WEIGHT_STRUCTURAL_TOKENS = frozenset({"BLNK", "DMFS", "CONF"})
+
+
+def _row_weight_state(op):
+    """``(value_or_None, status)`` for ONE row's ``Weight`` cell.
+
+    NEVER raises an ``Exception``. A ``BaseException`` -- a ``KeyboardInterrupt`` landing
+    inside the cell read, a ``SystemExit`` -- TRAVELS, deliberately: an abort is not a
+    degraded reading to be disclosed, and absorbing one would turn a Ctrl-C into a
+    return value. Stated at that width because the categorical version was false, and
+    because the sibling contract one function down had already been narrowed while this
+    one was left alone.
+
+    The value is returned ONLY alongside a finite status; UNREADABLE always pairs with
+    ``None``, so no consumer can accidentally arithmetic on a string sentinel.
+
+    Establishment is decided BEFORE sign, and the ordering is a correctness-of-intent
+    choice rather than a behavioural one: ``safe_float`` does not raise on the two
+    commonest unreadable shapes, it RETURNS the string sentinels ``"nan"``/``"inf"``,
+    and passes ``None`` straight through. Testing the sign first would raise
+    ``TypeError`` on those and reach the same status by accident -- an accident that
+    stops producing the right answer the moment a caller's ``except`` is narrowed.
+
+    A ``bool`` is UNREADABLE. That shape is UNMEASURED against the engine (the
+    reachability probe wrote nan / inf / 0.0 / -0.0 and never a bool), so it fails
+    closed: a disclosure, never a refusal.
+    """
+    # THE WHOLE BODY IS GUARDED, AND THE COMPARISONS ARE WHY. A ``float`` SUBCLASS
+    # whose ``__lt__`` or ``__eq__`` raises passes ``isinstance``, passes
+    # ``math.isfinite`` (which reads the underlying C double and never calls
+    # ``__float__``), and then escapes on a bare ``w < 0.0`` -- measured, not inferred.
+    # Both callers already absorb it in their own row guard and land on UNREADABLE, so
+    # nothing observable changes; what changes is that the contract above is now TRUE.
+    # ``Exception`` and not ``BaseException``: this classifies, it does not sit on an
+    # abort's travel path, so a KeyboardInterrupt must still travel.
+    try:
+        w = safe_float(op.Weight)
+        if not isinstance(w, (int, float)) or isinstance(w, bool):
+            return (None, WEIGHT_UNREADABLE)
+        # NORMALIZE THROUGH THE BASE SLOT, BEFORE ANY COMPARISON *HERE*, and the order
+        # relative to the finite test is the fix rather than a tidy-up.
+        #
+        # IT IS NOT "FIRST" IN ANY ABSOLUTE SENSE, and an earlier version of this
+        # comment claimed that it was. ``safe_float`` above compares ``value > 0`` to
+        # choose its sentinel, which DISPATCHES ``__gt__`` on whatever the engine
+        # handed back -- so caller code can already have run, and measured, it can
+        # perturb a LATER row from inside that call. Nothing in this function can
+        # undo that; the only way to would be not to use the shared reader at all.
+        # What normalization buys is that no subclass decides its OWN classification.
+        # A SUBCLASS otherwise does exactly that: measured, a float
+        # subclass overriding ``__lt__`` reached NEGATIVE at a true value of +1.0 (an
+        # invalid refusal); one overriding ``__eq__`` reached ZERO at a true value of
+        # -1.0 (a SUPPRESSED refusal, the direction that matters); and an ``int``
+        # subclass whose ``__float__`` returns +inf reached UNREADABLE at a true value of
+        # -1, because ``math.isfinite`` DISPATCHES TO THAT ``__float__``. That last one
+        # was bred by the first version of this very fix, which normalized AFTER the
+        # finite test and so left the establishment half speaking for itself.
+        #
+        # ``float.__float__`` / ``int.__index__`` read the underlying value and cannot
+        # dispatch to subclass code. ``-0.0`` survives the round trip exactly, so the
+        # zero arm below is unaffected -- which ``math.copysign`` would NOT have
+        # preserved (it reports -0.0 as negative).
+        w = float.__float__(w) if isinstance(w, float) else int.__index__(w)
+        # LOAD-BEARING, and it did not used to be. ``safe_float`` stringifies every
+        # non-finite FLOAT upstream, so this clause was measured INERT before the
+        # normalization above existed. It is live now: on an ``int`` too large to convert
+        # this RAISES ``OverflowError`` into the guard below and lands UNREADABLE, and
+        # removing it would let the normalized bignum classify NEGATIVE instead --
+        # re-measured by actually removing it, which reddens the by-design disposition.
+        if not math.isfinite(w):
+            return (None, WEIGHT_UNREADABLE)
+        if w == 0.0:
+            return (w, WEIGHT_ZERO)  # ``-0.0`` lands here: ``-0.0 < 0.0`` is False
+        if w < 0.0:
+            return (w, WEIGHT_NEGATIVE)
+        return (w, WEIGHT_POSITIVE)
+    except Exception:  # noqa: BLE001 -- unreadable, never a refusal
+        return (None, WEIGHT_UNREADABLE)
+
+
 def _min_positive_target(mfe, token, *, last_surface, surface=None):
     """The MIN strictly-positive finite ``Target`` among LIVE MFE rows typed ``token``.
 
@@ -327,7 +511,21 @@ def _min_positive_target(mfe, token, *, last_surface, surface=None):
     for i in range(1, n + 1):
         try:
             op = mfe.GetOperandAt(i)
-            if str(op.TypeName) != token:
+            # R-B' (round 5, F-A) — NORMALIZED THROUGH THE BASE SLOT. ``str(x)`` honours
+            # ``__str__``'s RETURN TYPE, so a ``str`` SUBCLASS survives it and then decides
+            # this ``!=`` itself. Round 2 scoped the rule to set MEMBERSHIP and so excluded
+            # this site; ``!=`` on a subclass dispatches ``__ne__`` exactly as ``in`` does,
+            # and the rule now reads "compared or converted" (R-A's wording).
+            #
+            # MEASURED against a plain-str baseline of ``(2.0, FOUND)``: a ``BLNK`` row
+            # whose ``__eq__`` mutates a later row's ``Target`` reached
+            # ``default_no_floor_authored`` (the design's authored 2.0 VANISHED and the
+            # envelope asserted no floor was authored); a ``TTHI`` row at 0.25 whose
+            # ``__ne__`` lies True reached ``(0.25, authored)`` (a FABRICATED floor from a
+            # different operand, published as authored); and a real ``MNEG`` 2.0 whose
+            # ``__ne__`` lies False HID the real floor. Three shipped consumers read this
+            # predicate to resolve the design's authored glass/air floor.
+            if _base_token(op.TypeName) != token:
                 continue
             if surface is not None:
                 # GRIN §3.6 — the row must ALSO carry Surf == surface. Lazy import
@@ -337,7 +535,15 @@ def _min_positive_target(mfe, token, *, last_surface, surface=None):
                 params = _mc.read_param_map(op)
                 entry = params.get("Surf")
                 sv = entry.get("value") if isinstance(entry, dict) else None
-                if sv is None or isinstance(sv, bool) or int(sv) != int(surface):
+                # ROUND-7 -- ``int(sv)`` DISPATCHES ``__int__`` on the ENGINE-supplied
+                # cell value, so an ``int`` SUBCLASS chose which surface's row matched and
+                # therefore which surface's GRIN index floor this resolver returned. The
+                # base slot reads the stored value. ``surface`` is harness-internal (this
+                # function's own caller-side index) and is left as-is; a float ``sv``
+                # keeps the ordinary ``int()`` path so the accepted shapes are unchanged.
+                if sv is None or isinstance(sv, bool) or (
+                        int.__index__(sv) if isinstance(sv, int) else int(sv)
+                ) != int(surface):
                     continue
             # FORM: the ONE shared resolver, never bare arithmetic and
             # never a second read of the domain. A negative cell is READABLE and
@@ -411,12 +617,11 @@ def _min_positive_target(mfe, token, *, last_surface, surface=None):
             # (``BLNK``/``DMFS``) carry a non-finite Weight, so the wire shape is the
             # engine's normal output, not an exotic. The reaching population is a
             # hand-edited or ``load_merit``-loaded merit — which is what a LINTER is for.
-            w = safe_float(op.Weight)
-            if (
-                not isinstance(w, (int, float))
-                or isinstance(w, bool)
-                or not math.isfinite(w)
-            ):
+            # The read itself now goes through the shared reader above; the three
+            # arms below are unchanged in meaning and stay attached to their own
+            # consumption rules (one resolver, two consumption rules).
+            w, wstatus = _row_weight_state(op)
+            if wstatus == WEIGHT_UNREADABLE:
                 # ARM 1 — UNREADABLE. A row of this token EXISTS and we could not
                 # establish its weight, so nothing here licenses the (d) policy default.
                 # NOTE A DELIBERATE BEHAVIOUR CHANGE ON ONE SHAPE: a ``bool`` Weight used
@@ -426,7 +631,7 @@ def _min_positive_target(mfe, token, *, last_surface, surface=None):
                 # nan/inf/0.0/-0.0 and never a bool.
                 unestablished = True
                 continue
-            if w == 0.0:
+            if wstatus == WEIGHT_ZERO:
                 # ARM 2 — a DELIBERATE opt-out. A weight-0 boundary row is a
                 # legitimate MONITOR pattern (the docstring's own asymmetry note), so
                 # ABSENT is correct and the (d) policy default is licensed. ``0.0`` and
@@ -437,7 +642,7 @@ def _min_positive_target(mfe, token, *, last_surface, surface=None):
                 # MEASURED. It read ``<= 0.0`` and swept a NEGATIVE weight into the
                 # opt-out on the strength of evidence that only ever covered weight ZERO.
                 continue
-            if w < 0.0:
+            if wstatus == WEIGHT_NEGATIVE:
                 # ARM 2b — a NEGATIVE weight is NOT an opt-out. MEASURED LIVE against a
                 # passing ``+1.0`` control: a ``-1.0`` MNEG drives the design onto its
                 # target indistinguishably from that control — centre thickness
@@ -493,9 +698,22 @@ def _cell_is_variable(cell, variable_member):
     try:
         solve = cell.GetSolveData()
         solve_type = solve.Type
+        # R-B' (round 5, sweep-found — NOT on the audit's list). BOTH sides base-slot
+        # normalized: reflected ``__eq__`` means normalizing one side is not enough when
+        # the other is the subclass. MEASURED: a ``Fixed`` solve whose ``__eq__`` lies
+        # True reads as a PHANTOM Variable; a real ``Variable`` whose ``__eq__`` lies
+        # False is HIDDEN.
+        #
+        # ROUND-12 — RE-INDENTED INTO THIS `try`, 0 NET STATEMENTS, the ROUND-4 /
+        # `_cell_solve_state` precedent. It used to sit OUTSIDE, so a wedged `__str__` on
+        # the solve member (or on the live `Variable` member) escaped as a raw
+        # `RuntimeError` from a function whose docstring promises it "degrades to False
+        # rather than raising — a counting gap must not crash the preflight". 5 of the 8
+        # call sites are unguarded, `_count_variables` -> `_preflight` among them, so the
+        # escape reached the optimize preflight as an opaque `internal`.
+        return _base_token(solve_type) == _base_token(variable_member)
     except Exception:  # noqa: BLE001 — a cell with no solve is simply not Variable
         return False
-    return str(solve_type) == str(variable_member)
 
 
 def _cell_solve_state(cell, variable_member):
@@ -515,8 +733,9 @@ def _cell_solve_state(cell, variable_member):
         # The str() conversions are INSIDE the guard — a wedged .NET ``__str__`` on the
         # solve member (or the variable member) is UNREADABLE, must return None + record a
         # fault, NEVER escape as a raw RuntimeError past this fault-aware reader.
-        actual = str(solve_type)
-        expected = str(variable_member)
+        # R-B' (round 5, sweep-found): base slot on BOTH sides, INSIDE the guard.
+        actual = _base_token(solve_type)
+        expected = _base_token(variable_member)
     except Exception:  # noqa: BLE001 — a wedged solve read/ToString is UNREADABLE, never "not_variable"
         return None
     return "variable" if actual == expected else "not_variable"
@@ -540,6 +759,17 @@ def _cell_is_variable_failclosed(cell, variable_member, surface, token):
     """
     try:
         solve_type = cell.GetSolveData().Type
+        # R-B' (round 5, sweep-found): base slot on BOTH sides. This one feeds the apply
+        # RESET detection, so a suppressed Variable survives the apply with ``applied:True``.
+        #
+        # ROUND-12 F-4 SIBLING — RE-INDENTED INTO THIS `try`, 0 NET STATEMENTS. The audit
+        # named `_cell_is_variable`; this is the same shape one function away, and the
+        # consequence here is worse rather than better: a wedged `__str__` on the solve
+        # member escaped as a RAW `RuntimeError` from the FAIL-CLOSED detector, which its
+        # callers do not catch — so it bypassed the apply's atomic rollback entirely
+        # instead of routing to it as a structured `SurfaceWriteError`. The message below
+        # is accurate for this arm too: the solve state is exactly what could not be read.
+        return _base_token(solve_type) == _base_token(variable_member)
     except Exception as exc:  # noqa: BLE001 — a wedged solve-read on a reset surface -> rollback
         raise SurfaceWriteError(
             f"could not read the {token} solve on surface {surface} during the reset scan "
@@ -547,7 +777,6 @@ def _cell_is_variable_failclosed(cell, variable_member, surface, token):
             "skipping a possibly-Variable solve",
             field=f"{token} solve", intended="detect", actual=None, surface=surface,
         ) from exc
-    return str(solve_type) == str(variable_member)
 
 
 def _cell_is_double(cell):
@@ -561,7 +790,12 @@ def _cell_is_double(cell):
     cell, never raise — this runs inside the NON-MUTATING preflight count).
     """
     try:
-        return str(cell.DataType) == "Double"
+        # R-B' (round 5, sweep-found — NOT on the audit's list). MEASURED: an ``Integer``
+        # cell whose ``__eq__`` lies True reads as a Double and becomes a PHANTOM
+        # continuous DOF (the Q5 trap this predicate exists to close); a real ``Double``
+        # whose ``__eq__`` lies False is dropped from the count and skipped by the
+        # per-config nudge writer as ``non_double``.
+        return _base_token(cell.DataType) == "Double"
     except Exception:  # noqa: BLE001 — an unreadable DataType -> not a countable Double DOF
         return False
 
@@ -582,7 +816,13 @@ def _safe_cell_value(cell):
         except Exception:  # noqa: BLE001 — the wrong accessor / a wedged read -> try next
             continue
         try:
-            v = float(raw)
+            # ROUND-7 -- base slot, same rule as ``_row_weight_state``: a subclass
+            # must not decide the number the inventory publishes. Non-int/float shapes
+            # (a Decimal, a numeric string) keep the ordinary ``float()`` path; only the
+            # int/float SUBCLASS shapes can lie about their own value.
+            v = (float.__float__(raw) if isinstance(raw, float)
+                 else int.__index__(raw) if isinstance(raw, int)
+                 and not isinstance(raw, bool) else float(raw))
         except Exception:  # noqa: BLE001 — a non-numeric value -> not a useful diagnostic
             return None
         return v if math.isfinite(v) else None
@@ -759,14 +999,16 @@ def _clear_solve_to_fixed_proven(cell, variable_member, surface, token,
                 field=f"{token} solve", intended="Fixed", actual=None, surface=surface,
             ) from exc
     try:
-        actual = str(proof_cell.GetSolveData().Type)
+        # R-B' (round 5, sweep-found): base slot. This is the read-back PROOF that a solve
+        # clear took effect — an unnormalized subclass gets to certify its own clear.
+        actual = _base_token(proof_cell.GetSolveData().Type)
     except Exception as exc:  # noqa: BLE001 — a solve read THROW -> surface_write
         raise SurfaceWriteError(
             f"could not read back the {token} solve on surface {surface} after the clear "
             f"({exc!r}); the clear is unverifiable — refusing rather than guessing",
             field=f"{token} solve", intended="Fixed", actual=None, surface=surface,
         ) from exc
-    if actual == str(variable_member):
+    if actual == _base_token(variable_member):
         raise SurfaceWriteError(
             f"the {token} solve clear on surface {surface} did not take effect: solve "
             f"reads back {actual!r} (still Variable, a silent no-op); refusing rather "
@@ -824,9 +1066,30 @@ def _check_conic_coeff_degeneracy(system, row, surface, variable_member):
 
 
 def _safe_type_name(op):
-    """Read an MCE operand's ``TypeName`` guarded -> ``str`` or ``None`` (the diagnostic)."""
+    """Read an MCE operand's ``TypeName`` guarded -> an EXACT ``str`` or ``None``.
+
+    ROUND-7 -- the normalization moved HERE from one of the two call sites. It was
+    applied at ``_scan_negative_weights`` (with a comment recording a measured
+    ``__format__``-raises incident) and left off ``_enumerate_mce_variables``, where the
+    raw value ships into the inventory item ``list_variables`` serves. One reader, one
+    rule: a second call site cannot now acquire the hole by omission (the same), and the
+    surviving ``str.__str__`` at the other site is redundant rather than load-bearing.
+
+    MEASURED before the fix, and reported as measured rather than as plausible. Round 6
+    flagged the consequence as PLAUSIBLE; it was run. With an MCE ``TypeName`` whose
+    ``__str__`` returns a hostile ``str`` SUBCLASS, the inventory item's ``type_name``
+    came back as ``SneakyStr`` (not ``str``) and ``list_variables`` serves the inventory
+    list VERBATIM, so a consumer's ``published == "EFFL"`` answered **True** on a row
+    whose type is ``THIC``. The published diagnostic was caller-controlled.
+
+    WHAT THAT IS AND IS NOT: no harness predicate downstream branches on this field
+    today, so the measured consequence is a CONTAMINATED DIAGNOSTIC that makes a
+    CONSUMER's comparison lie -- not a wrong harness gate. Stated at that width rather
+    than inflated to match the sibling findings. Fixed anyway, for the same reason
+    above.
+    """
     try:
-        return str(op.TypeName)
+        return _base_token(op.TypeName)
     except Exception:  # noqa: BLE001 — an unreadable type -> None (best-effort diagnostic)
         return None
 
@@ -961,7 +1224,11 @@ def _scan_per_config_thin(system):
         except Exception:  # noqa: BLE001 — a missing row contributes nothing
             continue
         try:
-            if str(op.TypeName) != "THIC":
+            # R-B' (round 5, F-D) — base-slot normalized. THIS ONE GATES: measured, a
+            # ``THIC`` row whose ``__ne__`` lies True SUPPRESSES a real
+            # ``optimize_per_config_thin`` refusal, and a ``PRAM`` row whose ``__ne__``
+            # lies False FABRICATES one. Both directions run through the shipped gate.
+            if _base_token(op.TypeName) != "THIC":
                 continue
         except Exception:  # noqa: BLE001 — an unreadable type -> skip this row
             continue
@@ -977,7 +1244,16 @@ def _scan_per_config_thin(system):
             if not _cell_is_double(cell):
                 continue
             try:
-                value = float(cell.DoubleValue)
+                # ROUND-7 -- THROUGH THE BASE SLOT. ``float(x)`` DISPATCHES
+                # ``__float__``, so a ``float`` SUBCLASS decided this GATE's own input.
+                # MEASURED: a true -3.0 reporting +1.0 SUPPRESSES a real
+                # ``optimize_per_config_thin`` refusal (a collapsed per-config gap ships
+                # as ready), and the mirror FABRICATES one on a healthy zoom. The
+                # ``TypeName`` compare three lines up in this same function was
+                # normalized in round 5; the numeric read beside it was not.
+                value = (float.__float__(raw) if isinstance(raw := cell.DoubleValue, float)
+                         else int.__index__(raw) if isinstance(raw, int)
+                         and not isinstance(raw, bool) else float(raw))
             except Exception:  # noqa: BLE001 — an unreadable value contributes nothing
                 continue
             if not math.isfinite(value):
@@ -1114,14 +1390,33 @@ def _row_is_mirror_or_cb(row):
     when the read THROWS — the caller (``_surface_is_inert``) treats None as "do not refuse"
     (fail-closed: never false-refuse a real powered DOF on a read hiccup).
     """
+    # ROUND-7 -- BASE-SLOT NORMALIZED, and the ``.upper()`` that used to stand in for
+    # it does NOT. The sweep exempted ``str(x).upper()`` on the grounds that "CPython's
+    # str methods never return the subclass". That is true of the UNBOUND builtin and
+    # FALSE of the BOUND method a subclass overrides -- measured:
+    # ``str.upper(LyingStr(..)) -> str`` but ``LyingStr(..).upper() -> LyingStr``. So a
+    # subclass rode straight through both reads and then decided this predicate itself.
+    #
+    # MEASURED, four directions, all on shipped consumers: a real ``MIRROR`` whose
+    # ``__eq__`` lies False reads as plain glass; a plain ``""`` lying True SPARES a real
+    # inert DOF its ``optimize_inert_dof`` refusal; a real ``CoordinateBreak`` whose
+    # ``__contains__`` lies produces a FALSE ``optimize_inert_dof`` refusal -- the BUG-2
+    # case this function's own docstring promises to prevent; and because
+    # ``optimize_merit._is_glass_edge_surface`` and ``_glass_floor_warning`` both read
+    # this predicate, a lying ``__eq__`` also suppresses the ETGT edge floor.
     try:
-        material = str(row.Material).strip().upper()
+        material = _base_token(row.Material).strip().upper()
     except Exception:  # noqa: BLE001 — an unreadable Material -> unprovable
         return None
     if material == "MIRROR":
         return True
     try:
-        raw_type = str(row.Type)          # RAW — the exact-token GRIN check needs original case
+        # RAW CASE, not raw TYPE: normalized through the base slot (an exact ``str``),
+        # then left in its original case because the exact-token GRIN check needs it.
+        # The ``type_name = raw_type.upper()`` hop below is safe ONLY because of this --
+        # a bound ``.upper()`` on a subclass returns the subclass, and the sweep cannot
+        # see that second hop at all.
+        raw_type = _base_token(row.Type)
     except Exception:  # noqa: BLE001 — an unreadable Type -> unprovable (fail-closed)
         return None
     # Keyed on the 12-member FAMILY recognition resolver (a loaded Gradient3
@@ -1322,9 +1617,30 @@ _SCAN_FAULT_STAGES = (
     _SCAN_STAGE_REPORT,
 )
 
-#: The two scan names a fault disclosure can carry.
+#: The scan names a fault disclosure can carry.
 _SCAN_NAME_RANGES = "malformed-range"
 _SCAN_NAME_RAYFREE = "ray-free-merit"
+_SCAN_NAME_NEGATIVE_WEIGHT = "negative-merit-weight"
+
+#: The final clause of a fault sentence, and the reason it is a PARAMETER.
+#:
+#: Both original callers are advisory: they flag, and ``ok``/``verdict`` are untouched
+#: whatever they find. The negative-weight scan is not -- it GATES -- so serving it the
+#: advisory clause would ship a sentence that is false about the very check it
+#: describes, in the one channel a human reads. The default is byte-identical to the
+#: shipped wording, so the two advisory callers are unchanged by construction rather
+#: than by inspection.
+_SCAN_FAULT_GATES_NOTHING = (
+    "This check gates nothing — ok and verdict are untouched."
+)
+_SCAN_FAULT_GATE_SKIPPED = (
+    "This check GATES, and on this fault it did NOT gate — nothing here cleared the "
+    "merit."
+)
+# NOT "the run was allowed to proceed unchecked". That asserts an EXECUTION EVENT, and
+# on ``dry_run`` no run proceeds at all — the door opens no optimizer. The clause has to
+# be true at BOTH doors, so it states what the CHECK did rather than what the caller
+# then went on to do.
 
 _SCAN_FAULT_DETAIL_CAP = 200
 
@@ -1371,6 +1687,14 @@ def _safe_exception_text(exc, cap=_SCAN_FAULT_DETAIL_CAP):
     """
     try:
         detail = str.__str__(repr(exc))
+        # ROUND-12 — THIS `isinstance` IS VACUOUS, AND IS KEPT AS DEFENCE-IN-DEPTH RATHER
+        # THAN PRESENTED AS A LIVE BRANCH. It can never be False when reached: CPython's
+        # `PyObject_Repr` raises `TypeError` if `__repr__` returns a non-`str`, and that
+        # raise happens INSIDE this `try`, so control reaches the `if` only when `repr`
+        # already produced a `str`; `str.__str__` of a `str` (subclass included) returns
+        # an exact `str`. Both halves measured. No test covers the False arm, and none
+        # should be written to — a test that "covers" an unreachable arm is the hollow
+        # proof this cycle keeps finding.
         if isinstance(detail, str):
             return detail if len(detail) <= cap else detail[:cap] + "..."
     except Exception:  # noqa: BLE001 — a throwing __repr__ / __str__
@@ -1384,9 +1708,15 @@ def _safe_exception_text(exc, cap=_SCAN_FAULT_DETAIL_CAP):
     return name + ": <the exception could not be rendered>"
 
 
-def _scan_fault_disclosure(scan_name, stage, exc):
+def _scan_fault_disclosure(scan_name, stage, exc, *,
+                           gating_clause=_SCAN_FAULT_GATES_NOTHING):
     """``(sentence, record)`` for a TOTAL scan fault — the ONE wording both scanners
     serve.
+
+    THREE callers now, not two, and the third is why ``gating_clause``
+    exists: two are ADVISORY (they flag; ``ok`` and ``verdict`` are untouched
+    whatever they find) and one GATES. Saying "both scanners" here would hide
+    exactly the consumer whose semantics differ from the other two.
 
     The sentence's job is to be unmistakable in the one channel a human reads, and the two
     clauses carrying the whole point are *"its result was NOT established"* and *"absence
@@ -1400,6 +1730,12 @@ def _scan_fault_disclosure(scan_name, stage, exc):
     fault has NOT decided whether the merit is ray-free, and a shipped negative control
     (``test_b2_no_warn_when_a_ray_operand_present_negative_control``) asserts that phrase is
     absent whenever no finding was made.
+
+    ``gating_clause`` is the FINAL sentence, and it is a parameter because the wording
+    above is shared by checks that differ on the one fact a reader most needs: whether
+    anything was gated. The default reproduces the shipped advisory clause byte for
+    byte, so the two advisory callers are unchanged by CONSTRUCTION rather than by
+    inspection; a GATING caller passes the clause saying the run proceeded unchecked.
     """
     detail = _safe_exception_text(exc)
     record = {
@@ -1418,7 +1754,7 @@ def _scan_fault_disclosure(scan_name, stage, exc):
         f"stage ({detail}), so its result was NOT established. This is a statement about "
         "the CHECK, not about the merit: it does not mean the merit is clean, and it does "
         "not mean anything was found. Absence of a finding here is absence of evidence. "
-        "This check gates nothing — ok and verdict are untouched."
+        f"{gating_clause}"
     )
     return sentence, record
 
@@ -1461,7 +1797,12 @@ def _scan_rayfree_merit(system):
         stage = _SCAN_STAGE_ROWS
         for i in range(1, n_ops + 1):
             try:
-                if str(mfe.GetOperandAt(i).TypeName) in _RAY_TRACE_OPERANDS:
+                # R-B' (round 5, F-C) — base-slot normalized. This is R-B's OWN literal
+                # scope (set membership) and round 2's sweep missed it. MEASURED: a real
+                # ``OPDX`` row whose ``__eq__`` lies False makes this scan emit a
+                # FABRICATED "ray-free merit" warning about a merit that has a ray anchor;
+                # an ``EFFL`` row whose ``__eq__`` lies True SUPPRESSES a real one.
+                if _base_token(mfe.GetOperandAt(i).TypeName) in _RAY_TRACE_OPERANDS:
                     return None                     # has a ray anchor -> no warn
             except Exception:  # noqa: BLE001 — skip an unreadable row
                 continue
@@ -1482,6 +1823,189 @@ def _scan_rayfree_merit(system):
     except Exception as exc:  # noqa: BLE001 — DISCLOSED, never served as clean
         return _scan_fault_disclosure(_SCAN_NAME_RAYFREE, stage, exc)[0]
     return None
+
+
+
+def _scan_negative_weights(system):
+    """Every LIVE MFE row whose ``Weight`` reads as a FINITE NEGATIVE real.
+
+    NEVER raises an ``Exception``. A ``BaseException`` -- a ``KeyboardInterrupt`` landing
+    inside a cell read, a ``SystemExit`` -- TRAVELS, deliberately: an abort is not a
+    degraded reading to be disclosed, and a scan that swallowed one would convert a
+    Ctrl-C into a return value. The guards below are ``Exception`` for that reason, and
+    the contract is stated at that width rather than as a categorical claim the code
+    does not keep.
+
+    Returns ONE shape, always::
+
+        {"offenders":          [{"number": int, "type": str, "weight": float}],
+         "scan_completed":     bool,
+         "unestablished_rows": int,
+         "fault":              (sentence, record) | None}
+
+    WHY THIS GATES AT ALL, in the terms it was measured. A ``MNEG`` floor at weight
+    ``-4.0`` held against a co-resident ``TTHI`` objective left the DLS step vanishing --
+    merit 2.931945379252224 -> ...245 with the geometry unmoved -- while the engine
+    reported run / Succeeded / IsValid all True. The same row ALONE at ``-1.0`` drives
+    the design onto its target indistinguishably from a ``+1.0`` control (centre
+    thickness 3.6 -> 5.126034, edge landing on 1.660068), and ``MNCG`` behaves the same
+    way. So the sign's effect is COMPOSITION-DEPENDENT, this scan does not model
+    composition, and it must never claim a given run WOULD have stalled -- only that the
+    shape has been measured to produce that outcome.
+
+    THE FLOW IS WEIGHT-FIRST, AND THAT IS THE LOAD-BEARING PART. ``TypeName`` is never
+    consulted to decide a refusal: no structural exemption can suppress one, and a flaky
+    token read cannot either. The structural set excludes rows from the COUNT only. A
+    finite ``-1.0`` on a ``CONF`` row refuses exactly like any other row.
+
+    ``unestablished_rows`` counts rows this scan could NOT CLEAR -- an UNREADABLE weight,
+    or any per-row throw including the operand acquisition itself -- minus rows whose
+    ESTABLISHED token is structural. It claims NON-ESTABLISHMENT, never "was not read",
+    which is what licenses the direction it can be wrong in: a flaky ``TypeName`` on a
+    genuinely structural row OVERCOUNTS by one -- a disclosure.
+
+    THAT IS THE COUNT'S DIRECTION, NOT A PROPERTY OF THE WHOLE SCAN, and an earlier
+    version of this paragraph claimed the wider thing ("never a refusal"). It was FALSE:
+    the token read is an ordinary attribute access, and a ``TypeName`` whose ``__eq__``
+    or ``__str__`` runs caller code can perturb ANOTHER row before this scan reaches it
+    -- measured, one fabricated a refusal outright. The token is normalized through
+    ``str.__str__`` below so MEMBERSHIP cannot dispatch.
+
+    THAT IS A NARROWER GUARANTEE THAN AN EARLIER VERSION OF THIS PARAGRAPH CLAIMED.
+    It said the only surface left outside reach was a getter with side effects. It
+    is not: the INNER ``str(op.TypeName)`` dispatches ``__str__`` before
+    ``str.__str__`` can normalize its RESULT, and ``safe_float`` in the weight reader
+    dispatches ``__gt__``. Both are measured able to perturb a LATER row. What is
+    closed is the set lookup; what remains open is any caller code that runs INSIDE
+    the readers this scan calls, and no predicate here reaches that.
+
+    Without the structural exclusion the count would read 2 on every wizard merit ever
+    built (rows 1 and 2 are ``BLNK``/``DMFS`` and carry non-finite weights) and 10 to 41
+    on every multi-config design measured, and a channel that is never zero is a channel
+    nobody reads inside a week.
+
+    A TOTAL fault (the MFE handle or the operand count) FAILS OPEN -- a refusal must name
+    a measured offender, and this scan has none. It is not silent: the fault rides the
+    envelope with the clause saying the check did not gate, and the machine-readable
+    record goes with it.
+    """
+    stage = _SCAN_STAGE_MFE
+    try:
+        mfe = system.MFE
+        stage = _SCAN_STAGE_COUNT
+        raw_n = mfe.NumberOfOperands
+        # A NON-INTEGRAL COUNT IS A FAULT, NOT A CEILING. ``int(1.9)`` is 1, which would
+        # walk one row of a two-row merit, find no offender, and return
+        # ``scan_completed: True`` -- a TRUNCATED scan wearing a completed scan's
+        # answer, with the offender at row 2 lost and the run allowed to proceed. The
+        # advisory range scanner shares this idiom and can afford it; this one GATES,
+        # so the same read has a different consequence and gets a different rule.
+        if isinstance(raw_n, bool) or not isinstance(raw_n, (int, float)):
+            raise TypeError("NumberOfOperands is not a number: %r" % (raw_n,))
+        # THROUGH THE BASE SLOT, for the same reason the weight predicate above does it,
+        # and it is here because the first version of this guard did NOT. Testing
+        # ``float(raw_n) != int(raw_n)`` dispatches BOTH conversions to the object, so a
+        # subclass whose ``__float__`` returns 1.0 and ``__int__`` returns 1 approves
+        # itself and restores the very truncation this guard was added to stop --
+        # measured, a two-row merit with a -4.0 at row 2 read
+        # ``offenders=[] scan_completed=True``. ``_preflight`` does not shield it: its
+        # own ``int(...)`` returns 1 too.
+        n_ops = (int.__index__(raw_n) if isinstance(raw_n, int)
+                 else float.__float__(raw_n))
+        # NEGATIVE is a fault too, and it is here because "unreachable" was wrong.
+        # A negative count yields ``range(1, 0)`` -- an empty walk reported as a
+        # COMPLETED CLEAN scan. The reasoning that ``_preflight`` refuses ``<= 0``
+        # first is defeated by a count whose two readers DISAGREE: an ``int``
+        # subclass with underlying -1 and ``__int__`` returning 2 shows the
+        # preflight two operands and shows this base-slot read -1.
+        #
+        # ROUND-7 -- THE INTEGRALITY TEST NOW CROSS-CHECKS THE **TWO READERS**,
+        # AND THAT IS THE FIX. It used to compare the ALREADY-NORMALIZED value to
+        # ``int()`` OF ITSELF (``raw_n != int(raw_n)`` after the reassignment above),
+        # which on the int branch is ``x != x`` -- a tautology that can never fire, and
+        # on the float branch only re-checked integrality. So the residual
+        # guard was added to close survived one shape over: an ``int`` SUBCLASS whose
+        # true value is 1 and whose ``__int__`` returns 2. MEASURED, two real rows with
+        # the offender at row 2: ``offenders=[] scan_completed=True fault=None`` -- a
+        # TRUNCATED scan wearing a completed scan's answer, all three guard clauses
+        # passing because 1 is integral and non-negative, while ``_preflight`` reads 2
+        # operands from the SAME object. ``test_wa8`` names that outcome verbatim and
+        # closed it only for a float approving itself; ``test_wa11`` only for a negative.
+        #
+        # The truncation is created BY the base-slot read, so the base-slot read cannot
+        # also be the thing that validates it. ``int(raw_n)`` on the ORIGINAL object is
+        # the SECOND reader -- the one ``_preflight`` uses -- so a disagreement between
+        # the two is now the fault, not a silently-shorter walk. On every honest shape
+        # the two agree and nothing changes (``2``, ``2.0``, an ordinary ``int``
+        # subclass); on float liar (``__float__``->1.0, ``__int__``->1 at a
+        # true 1.9) the base slot reads 1.9 against 1 and it still faults.
+        if n_ops != int(raw_n) or n_ops < 0:
+            raise ValueError("NumberOfOperands is not a usable count: %r"
+                             % (raw_n,))
+        n_ops = int(n_ops)
+    except Exception as exc:  # noqa: BLE001 — fail OPEN, but never silently
+        return {
+            "offenders": [],
+            "scan_completed": False,
+            "unestablished_rows": 0,
+            "fault": _scan_fault_disclosure(
+                _SCAN_NAME_NEGATIVE_WEIGHT, stage, exc,
+                gating_clause=_SCAN_FAULT_GATE_SKIPPED,
+            ),
+        }
+    offenders = []
+    unestablished = 0
+    for i in range(1, n_ops + 1):
+        # ONE per-row guard over the WHOLE body, operand acquisition included -- the
+        # backstop for any throw the arms below do not absorb. It counts and continues:
+        # no early exit, so an offender at row 400 is still found behind 399 clean rows.
+        try:
+            op = mfe.GetOperandAt(i)
+            w, wstatus = _row_weight_state(op)
+            if wstatus == WEIGHT_NEGATIVE:
+                # Best-effort label ONLY. The offender is already established by the
+                # weight; a throwing token degrades the label, never the finding.
+                #
+                # NORMALIZED AT CAPTURE, and the boundary is the point. ``str()`` honours
+                # ``__str__``'s RETURN TYPE, so the label could arrive as a ``str``
+                # SUBCLASS and carry caller code into every consumer of this record.
+                # Measured, one did: a ``__format__`` that raises turned the refusal
+                # message into an exception and the gate never returned its envelope --
+                # a correctly DETECTED offender whose refusal never reached the caller.
+                # Normalizing here makes every field of an offender a builtin, so the
+                # message, a JSON encoder, a schema check and any consumer written later
+                # are all covered by one fix instead of the format site alone.
+                token = _safe_type_name(op)
+                offenders.append({
+                    "number": int(i),
+                    "type": "?" if token is None else str.__str__(token),
+                    # float() and not ``w``: the documented shape says float, and an
+                    # integer weight otherwise ships an int to a schema consumer.
+                    # Safe to coerce -- ``w`` came back base-slot normalized, so it
+                    # is a plain int or float and cannot dispatch.
+                    "weight": float(w),
+                })
+                continue
+            if wstatus != WEIGHT_UNREADABLE:
+                continue        # POSITIVE / ZERO -- cleared, and the token is never read
+            # NORMALIZED, for the same reason the range memo's lookup is. ``str(x)``
+            # honours ``__str__``'s RETURN TYPE, so a ``str`` SUBCLASS survives it
+            # and set membership CALLS its ``__eq__``. Measured: a hostile
+            # ``__eq__`` firing here mutated ANOTHER row's weight and FABRICATED a
+            # refusal — ``offenders=[{'number': 2, 'type': 'EFFL', 'weight':
+            # -1.0}]`` where none existed. ``str.__str__`` returns a plain ``str``
+            # and cannot dispatch.
+            if _base_token(op.TypeName) not in _WEIGHT_STRUCTURAL_TOKENS:
+                unestablished += 1
+        except Exception:  # noqa: BLE001 — a row we could not clear is DISCLOSED
+            unestablished += 1
+            continue
+    return {
+        "offenders": offenders,
+        "scan_completed": True,
+        "unestablished_rows": unestablished,
+        "fault": None,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1612,22 +2136,54 @@ FLOOR_UNESTABLISHED = "UNESTABLISHED"  #: NO usable floor of this token was esta
                                       #: already exist and was never reached.
 # THE ENUMERATION ABOVE IS NOW COMPLETE, AND IT WAS NOT.
 # It used to read "(MALFORMED / UNCLASSIFIED / declined NOT_APPLICABLE / unreadable
-# Target)" — four conditions covering THREE of the SIX deciding sites in
+# Target)" — four conditions covering THREE of the deciding sites in
 # ``_min_positive_target``. Missing were the count-throw early return, the row-level
 # ``except``, and the unreadable-**Weight** route — which was ADDED in the very
 # change that elevated the sibling constant eight lines above to an exhaustive contract.
 # The pair then read as one exhaustive list beside one stale one, which is worse than
-# either alone. All six, from the AST:
+# either alone.
 #
-#     :321  early-return  ``return (None, FLOOR_UNESTABLISHED)``  -- the COUNT read threw
-#     :348  assign        the range is MALFORMED / UNCLASSIFIED
-#     :377  assign        the row DECLINED as NOT_APPLICABLE
-#     :427  assign        the WEIGHT does not read
-#     :445  assign        the TARGET does not read
-#     :447  assign        the row-level ``except`` -- the row itself failed to read
+# ROUND-7 — AND THEN IT WENT STALE AGAIN, IN THIS SAME BATCH. It said "All six"
+# and "THE ENUMERATION ABOVE IS NOW COMPLETE" while the source decides
+# ``FLOOR_UNESTABLISHED`` at **SEVEN** sites: the batch that added the ``WEIGHT_NEGATIVE``
+# arm (``:585`` below, ZERO occurrences at HEAD) added a route and did not come back here.
+# That is the same failure had just repaired, one round later, by the same hand --
+# which is the reason this block now names the binding row rather than gesturing at it.
+# All SEVEN, from the AST:
 #
-# (Line numbers are a reading aid and WILL drift; the AST row above is the authority for
-# the COUNT, and it binds in both directions on this arm.)
+#     :433  early-return  ``return (None, FLOOR_UNESTABLISHED)``  -- the COUNT read threw
+#     :474  assign        the range is MALFORMED / UNCLASSIFIED
+#     :503  assign        the row DECLINED as NOT_APPLICABLE
+#     :552  assign        the WEIGHT does not read
+#     :585  assign        the WEIGHT is NEGATIVE        <-- added by round 5/6
+#     :596  assign        the TARGET does not read
+#     :598  assign        the row-level ``except`` -- the row itself failed to read
+#
+# (Line numbers are a reading aid and WILL drift.)
+#
+# WHICH ROW BINDS THE COUNT, AND WHAT IT BINDS -- because the sentence that used to sit
+# here ("the AST row above is the authority for the COUNT, and it binds in both
+# directions on this arm") named NEITHER row and was FALSE of the one it sat next to.
+# TWO rows are cited in the block above and they do OPPOSITE things:
+#
+#   * ``test_advr4_the_ABSENT_arm_count_is_NOT_bound_structurally`` -- the row named LAST,
+#     and therefore the one a reader binds "the AST row above" to. It asserts only
+#     ``unestablished_sites > 0`` and ``absent_continues != unestablished_sites``
+#     (measured 8 vs 7). NEITHER expression changes when the count moves 6 -> 7, so it
+#     did not, and could not, catch this staleness. It exists to record the SCOPE of the
+#     pin, not to be one.
+#   * ``test_r4_the_tri_state_arm_count_is_DISCOVERED_from_source`` (adversarial,
+# Lint file) -- THIS is the row that binds. It DISCOVERS the site count from
+#     this function's AST and asserts it equals the number of distinct arm LABELS the
+#     tri-state parametrisation covers, so adding a route without adding an arm reddens
+#     and adding an arm for a route that does not exist reddens too. Mutation-verified
+#     at round 7 in BOTH directions (an 8th site -> RED; deleting the 7th -> RED).
+#
+# What that row does NOT bind, per its own narrowing: it binds the arm LABEL SET,
+# never the ROUTES. A MISLABELLED arm -- one whose label names a route it does not
+# exercise -- keeps the count equal and is invisible to it. And nothing anywhere binds
+# this COMMENT's seven lines to those seven sites; the comment is prose and went stale
+# exactly as prose does. The count is bound; the transcription is not.
 
 #: Distinguishes "the caller did not thread a pass-local domain" from "the caller
 #: threaded a FAILED domain read (``None``)". A plain ``None`` default would silently
@@ -1749,11 +2305,34 @@ def _resolve_last_surface(system):
     if isinstance(n, bool) or not isinstance(n, (int, float)):
         return None
     try:
-        if not math.isfinite(n) or float(n) != int(n) or int(n) <= 0:
+        # ROUND-10a P-5 -- THE COUNT GUARD'S CROSS-CHECK FORM, applied here (+0
+        # statements). ``float(n) != int(n)`` DISPATCHES BOTH conversions to the object,
+        # which is the EXACT shape the comment in this same module records as why
+        # the ``NumberOfOperands`` guard had to be rebuilt: a subclass whose two readers
+        # agree with each other APPROVES ITSELF. MEASURED: a true 9.7 with
+        # ``__float__``->9.0 and ``__int__``->9 passes every clause and fabricates the
+        # domain as 8, where a plain 9.7 correctly yields ``None``. The fabricated domain
+        # feeds the range linter, ``_min_positive_target`` and the range door's
+        # ``surf1_out_of_domain`` refusals. The base-slot read is the FIRST reader and
+        # ``int(n)`` on the ORIGINAL object is the SECOND, so a DISAGREEMENT is the
+        # fault -- not a silently-shifted domain. On every honest shape the two agree.
+        # THE ``isfinite`` GATE STAYS ON THE ORIGINAL OBJECT, DELIBERATELY. The first
+        # cut of this fix put the base-slot read inside ``isfinite``, which never
+        # touches ``__float__`` on an ``int`` subclass — and that SILENTLY CHANGED a
+        # documented fail-closed behaviour: a wedged ``__float__`` used to raise here
+        # into the ``except`` and yield NO domain, and the narrowed version returned a
+        # domain of 8 instead. Caught by a dedicated adversarial test, which
+        # exists for exactly that shape. Reading the true value through the base slot
+        # may well be better, but it is a CONTRACT change and P-5 is about the
+        # two-reader self-approval, nothing else.
+        if (not math.isfinite(n)
+                or (base_n := int.__index__(n) if isinstance(n, int)
+                    else float.__float__(n)) != int(n)
+                or base_n <= 0):
             return None
     except Exception:  # noqa: BLE001 — ANY unclassifiable numeric -> no domain
         return None
-    return int(n) - 1
+    return int(base_n) - 1
 
 
 def _range_cell_int(entry):
@@ -1837,18 +2416,38 @@ def _read_range_pair(op):
 
     **The cost shape, and why it is not "read every cell of every row".** A wizard merit
     is ~316 rows of which a handful are boundary operands -- the rest are RWCE / OPDX /
-    EFFL defaults that cannot carry a range at all. Walking ``read_param_map`` (cols 2..9,
-    Header + DataType + value per column) over all of them costs roughly 40 engine reads
-    per row for an answer that is "not a range operand" ~95% of the time.
+    EFFL defaults that cannot carry a range at all.
+
+    **ROUND-12 — EVERY NUMBER IN THIS PARAGRAPH IS NOW A MEASUREMENT, AND THE THREE IT
+    REPLACES DISAGREED WITH EACH OTHER.** The old text called the probe "2 reads", then
+    said a rejected row "costs two reads total", then priced the alternative at "roughly
+    40 engine reads per row" -- three claims in one docstring, in two different units
+    (helper CALLS vs ENGINE accessor reads), none of them the measured figure. Counted
+    against instrumented ``GetCellAt`` / ``Header`` / ``DataType`` / value accessors:
+
+    * ``read_param_map`` over cols 2..9 costs **32 + 7k** engine reads, where ``k`` is the
+      number of NON-blank columns -- **4 per blank column** (``GetCellAt`` + ``Header``,
+      twice) and **11 per non-blank one**. A fully-populated boundary row is 88, not ~40.
+    * The SHAPE PROBE is **2 ``_read_header`` calls; 4 engine reads** -- and that is the
+      whole cost of a row rejected as ``NOT_APPLICABLE``.
+    * A row that PASSES the probe and is read through costs **16 engine reads, of which 6
+      are Header reads** -- 2 for the probe and 2 more inside each ``read_cell``, because
+      ``read_cell`` re-reads the Header it was already given. That is the honest price of
+      reusing the guarded primitives, and it is disclosed rather than optimised here.
+
+    All four figures are pinned by
+    ``test_r12_the_documented_cell_read_costs_are_the_measured_ones`` so they cannot go
+    stale silently.
 
     So this is a two-stage read:
 
-    1. **SHAPE PROBE (2 reads).** Classify cols 2 and 3 and compare their HEADERS to
-       ``Surf1`` / ``Surf2``. Neither matches -> ``NOT_APPLICABLE``, and the row costs
-       two reads total. **The Header is VERIFIED -- the column is never trusted on its
-       own**, so a row whose col 2 is something else is correctly excluded rather than
-       silently misread as a surface index.
-    2. **VALUE READ**, only on a row that passed the probe.
+    1. **SHAPE PROBE (2 ``_read_header`` calls; 4 engine reads).** Classify cols 2 and 3
+       and compare their HEADERS to ``Surf1`` / ``Surf2``. Neither matches ->
+       ``NOT_APPLICABLE``, and that is all the row costs. **The Header is VERIFIED -- the
+       column is never trusted on its own**, so a row whose col 2 is something else is
+       correctly excluded rather than silently misread as a surface index.
+    2. **VALUE READ**, only on a row that passed the probe (bringing the row to 16 engine
+       reads).
 
     **This is NOT an operand-family filter, and the distinction is the whole point.**
     Firing stays OPERAND-AGNOSTIC: no token list decides whether a row is examined, so a
@@ -1878,8 +2477,13 @@ def _read_range_pair(op):
         h2 = _mc._read_header(op, _RANGE_SURF2_COL)
     except Exception:  # noqa: BLE001 — incl. SurfaceWriteError; NEVER escape as a refusal
         return (RANGE_UNCLASSIFIED, None, None)
-    match1 = str(h1) == _RANGE_SURF1_HEADER
-    match2 = str(h2) == _RANGE_SURF2_HEADER
+    # R-B' (round 5, sweep-found — NOT on the audit's list). MEASURED: two NON-range
+    # headers whose ``__eq__`` lies True make a non-range row read ``WELL_FORMED`` with
+    # fabricated surface indices; two REAL ``Surf1``/``Surf2`` headers whose ``__eq__``
+    # lies False make a real range row read ``NOT_APPLICABLE``, which SD-6 records as the
+    # dual-channel false clean (1a silent AND 1b counting it as a floor).
+    match1 = _base_token(h1) == _RANGE_SURF1_HEADER
+    match2 = _base_token(h2) == _RANGE_SURF2_HEADER
     if not match1 and not match2:
         return (RANGE_NOT_APPLICABLE, None, None)   # not a range operand at all
     if not (match1 and match2):
@@ -2812,7 +3416,22 @@ def _row_target_state(op):
     side only. Deleted, not pinned with a parity test: a parity test preserves two
     implementations and asserts they match; one implementation cannot mismatch.
 
-    NEVER raises.
+    **NEVER raises an ``Exception``, AND THAT IS THE WHOLE OF THE CLAIM (narrowed in
+    round 5, F-B).** It used to read a bare *"NEVER raises"*, which a reader takes as "this
+    function is inert against a hostile row". It is not, and the WEIGHT arm has said so
+    since round 2:
+
+    - ``safe_float(op.Target)`` runs BEFORE any normalization and compares ``value > 0``
+      to choose its sentinel, which DISPATCHES ``__gt__`` on whatever the engine handed
+      back. Caller code has therefore already executed by the time this function decides
+      anything, and it can perturb a LATER row from inside that call. Nothing here can
+      undo that; the only way to would be not to use the shared reader at all.
+    - the guard is ``except Exception``, so a ``BaseException`` raised by that dispatched
+      caller code propagates.
+
+    What normalization buys is narrower and is the part worth stating: **no
+    subclass decides its OWN classification.** The true value governs the finite test, the
+    ``<= 0`` test and the returned number.
     """
     # INDEPENDENTLY CONVERGED, so fixed in BEHAVIOUR rather than by narrowing the
     # docstring — the WHOLE body is guarded,
@@ -2823,11 +3442,51 @@ def _row_target_state(op):
     # ``float(t)`` two lines down raising for the same reason (unreachable today only
     # because isfinite fires first) — enumerate-the-sites is how the next round's finding
     # gets written. Any failure in this function is DEFINITIONALLY "the read did not
-    # establish a target", so routing every failure to UNREADABLE cannot be wrong, and
-    # the "NEVER raises" claim becomes true BY CONSTRUCTION instead of by inspection.
+    # establish a target", so routing every failure to UNREADABLE cannot be wrong.
+    #
+    # ROUND 5 (F-B) NARROWS WHAT THAT BUYS. This comment used to conclude that the
+    # "NEVER raises" claim was thereby "true BY CONSTRUCTION instead of by inspection".
+    # By construction it is true only of ``Exception``, and only of the code INSIDE the
+    # ``try``: ``safe_float`` has already dispatched a comparison on the raw cell value
+    # before the guard can classify anything, so a ``BaseException`` from that dispatched
+    # subclass code escapes and any side effect it had is already done. Total-guarding the
+    # body remains correct; it is not the same statement as inertness. See the docstring.
     try:
         t = safe_float(op.Target)
-        if not isinstance(t, (int, float)) or isinstance(t, bool) or not math.isfinite(t):
+        # BASE-SLOT NORMALIZATION, AND THE ORDER INSIDE THIS ONE ``if`` IS THE FIX
+        # (round 5, F-B; found INDEPENDENTLY by the adversarial pass and by).
+        # The WEIGHT arm of this same tri-state (``_row_weight_state``) has carried this
+        # since round 2; round 4's ``test_wa4`` wrote the contract in two parts -- "(1)
+        # NEVER raises. (2) The TRUE VALUE governs, not the subclass's opinion of it" --
+        # and only part (1) was applied here. MEASURED: a ``float`` subclass with true
+        # value -5.0 and a lying ``__le__`` returned ``(-5.0, TARGET_POSITIVE)``, which
+        # carries all the way through ``_min_positive_target`` ->
+        # ``_resolve_audit_glass_floor`` -> ``_effective_floor`` to ``(-5.0, True)``:
+        # ``check_clearance`` then runs at min_glass = -5.0 with the thin-edge/buried-
+        # centre net dead AND the ``thin_edge_net_withheld_warning`` suppressed (that
+        # key is gated on ``not glass_governing``), while the envelope reports a clean
+        # ``authored`` floor. A lying ``__float__`` gave ``(42.0, 'authored')``.
+        #
+        # ORDERING IS LOAD-BEARING -- the ``test_wa4d`` lesson. ``or`` short-circuits, so
+        # the walrus runs ONLY after the isinstance/bool guards have passed (``float.
+        # __float__`` / ``int.__index__`` need a real float/int) and BEFORE
+        # ``math.isfinite``, which DISPATCHES ``__float__`` on an unnormalized subclass and
+        # would otherwise re-open the establishment half. Normalizing AFTER the finite test
+        # is the exact bug round 4 bred and killed in the weight arm; do not move it.
+        #
+        # WHY ONE ``if`` AND NOT THE WEIGHT ARM'S THREE STATEMENTS: this module is under a
+        # locked statement band (<=1211) with 3 spare, and the split-statement mirror costs
+        # +3 -- the whole band for one fix. The walrus keeps the ORDER identical at +0.
+        # ``float(t)`` on the success return is now a conversion of an EXACT float/int, so
+        # 's second arm (a positive target whose ``__float__`` raises, established and
+        # then swallowed to UNREADABLE) is closed by the same edit.
+        if (
+            not isinstance(t, (int, float))
+            or isinstance(t, bool)
+            or not math.isfinite(
+                t := float.__float__(t) if isinstance(t, float) else int.__index__(t)
+            )
+        ):
             # The throw-free unreadable shapes: the "nan"/"inf" string sentinels
             # ``safe_float`` produces, a raw None, a bool, and a numeric outside
             # {int, float}.
@@ -2860,6 +3519,13 @@ def _scan_malformed_ranges(system, last_surface=_UNSET_LAST_SURFACE):
     never whether a row is examined. A family-filtered scan would miss the measured
     ``MNEG`` / ``MNCG`` rows outright.
 
+    **READER HAZARD (round 5, P-3): that sentence is scoped to ``_RANGE_STRONG_TOKENS``,
+    and it is no longer the only token set in this scan.** The ``nonrange_tokens`` memo
+    added below IS a second one, and unlike the tier set it DOES decide whether a row is
+    examined: a token whose first row reads NOT_APPLICABLE is skipped unread for the rest
+    of the scan. "Operand-agnostic" therefore describes the TIER selector, not the scan.
+    See the memo's own comment in the body for what the omission costs.
+
     ``last_surface``: pass the pass-local value where another consumer also classifies
     in the same pass (``build_merit`` does), so both see one domain read. Omitted ->
     resolved here.
@@ -2881,9 +3547,21 @@ def _scan_malformed_ranges(system, last_surface=_UNSET_LAST_SURFACE):
     NO sentence"* and that a reader *"CANNOT distinguish that from a clean scan"*. Both
     sentences were true and are now false: a total-scan throw emits a fault record and a
     fault sentence. So the disclosure contract holds at THREE levels -- ROW
-    (``unclassified``), DOMAIN (``domain_established``) and SCAN (``scan_completed``) --
-    and the absolute that clause stated without scope is finally true of this function as
-    written. **``_scan_rayfree_merit`` changed in the SAME commit**, because fixing one
+    (``unclassified``), DOMAIN (``domain_established``) and SCAN (``scan_completed``).
+
+    **IT IS STILL NOT ABSOLUTE, AND THE CLAIM THAT IT WAS IS WITHDRAWN (round 5, P-3).**
+    This paragraph used to end *"and the absolute that clause stated without scope is
+    finally true of this function as written"*. That went false when the ``nonrange_tokens`` memo
+    landed and was not re-narrowed. The memo's OWN comment in the body says it: a
+    memo-skipped row's ``unclassified`` increment is *"not taken, so a scan that would
+    have disclosed can return clean"*. The three levels above are the levels at which this
+    scan discloses what it READ; the memo decides what it reads, and a row it declines to
+    read is disclosed at no level at all. The exposure is bounded to one scan (the memo is
+    created per call and dies with it) and it can only OMIT, never fabricate -- but
+    "cannot fabricate" is not "never reported as clean", and conflating the two is exactly
+    the absolutism round 4 already had to walk back once.
+
+    **``_scan_rayfree_merit`` changed in the SAME commit**, because fixing one
     scanner and leaving its twin is the sibling-generation pattern this work exists to
     stop; see its docstring for the one asymmetry (a bare-sentence contract, so it discloses
     in the one channel it has).
@@ -2924,15 +3602,77 @@ def _scan_malformed_ranges(system, last_surface=_UNSET_LAST_SURFACE):
         rows = []
         unclassified = 0
         structural_rows = 0
+        # The tokens whose row answered NOT_APPLICABLE on THIS scan. Created here and
+        # dead when the scan returns: never module-level, never on ``system``, never
+        # threaded to the floor reader. A token learned in one scan is never served in
+        # the next, which is what bounds the exposure below to one call.
+        #
+        # WHAT IT IS ALLOWED TO DO IS EXACTLY ONE THING: skip a row. There is no cached
+        # classification, no cached cell value, no read path of any kind. So every
+        # outcome this scan emits -- a flagged row, an ``unclassified`` increment, a
+        # fault disclosure -- was produced by the resolver reading THAT row's own cells
+        # through code the memo does not touch. It cannot fabricate an outcome,
+        # relabel one, or count one twice; the only way it differs from the memo-free
+        # scan is by OMITTING rows.
+        #
+        # THE OMISSION IS THE PRICE, AND IT IS REAL. A token learned non-range is
+        # skipped unread for the rest of the scan, which suppresses whatever that row
+        # would have produced -- a malformed finding (missed), an ``unclassified``
+        # increment (not taken, so a scan that would have disclosed can return clean),
+        # or a header-read fault (not disclosed). Every arm of that is a SUPPRESSED
+        # disclosure; none of them is a fabricated one.
+        #
+        # The learning read is unverifiable at the site, by construction: a
+        # degraded-but-successful probe on a genuinely range-shaped first row (both
+        # headers return, neither matches) is indistinguishable from a true non-range
+        # row. Today that costs its own row; here it costs the token's tail for one
+        # scan. Layout-per-token constancy is an empirically supported premise -- 28
+        # wizard merits plus 1 hand-authored, zero divergent tokens -- and it is
+        # UNMONITORED. Nothing here watches it, and nothing claims to.
+        nonrange_tokens = set()
         for i in range(1, n_ops + 1):
             try:
                 op = mfe.GetOperandAt(i)
-                token = str(op.TypeName)
+                # NORMALIZED TO AN EXACT ``str``, and the memo below is why. ``str(x)``
+                # honours ``__str__``'s RETURN TYPE, so a ``str`` SUBCLASS survives it --
+                # and set membership then CALLS that subclass's ``__eq__``, making the
+                # memo lookup executable behaviour rather than a pure test. A hostile
+                # ``__eq__`` could mutate a LATER row and have this scan report it
+                # malformed, which is the one thing the memo's guarantee says cannot
+                # happen. ``str.__str__`` returns a plain ``str`` and cannot dispatch.
+                # Unreachable from pythonnet, which hands back an exact ``str``; done
+                # anyway so the guarantee holds by construction and not by premise.
+                token = _base_token(op.TypeName)
                 if token in _RANGE_STRUCTURAL_TOKENS:
                     structural_rows += 1
                     continue
+                # Structural rows are decided FIRST, exactly as before -- they never
+                # probed and still never do, so the memo cannot change their accounting.
+                if token in nonrange_tokens:
+                    # Zero HEADER reads -- not zero engine reads. The row was still
+                    # fetched and its ``TypeName`` still read, above; what the memo
+                    # saves is the probe pair and everything downstream of it. And zero
+                    # outcome of any kind: no classification, no count, no disclosure.
+                    continue
                 state, surf1, surf2 = resolve_range_state(op, last_surface)
-                if state == RANGE_NOT_APPLICABLE or state == RANGE_WELL_FORMED:
+                if state == RANGE_NOT_APPLICABLE:
+                    # ONLY this state learns. WELL_FORMED and MALFORMED never enter
+                    # the set, so a range-shaped row of a token THIS SCAN HAS NOT
+                    # LEARNED pays the full price every time.
+                    #
+                    # THAT IS NOT "every range-shaped row", and the difference is the
+                    # whole exposure: if an EARLIER row of the same token answered
+                    # NOT_APPLICABLE, a later range-shaped row of that token is skipped
+                    # unread and its finding is LOST. The scan can then return clean.
+                    # That is the declared omission class, it is pinned by a test, and
+                    # a comment here claiming otherwise would deny it three lines from
+                    # the docstring that states it.
+                    # UNCLASSIFIED never enters either: a transient fault or a
+                    # half-formed row must not silence a token, so the next row of that
+                    # token re-probes.
+                    nonrange_tokens.add(token)
+                    continue
+                if state == RANGE_WELL_FORMED:
                     continue
                 if state == RANGE_UNCLASSIFIED:
                     unclassified += 1
@@ -3064,7 +3804,7 @@ def _malformed_range_sentence(groups, rows, unclassified, domain_established):
     if rows:
         named = ", ".join(
             f"{g['type']} x{g['count']} (row{'s' if g['count'] > 1 else ''} "
-            f"{', '.join(str(n) for n in g['rows'][:4])}"
+            f"{', '.join(_base_token(n) for n in g['rows'][:4])}"
             f"{'...' if g['count'] > 4 else ''})"
             for g in groups[:_SENTENCE_GROUP_CAP]
         )
@@ -3798,13 +4538,25 @@ def _merit_configs_covered(system):
         except Exception:  # noqa: BLE001 — a missing row contributes nothing
             continue
         try:
-            type_name = str(op.TypeName)
+            type_name = _base_token(op.TypeName)   # R-B' (round 5, F-D): base slot
         except Exception:  # noqa: BLE001 — an unreadable type -> skip this row
             continue
         if type_name != "CONF":
             continue
         try:
-            cfg = int(op.GetCellAt(2).IntegerValue)
+            # ROUND-10a P-3 -- THROUGH THE BASE SLOT (+0 statements). This was the
+            # UN-NORMALIZED HALF of a HALF-NORMALIZED LOOP: the ``TypeName`` read four
+            # lines up was base-slotted in round 5 and the ``Cfg#`` read beside it was
+            # not, while ``int(x)`` DISPATCHES ``__int__`` to the object. It GATES:
+            # MEASURED, ``CONF`` rows truly at configs 7 and 8 whose ``__int__`` lies 1
+            # and 2 yield ``covered == [1, 2]``, which SUPPRESSES ``build_merit``'s
+            # INVARIANT-2 ``merit_config_coverage`` refusal -- a merit that does NOT
+            # span every config ships as one that does. A non-int (a degraded engine
+            # read) falls through to ``int(raw)`` and, failing that, to the
+            # fail-closed EXCLUDE below.
+            cfg = (int.__index__(raw) if isinstance(
+                       (raw := op.GetCellAt(2).IntegerValue), int)
+                   and not isinstance(raw, bool) else int(raw))
         except Exception:  # noqa: BLE001 — a degraded CONF row Cfg# read -> EXCLUDE (fail-closed)
             continue
         covered.add(cfg)
@@ -3860,7 +4612,7 @@ def _uncomputable_row_diagnostics(system, cap=_UNCOMPUTABLE_ROW_CAP):
             except Exception:  # noqa: BLE001 — a missing row contributes nothing (skip)
                 continue
             try:
-                type_name = str(op.TypeName)
+                type_name = _base_token(op.TypeName)  # R-B' (round 5, F-D): base slot
             except Exception:  # noqa: BLE001 — an unreadable type -> best-effort ""
                 type_name = ""
 
@@ -3869,7 +4621,13 @@ def _uncomputable_row_diagnostics(system, cap=_UNCOMPUTABLE_ROW_CAP):
             if type_name == "CONF":
                 multi_config = True
                 try:
-                    current_config = int(op.GetCellAt(2).IntegerValue)
+                    # ROUND-10a -- the SAME ``__int__`` dispatch, one
+                    # loop over. ADVISORY here (it stamps a diagnostic bracket number,
+                    # it does not gate), swept anyway because a half-swept class is how
+                    # the gating half survived round 5. +0 statements.
+                    current_config = (int.__index__(raw) if isinstance(
+                                          (raw := op.GetCellAt(2).IntegerValue), int)
+                                      and not isinstance(raw, bool) else int(raw))
                 except Exception:  # noqa: BLE001 — a degraded Cfg# read -> leave current_config
                     pass
 
@@ -4101,7 +4859,10 @@ def _check_stop_convention(system):
     if classification != "on_glass_vertex":
         return (True, None, stop_idx, None)
     try:
-        stop_material = str(system.LDE.GetSurfaceAt(stop_idx).Material)
+        # ROUND-10a P-4 (class sweep) -- base slot AT CAPTURE. Diagnostic only, but it is
+        # published in the refusal envelope, and boundary rule is that a
+        # ``str`` SUBCLASS is normalized where it is READ, not where it is consumed.
+        stop_material = _base_token(system.LDE.GetSurfaceAt(stop_idx).Material)
     except Exception:  # noqa: BLE001 — the diagnostic read must never crash the gate
         stop_material = ""
     return (False, "stop_on_glass_vertex", stop_idx, stop_material)
@@ -4110,8 +4871,10 @@ def _check_stop_convention(system):
 def _preflight(system, *, require_free_stop=True):
     """The NON-MUTATING dry-run gate (§e + §6.2). Opens NO optimizer.
 
-    Three gates, evaluated in order (the FIRST failure is reported — so a more
-    fundamental structural gap surfaces before the stop-convention nuance):
+    The gates below are evaluated IN ORDER and the FIRST failure is reported — so a more
+    fundamental structural gap surfaces before the stop-convention nuance. (ROUND-10a: the
+    heading said "Three gates" and then enumerated four; the count is dropped rather than
+    corrected, because a hand-maintained tally is what went stale.)
 
     - **variables gate:** at least one LDE cell set Variable (the LDE scan, not
       ``opt.Variables`` — the optimizer is never opened here). ``count == 0`` ->
@@ -4149,7 +4912,13 @@ def _preflight(system, *, require_free_stop=True):
         number_of_operands > 0
         and isinstance(merit, (int, float))
         and not isinstance(merit, bool)
-        and math.isfinite(merit)
+        # ROUND-10a P-1 -- THROUGH THE BASE SLOT (+0 statements). ``math.isfinite`` and
+        # ``>`` both DISPATCH to the object, so a ``float`` SUBCLASS decided whether the
+        # preflight saw a merit at all. The walrus REBINDS ``merit``, so the base-slot
+        # truth is what every later consumer reads -- the returned tuple, the envelope,
+        # and ``_merit_is_uncomputable`` one gate down.
+        and math.isfinite(merit := float.__float__(merit) if isinstance(merit, float)
+                          else int.__index__(merit))
         and merit > 0
     )
     if not merit_ok:
@@ -4189,7 +4958,12 @@ def _is_nonfinite(value):
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return True
-    return not math.isfinite(value)
+    # ROUND-10a P-1 -- THROUGH THE BASE SLOT. ``math.isfinite`` DISPATCHES ``__float__``
+    # on a ``float`` subclass, so a lying ``__float__`` returning inf could disqualify a
+    # real finite merit and, via ``classify_verdict`` gate 1, bin an honest run
+    # ``diverged``. +0 statements.
+    return not math.isfinite(float.__float__(value) if isinstance(value, float)
+                             else int.__index__(value))
 
 
 def classify_verdict(before, after, *, rel_tol=_VERDICT_REL_TOL, abs_tol=_VERDICT_ABS_TOL):
@@ -4210,7 +4984,23 @@ def classify_verdict(before, after, *, rel_tol=_VERDICT_REL_TOL, abs_tol=_VERDIC
     # (1) non-finite FIRST — checked on the raw float.
     if _is_nonfinite(after) or _is_nonfinite(before):
         return "diverged"
-    close = math.isclose(after, before, rel_tol=rel_tol, abs_tol=abs_tol)
+    # ROUND-10a P-1 -- THE VERDICT'S OWN COMPARISONS NOW GO THROUGH THE BASE SLOT, and
+    # this is the last hop of rule: ``_finite_below`` normalized the geometry
+    # evidence and ``_row_weight_state`` the weights, while the THREE comparisons below --
+    # the ones that decide ``improved`` / ``stable`` / ``diverged`` -- did not. ``>``,
+    # ``<`` and ``math.isclose`` all DISPATCH to the object. MEASURED: a ``float``
+    # SUBCLASS with true value 2.0 and a lying ``__lt__`` against ``before=1.0`` makes
+    # this function return ``"improved"`` ON A WORSE MERIT -- the trust anchor the server
+    # instructions tell an agent to read, and the input ``_qualify_verdict`` qualifies.
+    # Normalized HERE, after gate 1 has already established both are non-bool
+    # ``int``/``float`` and finite, so the two-branch ``_finite_below`` shape is
+    # type-safe. +0 statements.
+    close = math.isclose(
+        after := float.__float__(after) if isinstance(after, float)
+        else int.__index__(after),
+        before := float.__float__(before) if isinstance(before, float)
+        else int.__index__(before),
+        rel_tol=rel_tol, abs_tol=abs_tol)
     # (2) worse (and not within tol).
     if after > before and not close:
         return "diverged"
@@ -4403,6 +5193,12 @@ def _stamp_prior_solve_unchecked(result, cell_family):
 
 
 __all__ = [
+    "WEIGHT_POSITIVE",
+    "WEIGHT_ZERO",
+    "WEIGHT_NEGATIVE",
+    "WEIGHT_UNREADABLE",
+    "_row_weight_state",
+    "_scan_negative_weights",
     "error_envelope",
     "classify_verdict",
     "_preflight",

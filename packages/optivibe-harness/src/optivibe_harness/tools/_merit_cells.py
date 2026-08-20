@@ -85,6 +85,29 @@ _VALUELESS_CONTROL_OPERANDS = {
 _PARAM_COLS = range(2, 10)
 
 
+def _base_token(value):
+    """This module's handle on the ONE base-slot normalizer (``_optimize_common``'s).
+
+    ROUND-12 H-2. The round-10a helper closed the forging-``__str__`` door in
+    ``_optimize_common`` / ``optimize_run`` / ``optimize_merit`` — but every merit-cell
+    Header those modules reason about is READ HERE, one frame upstream, through a bare
+    ``str(...)``. A Header whose true buffer is ``Mode`` and whose ``__str__`` forges
+    ``Surf1`` came out of ``_read_header`` as an exact, FORGED ``'Surf1'``, so a
+    downstream ``_base_token`` had nothing left to recover: the door was being shut on a
+    wall that had already fallen. Normalizing at the READ is what makes the downstream
+    normalization mean anything.
+
+    The import is FUNCTION-LOCAL and that is deliberate, not laziness: ``_optimize_common``
+    imports THIS module at its top (``from . import _merit_cells``), so a module-level
+    import here would be a cycle. Delegating rather than re-implementing keeps the shape
+    behind ONE name — the two obvious one-line spellings of it are both measurably
+    wrong, which is the whole reason the helper exists.
+    """
+    from . import _optimize_common as _oc   # local: _optimize_common imports this module
+
+    return _oc._base_token(value)
+
+
 class CellLayoutError(SurfaceWriteError):
     """A cell's live ``Header`` did not match the Header the caller intended to write.
 
@@ -102,11 +125,13 @@ def _header_is_blank(header) -> bool:
     Blank detection is ALWAYS Header-based and runs FIRST (the L24 caveat: a blank
     cell reports ``DataType`` ARBITRARILY — EFFL col-2 blank reports ``Integer``,
     cols 4-9 blank report ``Double`` — so ``DataType`` can NOT decide blank). An
-    unused column carries ``Header == " "`` (a single space). ``header`` is
-    normalized via ``str(...)`` (the live ``cell.Header`` is a .NET ``System.String``
-    proxy).
+    unused column carries ``Header == " "`` (a single space). ``header`` is normalized
+    through the BASE SLOT (``_base_token``), not ``str(...)`` — the live ``cell.Header``
+    is a .NET ``System.String`` proxy, and ROUND-12 H-2 measured that a bare ``str(...)``
+    here hands a FORGED token to the comparison (and, on a ``str`` subclass, hands the
+    subclass's own ``__eq__`` the last word on whether the column is blank).
     """
-    return str(header).strip() == ""
+    return _base_token(header).strip() == ""
 
 
 def cell_kind(cell) -> str:
@@ -148,9 +173,13 @@ def cell_kind(cell) -> str:
     if _header_is_blank(header):
         return "blank"
     try:
-        data_type = str(cell.DataType)
+        # ROUND-12 H-2: BASE SLOT on the DataType read. MEASURED with a bare ``str(...)``
+        # here: a cell whose ``DataType`` forges ``"Double"`` over a true ``Integer``
+        # buffer classified ``double`` and ``read_cell`` then took ``DoubleValue`` — the
+        # exact wrong-accessor read this function's docstring says NEVER happens.
+        data_type = _base_token(cell.DataType)
     except Exception:  # noqa: BLE001 — DataType read THROW -> Header fallback (defensive)
-        return "int" if str(header) in _INT_HEADERS else "double"
+        return "int" if _base_token(header) in _INT_HEADERS else "double"
     return "int" if data_type == "Integer" else "double"
 
 
@@ -159,10 +188,30 @@ def _read_header(op, col):
 
     A raw .NET THROW on the ``GetCellAt`` / ``Header`` read re-raises a structured
     ``SurfaceWriteError`` (the L26 firewall) rather than escaping dispatch as an
-    opaque ``internal``. Returns the Header as a ``str``.
+    opaque ``internal``. Returns the Header as an EXACT ``str``.
+
+    **ROUND-12 H-2 — THE NORMALIZATION IS HERE, AT THE READ, NOT AT THE COMPARISON.**
+    This used to be ``str(op.GetCellAt(col).Header)``. Round 10a put ``_base_token`` on
+    the Header COMPARISONS one frame downstream (``_optimize_common._read_range_pair``'s
+    ``match1``/``match2``), but the value those comparisons receive is whatever THIS
+    function returned — and a bare ``str(...)`` had already dispatched
+    ``type(header).__str__`` and FORGED it. Measured, all three ways it escaped:
+
+    * a Header whose true buffer is ``NOT_A_RANGE`` and whose ``__str__`` returns
+      ``Surf1`` came out of here as an exact, forged ``'Surf1'`` — irrecoverable by any
+      downstream normalizer, so ``_read_range_pair`` read ``("WELL_FORMED", 1, 3)`` off
+      two cells named ``Wave``/``Ring``;
+    * on a ``str`` SUBCLASS with no ``__str__`` override the return was the SUBCLASS, so
+      the docstring line above was false and ``read_param_map`` used it as a DICT KEY —
+      a cell named ``Mode`` answered ``d.get("Surf1")``;
+    * every consumer that compares the result (``write_verified_cell``'s layout guard,
+      ``_INT_HEADERS`` membership) was therefore asking the value what it thought.
+
+    Fixing it HERE means every consumer inherits it, which is why this is one line and
+    not one line per consumer.
     """
     try:
-        return str(op.GetCellAt(col).Header)
+        return _base_token(op.GetCellAt(col).Header)
     except Exception as exc:  # noqa: BLE001 — a read THROW -> surface_write, never internal
         raise SurfaceWriteError(
             f"could not read the Header of merit cell col {col} ({exc!r}); the "
@@ -177,11 +226,22 @@ def _read_header(op, col):
 def read_cell_kind(op, col):
     """Read one cell's ``(header, kind)`` type-aware (Header-blank-first, then DataType).
 
-    The kind-DERIVATION primitive shared by ``read_cell`` and ``read_param_map`` so the
-    kind is derived ONCE from the LIVE cell (never re-derived from a Header string —
-    that was the L24 Header-only bug). THROW-guarded the same way: a ``GetCellAt`` /
-    ``DataType`` / ``Header`` THROW re-raises a structured ``SurfaceWriteError`` (the
-    L26 firewall) rather than escaping dispatch as an opaque ``internal``.
+    The kind-DERIVATION primitive shared by ``read_param_map``, ``read_ref_map`` and
+    ``write_verified_cell``: the kind comes from the LIVE cell, never re-derived from
+    a Header string (that was the Header-only bug). THROW-guarded the same way: a
+    ``GetCellAt`` / ``DataType`` / ``Header`` THROW re-raises a structured
+    ``SurfaceWriteError`` (the firewall) rather than escaping dispatch as an opaque
+    ``internal``.
+
+    **ROUND-12 — TWO CORRECTIONS TO THE SENTENCE THIS DOCSTRING USED TO CARRY.** It said
+    the primitive was *"shared by ``read_cell`` and ``read_param_map`` so the kind is
+    derived ONCE"*. ``read_cell`` does NOT call this function — it calls ``_read_header``
+    and ``cell_kind`` itself — and nothing here is derived once per CELL either. Counted
+    against instrumented accessors: this call costs 2 ``GetCellAt`` + 2 ``Header`` + 1
+    ``DataType``; ``read_cell`` alone costs 2 ``GetCellAt`` + 2 ``Header`` + 1
+    ``DataType`` + 1 value read. "ONCE" is true of the RULE (one discriminator, the live
+    ``DataType``), not of the read count, and the read count is what a cost claim reads
+    as. Pinned by ``test_r12_the_documented_cell_read_costs_are_the_measured_ones``.
     """
     header = _read_header(op, col)
     try:
@@ -276,8 +336,22 @@ def is_row_ref_header(header, kind) -> bool:
       treated as a row pointer.
 
     Covers ``Op#`` / ``Op#1`` / ``Op#2`` / any future ``Op#N`` without a table.
+
+    **ROUND-12 H-2, AND THE ONLY SITE IN THIS FILE THE SWEEP STRUCTURALLY COULD NOT FIND.**
+    This was ``str(header).startswith(...)``. The normalization sweep decides comparisons,
+    subscript keys, set/dict members, the ``float``/``int``/``sorted``/``set`` arguments,
+    f-strings, ``.format()`` and ``%`` — it does NOT decide a ``str``-METHOD predicate, so
+    a forging Header reaching a ``.startswith`` was invisible to the closure row while
+    deciding whether a cell is an operand ROW POINTER (and therefore whether
+    ``apply_merit_recipe`` remaps it). It is safe TODAY only because every in-repo caller
+    passes a Header that ``_read_header`` has already normalized — which is a fact about
+    the callers, not about this predicate, and this one is exported and documented as
+    taking "the header the caller ALREADY holds".
+
+    ``.startswith`` is itself overridable on a subclass, so the base slot has to sit on the
+    RECEIVER: ``_base_token`` returns an exact ``str``, whose ``startswith`` is the builtin.
     """
-    return kind == "int" and str(header).startswith(_OP_REF_PREFIX)
+    return kind == "int" and _base_token(header).startswith(_OP_REF_PREFIX)
 
 
 def read_ref_map(op) -> dict:
@@ -688,7 +762,7 @@ def is_valueless_control(token) -> bool:
     ``_phase1_validate``) uses it to decide whether to SKIP the numeric Target/Weight
     read-back and redirect the proof to the operand's semantic cell.
     """
-    return str(token) in _VALUELESS_CONTROL_OPERANDS
+    return _base_token(token) in _VALUELESS_CONTROL_OPERANDS   # base slot: hashed lookup
 
 
 def valueless_control_proof_param(token):
@@ -699,7 +773,7 @@ def valueless_control_proof_param(token):
     TypeName read-back, no param). Assumes ``is_valueless_control(token)`` (the caller
     gates on it first).
     """
-    rule = _VALUELESS_CONTROL_OPERANDS[str(token)]
+    rule = _VALUELESS_CONTROL_OPERANDS[_base_token(token)]   # base slot: hashed lookup
     if rule.startswith("cell:"):
         return rule.split(":", 1)[1]
     return None
@@ -773,7 +847,17 @@ def write_verified_cell(op, col, header, value, *, operand_token):
     Returns the read-back value.
     """
     live_header = _read_header(op, col)
-    if str(live_header) != str(header):
+    # ROUND-12 H-1. This was ``str(live_header) != str(header)`` — a MUTATION guard whose
+    # stated job is "refusing rather than writing the wrong cell", decided by asking the
+    # live Header what it thought its own name was. MEASURED end-to-end: a Header whose
+    # true buffer is ``Mode`` and whose ``__str__`` forges ``Surf1`` made
+    # ``write_verified_cell(op, 2, 'Surf1', 5, operand_token='MNEA')`` RETURN 5 — it wrote
+    # into the cell, and the read-back "proof" agreed because it re-read the same forged
+    # name. The honest-mismatch control was refused correctly the whole time, so nothing
+    # about the guard LOOKED dead. Both sides go through the base slot: reflected
+    # ``__eq__``/``__ne__`` means normalizing one side is not enough, and ``header`` is
+    # caller-supplied so it is not trusted either.
+    if _base_token(live_header) != _base_token(header):
         raise CellLayoutError(
             f"merit cell layout mismatch for operand {operand_token}: intended to "
             f"write {header!r} at col {col} but the live cell Header is "

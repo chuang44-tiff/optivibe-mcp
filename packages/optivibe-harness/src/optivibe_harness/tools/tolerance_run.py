@@ -41,7 +41,7 @@ import math
 import os
 import tempfile
 
-from .._io import safe_float
+from .._io import safe_call, safe_exc, safe_float
 from ..server import ToolSpec
 from . import _analysis_common as _ac
 from . import _tolerance_catalog as _cat
@@ -59,6 +59,11 @@ _ENGINE_ERROR_FAMILY = "tolerancing_run"
 _MIN_COL = 6
 _MAX_COL = 7
 
+# The engine FLOORS ``TDE.NumberOfOperands`` at 1 (the base row survives
+# ``DeleteAllRows``; probe section 1, and both test doubles model it). So a PROVEN-empty
+# editor reads ``<= 1``, never ``0`` — asserting 0 would refuse every correct clear.
+_TDE_EMPTY_FLOOR = 1
+
 
 def _never_raise(tool_name):
     """Wrap the handler so it NEVER raises past its boundary (D17).
@@ -70,6 +75,17 @@ def _never_raise(tool_name):
     ``RecursionError`` is in the caught set (the wrapper must never raise).
     ``BaseException`` (KeyboardInterrupt / SystemExit) is deliberately NOT caught — it
     propagates AFTER the slot-reaping ``finally`` (D13) has run.
+
+    ROUND-13 -- EVERY READ OF ``exc`` INSIDE THE HANDLER IS GUARDED. This decorator
+    IS the never-raise boundary and its f-string interpolated ``exc`` from inside the
+    ``except``: an exception whose ``__str__`` throws made the HANDLER itself raise.
+    MEASURED — it ESCAPED with ``RuntimeError``, the typed ``tolerancing_*`` family was
+    LOST, and the dispatch envelope degraded to the generic ``internal`` family. Three
+    reads are routed, not just the f-string: the bare ``str(exc)`` one line up is the
+    same defect differently spelled, and ``getattr(exc, "family", ...)`` suppresses only
+    ``AttributeError`` — a ``__getattr__`` raising anything else walks straight out
+    (defense-in-depth: today's raiser is our own ``ToleranceError``, so that third arm
+    needs a hostile subclass, unlike the other two).
     """
     def _decorate(handler):
         @functools.wraps(handler)
@@ -78,20 +94,30 @@ def _never_raise(tool_name):
                 return handler(session, params)
             except _tc.ToleranceError as exc:
                 return _ac.error_envelope(
-                    tool_name, getattr(exc, "family", "tolerancing"), str(exc)
+                    tool_name,
+                    safe_call(lambda: getattr(exc, "family", "tolerancing"), "tolerancing"),
+                    safe_exc(exc),
                 )
             except Exception as exc:  # noqa: BLE001 — D17: net any engine throw
                 return _ac.error_envelope(
                     tool_name, _ENGINE_ERROR_FAMILY,
-                    f"{tool_name} hit an unexpected engine error: {exc}",
+                    f"{tool_name} hit an unexpected engine error: {safe_exc(exc)}",
                 )
         return _wrapped
     return _decorate
 
 
 def _resolve_mode(params):
-    """Resolve + validate the REQUIRED ``mode`` param (D1)."""
-    mode = params.get("mode")
+    """Resolve + validate the REQUIRED ``mode`` param (locked D1).
+
+    ROUND-8 -- unbound ``dict.get``, see ``_bool_param``. ``mode`` selects the
+    sensitivity / monte_carlo SETUP FORK (``_tc._MODE_TO_SETUP``) — the exact shape of
+    the ``optimize_run._resolve_algorithm`` DLS/Hammer fork round 7 swept. Bare base slot
+    (no ``isinstance`` conjunct) matches that precedent and keeps today's non-``dict``
+    behaviour a raise. Nil reachability today (JSON params + the
+    ``server.Dispatcher.call_tool`` non-``dict`` coercion at :517).
+    """
+    mode = dict.get(params, "mode")
     if mode not in _tc._MODE_TO_SETUP:
         raise _tc.ToleranceError(
             f"mode must be one of {sorted(_tc._MODE_TO_SETUP)}, got {mode!r}",
@@ -106,10 +132,14 @@ def _resolve_trials(params):
     Default 20 (SIGNATURE). A bool / non-integral float / non-int / ``< 1`` ->
     ``tolerancing_param``. An integral float (a JSON round-trip can float an int) is
     coerced (``20.0`` -> 20).
+
+    ROUND-8 -- unbound ``dict`` slots, see ``_bool_param``. A lying ``__contains__``
+    silently runs 20 Monte-Carlo trials for an explicit ``trials=500`` and reports the
+    short run as the caller's. Nil reachability today.
     """
-    if "trials" not in params:
+    if not (isinstance(params, dict) and dict.__contains__(params, "trials")):
         return _tc._DEFAULT_TRIALS
-    value = params["trials"]
+    value = dict.__getitem__(params, "trials")
     if isinstance(value, bool):
         raise _tc.ToleranceError(
             f"trials must be an integer, not a bool ({value!r})",
@@ -136,10 +166,28 @@ def _resolve_trials(params):
 
 
 def _bool_param(params, key, default):
-    """Pull an optional bool param; reject a non-bool (loud)."""
-    if key not in params:
+    """Pull an optional bool param; reject a non-bool (loud).
+
+    ROUND-8 -- MEMBERSHIP AND LOOKUP GO THROUGH THE UNBOUND ``dict``
+    SLOTS. Round 7 applied this rule to ``optimize_run``'s copy of this door and left the
+    ``optimize_merit`` / ``analysis_measure`` / ``tolerance_run`` copies on ``key not in
+    params``, so four copies that used to AGREE started disagreeing. On a ``dict``
+    SUBCLASS with a lying ``__contains__`` the door silently substitutes the default;
+    measured in the ``optimize_run`` twin, ``require_free_stop=False`` came back **True**.
+    Here the three keys are ``full`` / ``strict`` / ``include_mechanical`` — ``strict`` is
+    the flag that decides whether a known-gap operand REJECTS the whole tolerance set or
+    is merely disclosed, so a defaulted read turns a hard refusal into a soft warning. The
+    rule ``_optimize_common.range_headers_supplied`` documents (:2772) is now at every
+    copy of the door.
+
+    REACHABILITY IS NIL TODAY AND THAT IS STATED, NOT ASSUMED: ``params`` arrives from
+    JSON deserialization (and ``server.Dispatcher.call_tool`` coerces any non-``dict`` to
+    ``{}`` at :517), so a ``dict`` subclass is structurally impossible on the shipped
+    path. The ``isinstance`` conjunct matches ``optimize_run._bool_param``.
+    """
+    if not (isinstance(params, dict) and dict.__contains__(params, key)):
         return default
-    value = params[key]
+    value = dict.__getitem__(params, key)
     if not isinstance(value, bool):
         raise _tc.ToleranceError(
             f"{key!r} must be a boolean, got {type(value).__name__} {value!r}",
@@ -156,7 +204,7 @@ def _resolve_output_path(session, params):
     reaped in ``finally``). The parent dir is ``makedirs``'d by the caller BEFORE the
     run (D15/#58: the engine SILENTLY writes nothing to a missing dir).
     """
-    explicit = params.get("output_file")
+    explicit = dict.get(params, "output_file")  # unbound base slot (see _bool_param)
     if explicit is not None:
         if not isinstance(explicit, str) or explicit.strip() == "":
             raise _tc.ToleranceError(
@@ -172,17 +220,51 @@ def _resolve_output_path(session, params):
 
 
 def _clear_tde(tde):
-    """Clear the TDE via ``DeleteAllRows`` (author-as-scratch, floor-at-1; D10/G18).
+    """Clear the TDE via ``DeleteAllRows``, READ-BACK-PROVEN (floor-at-1; D10).
 
     Guarded: a clear THROW raises ``ToleranceError(family="tolerancing_run")`` so the
     handler nets it (the slot/TDE reaping happens in the caller's ``finally``).
+
+    ROUND-13 -- THE CLEAR IS NOW PROVEN, NOT TRUSTED. Every CELL write on this same
+    authoring path is read-back-proven (``_tol_cells.write_verified_cell`` /
+    ``write_double_verified``, D6), yet the operation establishing the PRECONDITION for
+    all of them — an empty editor — trusted the return of a void engine call. That is
+    the ``AddCatalog`` / ``ScaleByUnits`` class: a clean call is not a
+    proof. A SILENT no-op leaves the PREVIOUS run's scratch rows in place, this run
+    authors after them, and the reconcile canary keys on
+    ``(type, surface[, param])`` — so a leftover row of a type this run also authors is
+    INDISTINGUISHABLE from this run's own, and the envelope still reports
+    ``tde_cleared:true``. ``tde_cleared`` was honest on a throw and not on a no-op.
+
+    The engine floors ``NumberOfOperands`` at 1 (the base row, probe section 1), so "empty" is
+    ``<= _TDE_EMPTY_FLOOR``. An UNREADABLE count refuses rather than proceeding (
+    absent would be "not applicable"; unreadable is UNKNOWN, and an unproven clear is
+    exactly the indeterminate TDE this function already refuses to author onto).
     """
     try:
         tde.DeleteAllRows()
     except Exception as exc:  # noqa: BLE001 — a clear THROW -> tolerancing_run
         raise _tc.ToleranceError(
-            f"clearing the Tolerance Data Editor threw ({exc!r}); refusing to author "
-            "onto an indeterminate TDE",
+            f"clearing the Tolerance Data Editor threw "
+            f"({safe_exc(exc, repr_form=True)}); refusing to author onto an "
+            "indeterminate TDE",
+            family="tolerancing_run",
+        )
+    try:
+        remaining = int(tde.NumberOfOperands)
+    except Exception as exc:  # noqa: BLE001 — the PROOF is unreadable -> refuse
+        raise _tc.ToleranceError(
+            "the Tolerance Data Editor row count could not be read after DeleteAllRows "
+            f"({safe_exc(exc, repr_form=True)}); the clear is UNPROVEN — refusing to "
+            "author onto an indeterminate TDE",
+            family="tolerancing_run",
+        )
+    if remaining > _TDE_EMPTY_FLOOR:
+        raise _tc.ToleranceError(
+            "DeleteAllRows returned cleanly but the Tolerance Data Editor still holds "
+            f"{remaining} rows (expected at most {_TDE_EMPTY_FLOOR}, the engine's "
+            "floored base row); the clear SILENTLY no-opped — refusing to author onto "
+            "leftover scratch rows",
             family="tolerancing_run",
         )
 
@@ -227,7 +309,8 @@ def _author_tolerance_set(tde, operand_enum, authored):
             writes = _cat.int_cell_writes(meta, entry)
         except _cat.CatalogResolveError as exc:
             raise _tc.ToleranceError(
-                f"could not resolve the int-cell author plan for {token} ({exc}); the "
+                f"could not resolve the int-cell author plan for {token} "
+                f"({safe_exc(exc)}); the "
                 "entry is missing a required cell",
                 family="tolerancing_param",
             )
@@ -240,7 +323,25 @@ def _author_tolerance_set(tde, operand_enum, authored):
 
 
 def _verify_int(field, intended, actual, token):
-    """Assert an integer property read back as intended (G10 integral-Surf-cell proof)."""
+    """DEAD as of the cell-writer migration. ZERO callers in ``src/``.
+
+    ROUND-10a — measured, not asserted: ``grep -rn _verify_int src/`` returns no CALL
+    site. (ROUND-13 CORRECTS the wording, not the conclusion: the original said it
+    "returns only this definition", and it returns THREE lines — the ``def``, this very
+    sentence, and the cross-reference in ``_verify_float``'s docstring below. A reader
+    re-running the command to check gets three hits and cannot tell whether the claim
+    rotted or was never true. The claim that matters — zero callers — holds.)
+    The integral-Surf-cell read-back proof it was written for is now enforced
+    by ``_tol_cells.write_int_cell`` on the author path (``_author_tolerances``), which is
+    what the integral-Surf-cell read-back test
+    actually exercises. That test's head comment still calls THIS function "LOAD-BEARING"
+    and claims deleting it would make the test falsely pass — both false; deleting it
+    changes nothing, which is exactly why the claim survived. The behaviour is real and
+    guarded; only the attribution is wrong.
+
+    Kept (not deleted) because the removal belongs with that test's prose correction in
+    ONE change, and the test file is outside this round's ownership.
+    """
     try:
         actual_int = int(actual)
     except (TypeError, ValueError):
@@ -254,7 +355,12 @@ def _verify_int(field, intended, actual, token):
 
 
 def _verify_float(field, intended, actual, token):
-    """Assert a double property read back as intended within float tolerance."""
+    """DEAD as of the cell-writer migration. ZERO callers in ``src/``.
+
+    The sibling of ``_verify_int`` above and dead for the same reason: the double
+    read-back proof is enforced by ``_tol_cells.write_double_verified`` on the author
+    path.
+    """
     try:
         actual_f = float(actual)
     except (TypeError, ValueError):
@@ -280,7 +386,7 @@ def _strehl_nominal(session):
     try:
         result = _am.analyze_strehl(session, {"best_focus": False})
     except Exception as exc:  # noqa: BLE001 — D8: never let the adjunct fail the run
-        return None, f"strehl_nominal read failed ({exc!r})"
+        return None, f"strehl_nominal read failed ({safe_exc(exc, repr_form=True)})"
     if not isinstance(result, dict) or not result.get("ok"):
         return None, "strehl_nominal unavailable (analyze_strehl returned no result)"
     at_image = result.get("at_image_plane") or []
@@ -304,12 +410,29 @@ def _default_mechanical(system):
     TETX/TEDX surface RANGE is ``surf .. surf`` (a single-surface element span, the
     minimal conservative choice — the engine accepts surf1 < surf2 only for a multi-
     surface element; a single surface uses surf..surf+1 against the next interface).
+
+    ROUND-13 -- RETURNS ``(entries, skipped)``, AND THE DOCSTRING'S "each" WAS FALSE.
+    The claim above is a tilt + decenter + irregularity set on EACH glass-bearing
+    interior surface. It is not: on the LAST interior surface the ``nxt`` clamp collapses
+    to ``nxt = surf``, the ``nxt > surf`` guard is then False, and only TIRR is authored
+    — that element ships with NO tilt and NO decenter tolerance, undisclosed. For n=6
+    that is surface 4 (a cover glass or window in contact with the image plane: unusual,
+    entirely legal, and exactly the element a tilt tolerance matters for).
+
+    The clamp is NOT the bug and is deliberately kept: TETX/TEDX are surface-RANGE
+    operands, ``_tolerance_common`` requires ``surface < surface2 < image_surf``, so for
+    ``surf == n - 2`` there is no legal ``surface2`` at all — authoring one would be a
+    hard ``tolerancing_param`` refusal that fails the whole run. Widening the span
+    backwards (``surf-1 .. surf``) would tolerance a DIFFERENT element's tilt and report
+    it as this one's, which is worse than the gap. So the fix is disclosure: ``skipped``
+    carries the surfaces that got irregularity only, and the caller warns.
     """
     try:
         n = int(system.LDE.NumberOfSurfaces)
     except Exception:  # noqa: BLE001 — unreadable -> no mechanical default
-        return []
+        return [], []
     out = []
+    skipped = []
     for surf in range(1, n - 1):
         material = _tc._surface_material(system, surf)
         is_glass = bool(material) and str(material).strip() != ""
@@ -317,15 +440,17 @@ def _default_mechanical(system):
             continue
         nxt = surf + 1
         if nxt >= n - 1:
-            nxt = surf  # degenerate: a single-surface span (surf..surf)
+            nxt = surf  # degenerate: no legal surface2 exists (see the docstring)
         # TETX / TEDX are surface-RANGE ops (Surf1/Surf2); TIRR is single-surf.
         if nxt > surf:
             out.append({"type": "TETX", "surface": surf, "surface2": nxt,
                         "delta": 0.1})
             out.append({"type": "TEDX", "surface": surf, "surface2": nxt,
                         "delta": 0.05})
+        else:
+            skipped.append(surf)
         out.append({"type": "TIRR", "surface": surf, "delta": 1.0})
-    return out
+    return out, skipped
 
 
 def _configure_run(tol, system, mode, trials, output_path):
@@ -365,7 +490,7 @@ def _configure_run(tol, system, mode, trials, output_path):
     except (OSError, ValueError) as exc:
         raise _tc.ToleranceError(
             f"could not create the parent directory for the report {output_path!r} "
-            f"({type(exc).__name__}: {exc})",
+            f"({safe_exc(exc, repr_form=True)})",
             family="tolerancing_run",
         )
     tol.OutputFile = output_path
@@ -425,20 +550,37 @@ def tolerance(session, params):
     # flat-required convention) — never a hard reject.
     if mode == "sensitivity":
         for key in ("trials", "full"):
-            if key in params:
+            if dict.__contains__(params, key):  # unbound base slot
                 warnings.append(
                     f"{key!r} was passed with mode='sensitivity' (it applies only to "
                     "monte_carlo); echoed-ignored"
                 )
 
     # (1) pre-flight: build + validate the tolerance set (PURE; D14/G17). Open NOTHING.
-    supplied = params.get("tolerances")
+    # unbound base slot. A lying ``get`` returning None here swaps the caller's
+    # EXPLICIT tolerance budget for the auto-derived default one, silently.
+    supplied = dict.get(params, "tolerances")
     if supplied is None:
         to_validate = _tc._default_tolerances(system)
         if include_mechanical:
             # OPT-IN conservative mechanical set (D17): a per-element surface tilt /
-            # decenter / irregularity on each glass-bearing interior surface.
-            to_validate = list(to_validate) + _default_mechanical(system)
+            # decenter / irregularity on each glass-bearing interior surface — EXCEPT
+            # where the surface-RANGE operands have no legal surface2. That
+            # element is under-toleranced, so say so rather than let a clean envelope
+            # imply the whole mechanical budget was authored.
+            mech, mech_skipped = _default_mechanical(system)
+            to_validate = list(to_validate) + mech
+            if mech_skipped:
+                warnings.append(
+                    "mechanical_default_partial: glass surface(s) "
+                    + ", ".join(str(s) for s in mech_skipped)
+                    + " carry only a TIRR irregularity tolerance — no TETX tilt and no "
+                    "TEDX decenter. Those are surface-RANGE operands needing "
+                    "surface < surface2 < image, and the next interface here IS the "
+                    "image surface, so no legal range exists. That element's tilt and "
+                    "decenter sensitivity is UNBOUNDED in this run; author an explicit "
+                    "'tolerances' list if it matters."
+                )
         if not to_validate:
             return _ac.error_envelope(
                 "tolerance", "tolerancing_param",
@@ -508,7 +650,8 @@ def tolerance(session, params):
         except Exception as exc:  # noqa: BLE001 — a TDE teardown throw must not mask body
             tde_cleared = False
             warnings.append(
-                f"the Tolerance Data Editor could not be cleared after the run ({exc!r}); "
+                f"the Tolerance Data Editor could not be cleared after the run "
+                f"({safe_exc(exc, repr_form=True)}); "
                 "it may carry leftover scratch rows — reload your .zmx before re-authoring"
             )
         # (7/D15) reap the engine's .ZTD side files on EVERY path; reap the report only
@@ -867,6 +1010,15 @@ def _grin_coverage_warning(system, authored):
     list of ANY source, OR the inventory call itself throwing, -> the INDETERMINATE
     string, NEVER a silent None. Clean (no grin items, no fault) -> None. Uncovered
     surfaces -> a string NAMING each uncovered surface.
+
+    ROUND-13 -- THE OUTER NET NOW FAILS CLOSED TOO. It was ``except Exception: return
+    None``, and ``None`` on this channel ALSO means "fully covered" — so a fault in the
+    body (the lazy import, the set comprehension, ``_grin_surface_covered``, the join)
+    produced a silent all-clear on the exact question the function exists to answer, in
+    direct contradiction of the fault posture two paragraphs up. Both siblings already
+    fail closed: ``optimize_run._grin_index_audit_warnings`` refuses ``{}`` on a
+    total-body throw and returns a static ``grin_index_audit_failed``, and
+    ``_grin_surface_covered`` errs toward UNCOVERED. This one now matches them.
     """
     try:
         from . import _optimize_common as _oc  # lazy — circular-import avoidance
@@ -896,18 +1048,48 @@ def _grin_coverage_warning(system, authored):
             "this run — author TPAR(surface=S, param=<Par#>) per optimized coefficient "
             "(Par2=n0 is the base index; Par3..Par8 are the profile coefficients)."
         )
-    except Exception:  # noqa: BLE001 — never raise past the handler (advisory only)
-        return None
+    except Exception:  # noqa: BLE001 — never raise; but INDETERMINATE, never a clean None
+        return _GRIN_COVERAGE_INDETERMINATE
 
 
 def _units_by_family(authored):
-    """Map each authored operand's FAMILY -> its catalog unit (D16/§3.2)."""
-    out = {}
+    """Map each authored FAMILY -> its unit, ONLY where that family AGREES (H-1).
+
+    Returns ``(agreed, ambiguous)``: ``agreed`` is ``{family: unit}`` for the families
+    whose authored operands all carry the SAME catalog unit; ``ambiguous`` is
+    ``{family: [sorted units]}`` for those that do not.
+
+    ROUND-13 H-1 -- A FAMILY DOES NOT DETERMINE A UNIT, AND THE OLD ROLLUP PICKED BY
+    AUTHORING ORDER. It was ``out.setdefault(fam, e["units"])``, so whichever operand of
+    a family happened to be authored FIRST won. Measured against the frozen catalog, SIX
+    families are ambiguous, not one:
+
+      scalar                 lens_units | dimensionless | fringes   (TRAD/TTHI · TABB/
+                                                                     TCON/TCUR/TIND · TFRN)
+      surface_tilt_decenter  degrees | lens_units                   (TETX/Y/Z · TEDR/X/Y)
+      roll                   degrees | lens_units                   (TARR/X/Y · TRLR/X/Y)
+      sag                    degrees | lens_units                   (TSTX/Y · TSDI/R/X/Y)
+      parameter              dimensionless | None                   (TPAI/TPAR · TEDV)
+
+    and BOTH default paths walk straight into it: ``_default_tolerances`` authors TRAD +
+    TTHI per powered surface and TIND + TABB per glass (all family ``scalar``), while
+    ``_default_mechanical`` authors TETX (degrees) beside TEDX (lens_units). So every
+    glass system got a wrong physical unit for a family, silently, with ``ok:true``.
+
+    A wrong unit is worse than an absent one, so an ambiguous family is now OMITTED from
+    ``units_by_family`` and DISCLOSED under ``units_ambiguous_families``. The
+    unambiguous answer was already in the envelope and still is: ``authored_operands[i]
+    ["units"]`` is per-OPERAND and always correct — that is the field a consumer should
+    read, and the rollup is only ever a convenience over it.
+    """
+    seen = {}
     for e in authored:
         fam = e.get("family")
         if fam is not None and e.get("units") is not None:
-            out.setdefault(fam, e["units"])
-    return out
+            seen.setdefault(fam, set()).add(e["units"])
+    agreed = {fam: sorted(units)[0] for fam, units in seen.items() if len(units) == 1}
+    ambiguous = {fam: sorted(units) for fam, units in seen.items() if len(units) > 1}
+    return agreed, ambiguous
 
 
 def _build_envelope(mode, parsed, authored, trials, echoed_trials, full,
@@ -916,6 +1098,7 @@ def _build_envelope(mode, parsed, authored, trials, echoed_trials, full,
                     grin_perturbation=None, grin_coverage_warning=None):
     """Build the SENSITIVITY / MONTE_CARLO result envelope (D8/D9/D11/D12/D13/D16)."""
     recon = recon or {"ran": [], "refused": [], "unaccounted": []}
+    units_agreed, units_ambiguous = _units_by_family(authored)
     base = {
         "ok": True,
         "tool": "tolerance",
@@ -958,7 +1141,13 @@ def _build_envelope(mode, parsed, authored, trials, echoed_trials, full,
         "unaccounted_operands": recon.get("unaccounted", []),
         "operand_errors": parsed.get("operand_errors") or [],
         "known_gaps": known_gaps or [],
-        "units_by_family": _units_by_family(authored),
+        # ROUND-13 H-1: only the families whose authored operands AGREE on a unit.
+        # A family with a mixed unit set is OMITTED here and named below — the old
+        # rollup answered by AUTHORING ORDER, which made every glass default run
+        # report a wrong physical unit for family "scalar". Per-operand units are
+        # in ``authored_operands`` and are always right.
+        "units_by_family": units_agreed,
+        "units_ambiguous_families": units_ambiguous,
         # (GRIN §1.3f) the GRIN Par# perturbation disclosures + the per-op reconcile
         # proof fields. ``grin_perturbation`` + coverage are authored-set-derived (both
         # modes); ``reconciliation_mode`` is None in MC (no per-op table — reconcile is a
@@ -1027,8 +1216,12 @@ TOLERANCE_SPEC = ToolSpec(
         "max_term+min_term (1-based Zernike-term indices, min<=max) — omitting them is "
         "refused (no inert 0/0 range). Deltas are "
         "symmetric (Min=-delta/Max=+delta) or override with min+max. Units are per "
-        "family (tilt=degrees, decenter/thickness/radius=lens_units, "
-        "irregularity=fringes, index=dimensionless) and echoed in units_by_family. omit "
+        "OPERAND (tilt=degrees, decenter/thickness/radius=lens_units, "
+        "irregularity=fringes, index=dimensionless) and echoed per row in "
+        "authored_operands[].units — read THAT. units_by_family is a convenience rollup "
+        "and carries only the families whose authored operands agree on one unit; a "
+        "family that mixes them (e.g. scalar holds TTHI=lens_units beside "
+        "TIND=dimensionless) is omitted and named in units_ambiguous_families. omit "
         "tolerances for a default budget; include_mechanical=true adds a conservative "
         "tilt/decenter/irregularity set. Gotcha: a CB/NSC-required operand "
         "(TUTX/TUDX/TNPS) is a labeled known_gap refusal (run the rest + disclose unless "

@@ -43,7 +43,7 @@ import functools
 import math
 from contextlib import contextmanager
 
-from .._io import safe_float
+from .._io import safe_call, safe_exc, safe_float
 from ..errors import ScaleError
 from ..server import ToolSpec
 from . import _config_common as _cc          # safe_current_configuration
@@ -79,6 +79,16 @@ def _never_raise(tool_name):
     ``{ok:false}`` rather than a crash. ``BaseException`` (KeyboardInterrupt /
     SystemExit) is deliberately NOT caught — it propagates AFTER the slot-reaping
     ``finally`` (L22) has run.
+
+    ROUND-13 -- EVERY READ OF ``exc`` INSIDE THE HANDLER IS GUARDED. Copied from
+    ``tolerance_run`` (as the first line says), it inherited that decorator's defect:
+    the render of ``exc`` happens INSIDE the ``except``, so an exception whose
+    ``__repr__`` or ``__str__`` throws makes this never-raise boundary itself raise —
+    the ``scale_*`` family is lost and the dispatch envelope degrades to ``internal``.
+    Note ``{exc!r}`` is NOT the safer spelling people assume: ``__repr__`` can throw
+    exactly as ``__str__`` can. ``getattr(exc, "family", ...)`` is routed for the same
+    reason as its sibling (it suppresses only ``AttributeError``; a hostile subclass is
+    needed to reach it, unlike the other two).
     """
     def _decorate(handler):
         @functools.wraps(handler)
@@ -86,12 +96,16 @@ def _never_raise(tool_name):
             try:
                 return handler(session, params)
             except ScaleError as exc:
-                return error_envelope(tool_name, getattr(exc, "family", "scale"),
-                                      str(exc))
+                return error_envelope(
+                    tool_name,
+                    safe_call(lambda: getattr(exc, "family", "scale"), "scale"),
+                    safe_exc(exc),
+                )
             except Exception as exc:  # noqa: BLE001 — net any engine throw -> scale_write
                 return error_envelope(
                     tool_name, _ENGINE_ERROR_FAMILY,
-                    f"{tool_name} hit an unexpected engine error ({exc!r}); refusing "
+                    f"{tool_name} hit an unexpected engine error "
+                    f"({safe_exc(exc, repr_form=True)}); refusing "
                     "rather than claiming an unverified scale",
                 )
         return _wrapped
