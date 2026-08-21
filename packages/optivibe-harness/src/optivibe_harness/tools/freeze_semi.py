@@ -444,7 +444,12 @@ def verify_zoom(session, params):
     for row in range(1, n_operands + 1):
         try:
             op = mce.GetOperandAt(row)
-            if str(op.TypeName) != "THIC":
+            # ROUND-12 (H-3 triage, owned file). BASE SLOT on the row-type token: a bare
+            # ``str(...)`` lets a forging ``TypeName`` decide which MCE rows this scan
+            # even looks at — a real THIC forging something else drops out of the zoom
+            # audit entirely (the user's catch goes silent), and a non-THIC forging THIC
+            # gets flagged ``constant_but_variable``.
+            if _oc._base_token(op.TypeName) != "THIC":
                 continue
         except Exception:  # noqa: BLE001
             continue
@@ -462,8 +467,19 @@ def verify_zoom(session, params):
             except Exception:  # noqa: BLE001
                 values.append(None)
                 continue
-            if variable_member is not None and _oc._cell_is_variable(cell, variable_member):
-                is_variable = True
+            # ROUND-12 F-5. THIS GUARD IS ITS OWN `try`, NOT AN EXTENSION OF THE ONE
+            # ABOVE, and the reason is a bug the obvious re-indent would have shipped:
+            # the handler above does `values.append(None)`, so folding this line into it
+            # would append a SECOND entry for a config whose value read had already
+            # succeeded, silently desynchronising `per_config_values` from the config
+            # index. `verify_zoom`'s docstring says "NEVER mutates, NEVER raises"; this
+            # call was the only unguarded thing between it and that promise.
+            try:
+                if variable_member is not None and _oc._cell_is_variable(
+                        cell, variable_member):
+                    is_variable = True
+            except Exception:  # noqa: BLE001 — read-only scan: an unreadable solve is not Variable
+                pass
         finite = [v for v in values if isinstance(v, (int, float)) and math.isfinite(v)]
         constant = (len(finite) >= 2 and (max(finite) - min(finite)) < 1e-6)
         flagged = bool(is_variable and constant)

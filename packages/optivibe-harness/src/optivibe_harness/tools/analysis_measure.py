@@ -20,7 +20,7 @@ wavefront, axial color) WITHOUT hand-driving operand rows or a thickness solve:
   the 0.4861/0.6563 µm F/C lines when BOTH are present, otherwise the system's own
   shortest and longest wavelengths. Never by file order (AXCL sign-flips on swap).
   The pair actually used is named in ``wavelengths_used`` / ``wavelength_basis``. The
-  121-pt ``FocalShiftDiagram`` curve returns only on ``full=True``; when present,
+  ``FocalShiftDiagram`` curve returns only on ``full=True``; when present,
   scalar<->curve agreement is asserted AT THE RESOLVED WAVELENGTHS (else
   ``axial_color_inconsistent``).
 
@@ -39,7 +39,7 @@ scan).
 import functools
 import math
 
-from .._io import safe_float
+from .._io import safe_exc, safe_float
 from ..errors import ToolParamError
 from ..server import ToolSpec
 from . import _analysis_common as _ac
@@ -330,6 +330,15 @@ def _never_raise(tool_name):
     ``analysis_empty`` envelope so a disconnected engine mid-read becomes
     ``{ok:false}`` rather than a crash. ``BaseException`` (KeyboardInterrupt /
     SystemExit) is deliberately NOT caught — those propagate.
+
+    ROUND-13 -- BOTH renders go through ``_io.safe_exc``. This decorator IS the
+    never-raise boundary, and the f-string it used to build interpolated ``exc``
+    INSIDE the ``except``: an exception whose ``__str__`` throws made the HANDLER
+    itself raise. MEASURED — it ESCAPED with ``RuntimeError``, the typed
+    ``measurement_param`` / ``analysis_empty`` family was LOST, and the dispatch
+    envelope degraded to the generic ``internal`` family. The bare ``str(exc)`` on
+    the ``ToolParamError`` arm one line up is the SAME defect wearing a different
+    spelling, so both are routed — not only the one the f-string made obvious.
     """
     def _decorate(handler):
         @functools.wraps(handler)
@@ -337,11 +346,11 @@ def _never_raise(tool_name):
             try:
                 return handler(session, params)
             except ToolParamError as exc:
-                return _ac.error_envelope(tool_name, "measurement_param", str(exc))
+                return _ac.error_envelope(tool_name, "measurement_param", safe_exc(exc))
             except Exception as exc:  # noqa: BLE001 — D10: net any engine throw
                 return _ac.error_envelope(
                     tool_name, _ENGINE_ERROR_FAMILY,
-                    f"{tool_name} hit an unexpected engine error: {exc}",
+                    f"{tool_name} hit an unexpected engine error: {safe_exc(exc)}",
                 )
         return _wrapped
     return _decorate
@@ -366,8 +375,20 @@ _BASIS_BAND = "band_extremes"      # otherwise -> the system's own shortest/long
 # CLAMPS at ``um <= pts[0][0]`` / ``um >= pts[-1][0]``, so any slack would let a
 # wavelength just outside the grid pass the guard and then be clamped — the guard would
 # accept a set the executor cannot honour. Exact bounds keep the two acceptance sets
-# identical. The cost is only that float noise can skip a check; skipping a check is
-# safe, comparing a clamped value as if it were a reading is not.
+# identical ON AN ASCENDING GRID. The cost is only that float noise can skip a check;
+# skipping a check is safe, comparing a clamped value as if it were a reading is not.
+#
+# ROUND-13 NARROWS THAT CLAIM to the qualifier now on it. The guard computes its bounds
+# as ``min(p[0] for p in points)`` / ``max(...)`` while ``shift_at`` clamps at
+# ``pts[0][0]`` / ``pts[-1][0]`` — the FIRST and LAST points. Those coincide only when
+# the X grid ascends. On a non-ascending grid the guard's interval is the full extent
+# while ``shift_at``'s is the endpoint pair, so a wavelength inside the extent but
+# outside the endpoints passes the guard and is then CLAMPED — exactly the outcome the
+# note says exact bounds prevent. Nothing here sorts or asserts monotonicity; the
+# "(monotone-in-wavelength) X grid" in ``shift_at``'s own comment is an ASSUMPTION about
+# the engine's series, not a checked property. Left as-is deliberately: no non-ascending
+# FocalShiftDiagram series has been observed, and imposing a sort would silently
+# reinterpret a grid we have not measured. The claim is corrected, not the code.
 
 
 # --------------------------------------------------------------------------- #
@@ -464,11 +485,21 @@ def _resolve_wave(system, params):
 
     A bool / negative / 0 / non-integral / out-of-range -> ToolParamError (-> measurement_param
     via _never_raise). An integral float (2.0) is accepted (JSON round-trip).
-    Validated ONCE outside the sweep (the wavelength set is config-independent).
+    Validated ONCE outside the sweep — which is sound for the INDEX because the
+    wavelength COUNT is config-independent (there is no MCE operand that adds or removes
+    a wavelength slot). ROUND-13 NARROWS the old claim "the wavelength set is
+    config-independent": the count is, the VALUES are NOT — ``WAVE`` is a per-config MCE
+    operand (``_mce_catalog._WAVELENGTH``), so a slot's µm value can differ per
+    configuration. Anything reading the VALUE must read it per config; see
+    ``_read_wavelength_um``.
+
+    ROUND-8 -- unbound ``dict`` slots, see ``_bool_param``. A lying ``__contains__``
+    silently reads wave 1 for an explicit ``wave=3``, i.e. reports a measurement at a
+    DIFFERENT wavelength than the caller asked for. Nil reachability today.
     """
-    if "wave" not in params:
+    if not (isinstance(params, dict) and dict.__contains__(params, "wave")):
         return 1
-    w = params["wave"]
+    w = dict.__getitem__(params, "wave")
     if isinstance(w, bool):
         raise ToolParamError(f"wave must be an integer >= 1, not a bool ({w!r})")
     if isinstance(w, float):
@@ -550,10 +581,29 @@ def _bfsd_slots(surf, code, minr, maxr):
 # Param helpers.
 # --------------------------------------------------------------------------- #
 def _bool_param(params, key, default):
-    """Pull an optional bool param; reject a non-bool (loud, never coerced)."""
-    if key not in params:
+    """Pull an optional bool param; reject a non-bool (loud, never coerced).
+
+    ROUND-8 -- MEMBERSHIP AND LOOKUP GO THROUGH THE UNBOUND ``dict``
+    SLOTS. Round 7 applied this rule to ``optimize_run``'s copy of this door and left
+    the ``optimize_merit`` / ``analysis_measure`` / ``tolerance_run`` copies on ``key
+    not in params``, so four copies that used to AGREE started disagreeing. On a ``dict``
+    SUBCLASS with a lying ``__contains__`` the door silently substitutes the default;
+    measured in the ``optimize_run`` twin, ``require_free_stop=False`` came back
+    **True**. The rule ``_optimize_common.range_headers_supplied`` documents (:2772) is
+    now at every copy of the door.
+
+    REACHABILITY IS NIL TODAY AND THAT IS STATED, NOT ASSUMED: ``params`` arrives from
+    JSON deserialization (and ``server.Dispatcher.call_tool`` coerces any non-``dict``
+    to ``{}`` at :517), so a ``dict`` subclass is structurally impossible on the shipped
+    path. Fixed for the same reason rounds 2 and 7 fixed their own nil-reachability
+    siblings. The ``isinstance`` conjunct matches ``optimize_run._bool_param`` and makes
+    the unbound calls type-safe; a non-``dict`` mapping now reads as "not supplied",
+    which is what the ``isinstance(params, dict)`` guards on this module's ``config``
+    reads already assume.
+    """
+    if not (isinstance(params, dict) and dict.__contains__(params, key)):
         return default
-    value = params[key]
+    value = dict.__getitem__(params, key)
     if not isinstance(value, bool):
         raise ToolParamError(
             f"{key!r} must be a boolean, got {type(value).__name__} {value!r}"
@@ -646,7 +696,7 @@ def get_first_order(session, params):
     config into a ``per_config`` vector with a coverage reconcile + ``config_differs``
     (the per-config EFL headline). A bad ``config`` -> ``measurement_param``.
     """
-    config = params.get("config") if isinstance(params, dict) else None
+    config = dict.get(params, "config") if isinstance(params, dict) else None
 
     def _grade(sess):
         system = sess.system
@@ -659,7 +709,9 @@ def get_first_order(session, params):
                 raw, suspicious = _mc.read_operand_slots(system, code, _wave_slot(wave))
             except ToolParamError as exc:
                 # An unresolvable operand is an EXPECTED class -> flag, keep going.
-                flags.append(f"{code}: {exc}")
+                # ROUND-13 -- guarded render: a raising ``__str__`` here would
+                # abort the whole first-order sweep from inside its own handler.
+                flags.append(f"{code}: {safe_exc(exc)}")
                 continue
             entry = _reading(code, raw, suspicious, units=units, name=name)
             readings.append(entry)
@@ -836,7 +888,7 @@ def analyze_strehl(session, params):
     ``with_best_focus`` scan nests INSIDE the driver's ``with_configuration`` wrap
     (config OUTER, focus INNER — Q11). A bad ``config`` -> ``measurement_param``.
     """
-    config = params.get("config") if isinstance(params, dict) else None
+    config = dict.get(params, "config") if isinstance(params, dict) else None
     do_best = _bool_param(params, "best_focus", True)
 
     def _grade(sess):
@@ -956,13 +1008,17 @@ def analyze_wavefront(session, params):
     wrap (config OUTER, focus INNER — Q11). A bad ``config``/``samp`` ->
     ``measurement_param``.
     """
-    config = params.get("config") if isinstance(params, dict) else None
+    config = dict.get(params, "config") if isinstance(params, dict) else None
     do_best = _bool_param(params, "best_focus", True)
 
     # Density guard (locked D5): the SAME valid_density predicate the executor uses.
     # Validated ONCE here (outside the sweep) so a bad samp is a single param error,
     # not N per-config errors. A bad samp raises ToolParamError -> measurement_param.
-    samp = params.get("samp", _DEFAULT_SAMP)
+    # ROUND-8 -- unbound ``dict.get``, and the ``isinstance`` conjunct the ``config``
+    # read one line up ALREADY assumed: without it this line raised on the very
+    # non-``dict`` params that guard exists to survive, so the guard was inert.
+    samp = dict.get(params, "samp", _DEFAULT_SAMP) if isinstance(params, dict) \
+        else _DEFAULT_SAMP
     if not _mc.valid_density(samp):
         return _ac.error_envelope(
             "analyze_wavefront", "measurement_param",
@@ -1332,11 +1388,24 @@ def _focal_shift_curve(system):
     except Exception:  # noqa: BLE001 — empty/odd curve -> degrade (no curve)
         return None, None
     # Flatten the [n, 1] Y into a shift list; pair with X.
+    # ROUND-13 -- A LENGTH MISMATCH IS AN "ODD RESULT", NOT SOMETHING TO TRUNCATE.
+    # ``range(min(len(xs), len(ys)))`` silently DISCARDED the surplus: 3 X against 2 Y
+    # produced a plausible 2-point curve indistinguishable from a real one, and every
+    # consumer (the domain, the secondary-spectrum max, ``shift_at``) then reported a
+    # number derived from a curve the engine never returned. This function's own
+    # contract promises ``(None, None)`` on ANY empty/odd result — so refuse.
+    if len(xs) != len(ys):
+        return None, None
     points = []
-    for i in range(min(len(xs), len(ys))):
+    for i in range(len(xs)):
         yi = ys[i]
         shift = yi[0] if isinstance(yi, (list, tuple)) and yi else yi
         points.append([safe_float(xs[i]), safe_float(shift)])
+    # NOT REACHABLE through today's reader: ``_marshal_array`` raises
+    # ``analysis_empty`` on a length-0 array and that raise is absorbed by the
+    # ``except`` above, so ``xs`` is non-empty by the time control arrives here.
+    # Kept as a belt — it costs one branch and the invariant it protects is
+    # load-bearing (``shift_at`` indexes ``pts[0]`` / ``pts[-1]`` unguarded).
     if not points:
         return None, None
 
@@ -1369,7 +1438,7 @@ def _single_config_selector(session, params, tool_name):
     to read at (the active config when ``None``), or RAISES ``ToolParamError`` (the tool's
     never-raise wrapper nets it to the tool's param family).
     """
-    config = params.get("config") if isinstance(params, dict) else None
+    config = dict.get(params, "config") if isinstance(params, dict) else None
     return _cfg.resolve_single_config_selector(session.system, config, tool_name)
 
 
@@ -1388,8 +1457,11 @@ def analyze_axial_color(session, params):
     ``degenerate_band`` (both would return a fabricated 0.0 reading as perfect colour
     correction), ``wavelengths_unreadable``, ``no_wavelengths``.
 
-    ``full=True`` returns the 121-pt FocalShiftDiagram curve and asserts scalar<->curve
-    agreement AT THE RESOLVED WAVELENGTHS (else ``axial_color_inconsistent``); the
+    ``full=True`` returns the FocalShiftDiagram curve and asserts scalar<->curve
+    agreement AT THE RESOLVED WAVELENGTHS (else ``axial_color_inconsistent``). ROUND-13:
+    the point COUNT is whatever the engine's series returns — nothing here requests,
+    pads or validates 121, so the former "121-pt" claim was a transcribed default, not
+    a measurement, and a caller must read ``len(curve.points)``; the
     curve's Y is referenced to the analysis's own zero and its domain is echoed as
     ``curve.domain_um``. ``secondary_spectrum_mm`` is a derived max over THAT domain, not
     over ``wavelengths_used``. Never raises past the handler.
@@ -1510,6 +1582,13 @@ def _analyze_axial_color_at(session, params):
                         f_minus_c_shift_mm=safe_float(raw),
                         curve_f_minus_c_mm=safe_float(curve_fc),
                         wave_slots_used={"wave1_F": f_idx, "wave2_C": c_idx},
+                        # ROUND-13 -- CARRY THE FLAGS. This refusal envelope is REBUILT
+                        # rather than derived from ``result``, and it carried the wave
+                        # disclosure while DROPPING the computed ``flags`` — so the
+                        # coverage flags and, worst, ``axial_color_curve_degraded``
+                        # vanished on exactly the envelope whose reader most needs to
+                        # know the curve was suspect before trusting the disagreement.
+                        flags=flags,
                         **_wave_disclosure(waves),
                     )
             # Secondary spectrum: the curve's max |shift| over the CURVE's domain
@@ -1571,14 +1650,23 @@ def _resolve_fit_zone(params, row):
     user-supplied pair is coerced to finite non-bool numbers ``>= 0`` and REQUIRES
     ``min_radius < max_radius`` (a malformed zone -> ``ToolParamError`` ->
     ``measurement_param``, reject loud never clamp). Returns the ``fit_zone`` dict
-    ``{min_radius, max_radius, units, source}`` (ALWAYS echoed — interpretability).
+    ``{min_radius, max_radius, units, source}``. ROUND-13: it is echoed on the SUCCESS
+    envelope only — an ``error_envelope`` return (including the ones this resolver's own
+    ``ToolParamError`` produces, where the zone is exactly what the caller wants to see)
+    carries no ``fit_zone`` key, so the former "ALWAYS echoed" claim was false in the
+    case that matters most.
     A bad semi falls back to the engine 0/0 full aperture with the source flagged.
     """
-    have_min = "min_radius" in params
-    have_max = "max_radius" in params
+    # ROUND-8 -- unbound ``dict`` slots (see ``_bool_param``). ``have_min``/``have_max``
+    # select the whole user-zone BRANCH, so a lying ``__contains__`` silently reverts an
+    # explicit fit zone to the full-aperture default and the ``fit_zone.source`` echo then
+    # reports that default as if it were the caller's. Nil reachability today.
+    _is_map = isinstance(params, dict)
+    have_min = _is_map and dict.__contains__(params, "min_radius")
+    have_max = _is_map and dict.__contains__(params, "max_radius")
     if have_min or have_max:
-        r0 = params.get("min_radius", 0.0)
-        r1 = params.get("max_radius", None)
+        r0 = dict.get(params, "min_radius", 0.0)
+        r1 = dict.get(params, "max_radius", None)
         for label, v in (("min_radius", r0), ("max_radius", r1)):
             if v is None:
                 continue
@@ -1662,12 +1750,15 @@ def analyze_aspheric_profile(session, params):
     ``analysis_empty`` (fail-CLOSED, BFSD never read). RMS departure is NOT a native
     BFSD quantity (``rms_departure_available:false``; not fabricated). Never raises.
     """
-    if "surface" not in params:
+    # ROUND-8 -- unbound ``dict`` slots + the ``isinstance`` gate its own twin
+    # ``analyze_grin_profile`` already carries (an intra-module: the two profile
+    # doors disagreed on the non-``dict`` case, one refusing cleanly and one raising).
+    if not isinstance(params, dict) or not dict.__contains__(params, "surface"):
         return _ac.error_envelope(
             "analyze_aspheric_profile", "measurement_param",
             "the 'surface' param (the EvenAspheric surface number) is required",
         )
-    surface = _coerce_profile_surface(params["surface"])
+    surface = _coerce_profile_surface(dict.__getitem__(params, "surface"))
 
     system = session.system
     # Surface-bounds check BEFORE GetSurfaceAt (fix): an out-of-range surface
@@ -1682,15 +1773,36 @@ def analyze_aspheric_profile(session, params):
             f"surface {surface} out of range for an aspheric-profile read; valid "
             f"1..{n - 1} (OBJECT 0 and beyond IMAGE are refused; N={n})"
         )
-    # First engine-touch: resolve the row + the POSITIVE asphere gate (§1.4). A Type
-    # throw raises AsphereWriteError -> netted to analysis_empty by _never_raise
-    # (fail-CLOSED — BFSD is NEVER read on an unclassifiable surface).
+    # Resolve the row + the POSITIVE asphere gate (§1.4). A Type throw raises
+    # AsphereWriteError -> netted to analysis_empty by _never_raise (fail-CLOSED —
+    # BFSD is NEVER read on an unclassifiable surface).
+    # ROUND-13: this was labelled "First engine-touch" — it is not. The bounds check
+    # above reads ``system.LDE.NumberOfSurfaces``, and that read is what actually
+    # touches the engine first (and what nets to ``analysis_empty`` if the channel is
+    # already dead).
     row = system.LDE.GetSurfaceAt(surface)
     if not _asph.is_even_asphere(row):
+        # ROUND-13 -- FAIL CLOSED ON A SECOND Type THROW, matching the
+        # ``_grin_gate_refusal`` twin, whose docstring names this exact outcome as what
+        # it refuses: "never a ``measurement_param`` carrying a fabricated ``"?"`` type".
+        #
+        # The old ``noqa`` described the WRONG BRANCH. This is the already-NEGATIVE gate
+        # path: ``is_even_asphere`` RAISES on a Type throw (``_asphere_cells``), so
+        # arriving here means its read SUCCEEDED and returned False. A second read
+        # throwing is therefore a degraded channel between two adjacent statements — not
+        # a can't-happen — and shipping ``surface_type="?"`` inside a
+        # ``measurement_param`` envelope asserts "this surface is not an even asphere"
+        # when the only true statement is "this surface could not be classified".
         try:
             type_name = str(row.Type)
-        except Exception:  # noqa: BLE001 — already-positive gate path won't hit this
-            type_name = "?"
+        except Exception:  # noqa: BLE001 — unclassifiable row -> analysis_empty
+            return _ac.error_envelope(
+                "analyze_aspheric_profile", "analysis_empty",
+                f"surface {surface} could not be classified (the Type read threw after "
+                "the asphere gate had already read it); refusing to report an "
+                "aspheric-profile verdict on an unclassifiable row (fail-closed)",
+                surface=surface,
+            )
         return _ac.error_envelope(
             "analyze_aspheric_profile", "measurement_param",
             f"surface {surface} is not an even asphere (Type={type_name!r}); BFSD "
@@ -1764,7 +1876,7 @@ def analyze_distortion(session, params):
     error). Grades ``distortion < X%`` directly (compare |max_distortion_percent|). Cheap
     operand reads -> config=None|int|"all" via evaluate_over_configs. Never raises.
     """
-    config = params.get("config") if isinstance(params, dict) else None
+    config = dict.get(params, "config") if isinstance(params, dict) else None
     # wave is config-independent — resolve ONCE outside the sweep (a bad wave is ONE error).
     wave = _resolve_wave(session.system, params)
 
@@ -1834,12 +1946,13 @@ def analyze_relative_illumination(session, params):
     samp (default 0 = engine default) is OPTIONAL (RELI is 0-tolerant — NOT the silent-0
     trap). Cheap -> config=None|int|"all" via evaluate_over_configs. Never raises.
     """
-    config = params.get("config") if isinstance(params, dict) else None
+    config = dict.get(params, "config") if isinstance(params, dict) else None
     wave = _resolve_wave(session.system, params)
 
     # samp guard (config-independent) — validate ONCE outside the sweep. Default 0 = engine
     # default; RELI is 0-tolerant so 0 is VALID (NOT valid_density which rejects 0).
-    samp = params.get("samp", 0)
+    # ROUND-8 -- unbound ``dict.get`` + the conjunct the ``config`` read assumed.
+    samp = dict.get(params, "samp", 0) if isinstance(params, dict) else 0
     if not _valid_reli_samp(samp):
         return _ac.error_envelope(
             "analyze_relative_illumination", "measurement_param",
@@ -1910,7 +2023,7 @@ def analyze_lateral_color(session, params):
     ``native_lacl_wavelengths_um`` — it always reads the engine's defined min/max band).
     config (None|int|'all') selects the configuration. Never raises.
     """
-    config = params.get("config") if isinstance(params, dict) else None
+    config = dict.get(params, "config") if isinstance(params, dict) else None
 
     def _grade(sess):
         system = sess.system
@@ -2052,6 +2165,16 @@ def _grin_gate_refusal(system, surface, faults):
       ``measurement_param`` carrying a fabricated ``"?"`` type). NEVER raises.
     """
     # 1. A fault entry for THIS surface (the interior GRIN walk found it unreadable).
+    #
+    # ROUND-13 -- THIS ``==`` IS SAFE ONLY BECAUSE ITS PRODUCER EMITS PYTHON ints.
+    # ``System.Int32(2) == 2`` is **False** under pythonnet (measured this round;
+    # ``System.Int64`` too, while ``System.Double(2.0) == 2`` is True). Worse, the hash
+    # AGREES while the equality does not, so ``Int32(2) in [2]`` is False and
+    # ``{2: "x"}[Int32(2)]`` is a KeyError. ``grin_surfaces()`` fills ``fault["surface"]``
+    # from ``range()``, so both sides are Python ints today; the day a fault row carries
+    # a raw .NET surface index straight off the engine, this loop silently finds NO
+    # match and the function falls through to branch 3 — reporting an unclassifiable row
+    # as an honest non-GRIN surface. See ``doc/zemax-api/gotchas.md``.
     for fault in faults:
         if fault.get("surface") == surface:
             reason = fault.get("reason")
@@ -2087,9 +2210,14 @@ def _grin_gate_refusal(system, surface, faults):
         row = system.LDE.GetSurfaceAt(surface)
         type_name = str(row.Type)
     except Exception:  # noqa: BLE001 — a Type-throw here -> fail-closed analysis_empty
+        # ROUND-13 -- the message no longer NAMES the Type read as the culprit. Both
+        # ``GetSurfaceAt`` and ``row.Type`` sit inside this one ``try``, so a row-fetch
+        # throw produced the identical "Type read threw" sentence — a specific, false
+        # attribution. The verdict is the same either way; the diagnosis was not.
         return _ac.error_envelope(
             "analyze_grin_profile", "analysis_empty",
-            f"surface {surface} Type read threw; it cannot be classified (fail-closed)",
+            f"surface {surface} could not be read (the row fetch or the Type read "
+            "threw); it cannot be classified (fail-closed)",
             surface=surface,
         )
     return _ac.error_envelope(
@@ -2107,8 +2235,17 @@ def _read_wavelength_um(system, wave):
     ``None`` on ANY throw. Best-effort disclosure only (the wave INDEX is always echoed
     regardless); a ``None`` here ADDS the ``wavelength_value_unreadable`` flag in the
     envelope ("the interpreted wavelength VALUE was unreadable" is a distinct
-    honesty statement from "the reading is wavelength-blind"). Resolved ONCE outside the
-    config sweep (the wavelength set is config-independent).
+    honesty statement from "the reading is wavelength-blind").
+
+    ROUND-13 -- READ PER CONFIG, and the old claim it replaces was FALSE. This was
+    resolved ONCE outside the config sweep "because the wavelength set is
+    config-independent"; ``WAVE`` is a member of the harness's OWN per-config MCE
+    operand set (``_mce_catalog._WAVELENGTH``, alongside WLWT/PRWV/CWGT), so a slot's µm
+    value is exactly the kind of thing a configuration changes. Captured before
+    ``evaluate_over_configs`` switched, every entry of an ``analyze_grin_profile(config=3)``
+    or ``config="all"`` result echoed ``wavelength_interpreted_at`` from whichever
+    configuration happened to be ACTIVE at call time — a disclosure field reporting a
+    different configuration's wavelength than the measurement beside it.
     """
     try:
         return float(system.SystemData.Wavelengths.GetWavelength(int(wave)).Wavelength)
@@ -2245,11 +2382,14 @@ def analyze_grin_profile(session, params):
     (``grin_wavelength_blind``); ``axial_monotonic`` is deferred (read-only). ``config``
     (None|int|"all") sweeps configurations. Never raises past the handler.
     """
-    if not isinstance(params, dict) or "surface" not in params:
+    # ROUND-8 -- unbound ``dict`` slots (see ``_bool_param``); the ``isinstance`` gate
+    # was already here.
+    if not isinstance(params, dict) or not dict.__contains__(params, "surface"):
         return _ac.error_envelope(
             "analyze_grin_profile", "measurement_param",
             "the 'surface' param (the GRIN surface number) is required")
-    surface = _coerce_profile_surface(params["surface"])   # existing asphere coercion
+    surface = _coerce_profile_surface(
+        dict.__getitem__(params, "surface"))              # existing asphere coercion
     system = session.system
     n = int(system.LDE.NumberOfSurfaces)
     if not (1 <= surface <= n - 1):
@@ -2264,11 +2404,15 @@ def analyze_grin_profile(session, params):
     _surf, info, is_axial = match
 
     wave = _resolve_wave(system, params)                   # ONCE, outside the sweep
-    wl_um = _read_wavelength_um(system, wave)              # throw-guarded um, ONCE
-    config = params.get("config")
+    config = dict.get(params, "config")  # (params proven dict above)
 
     def _grade(sess):
         s = _grin_idx.index_summary(sess.system, surface, info, is_axial, wave)
+        # ROUND-13 -- INSIDE the sweep. The wave INDEX is config-independent and stays
+        # resolved once above; the wavelength VALUE is not (``WAVE`` is a per-config MCE
+        # operand), so reading it here makes ``wavelength_interpreted_at`` describe the
+        # configuration this entry was actually measured at.
+        wl_um = _read_wavelength_um(sess.system, wave)     # throw-guarded um, per config
         return _build_grin_envelope(s, surface, is_axial, wave, wl_um)
 
     return _cfg.evaluate_over_configs(session, config, _grade)

@@ -67,6 +67,100 @@ def safe_repr(obj, limit: int = 2000) -> str:
     return text
 
 
+def safe_exc(exc, repr_form: bool = False, limit: int = 2000) -> str:
+    """Render an ALREADY-CAUGHT exception to text without ever raising.
+
+    An error handler that interpolates its own ``exc`` into an f-string RE-ENTERS
+    user code: ``str(exc)`` / ``repr(exc)`` run the exception's OWN ``__str__`` /
+    ``__repr__``. A bridged .NET type with a broken ``ToString()`` — or a plain
+    Python exception with a raising ``__str__`` — therefore makes the HANDLER raise.
+    MEASURED on this package's two ``_never_raise`` decorators
+    (``analysis_measure``/``tolerance_run``): both ESCAPED with ``RuntimeError``, the
+    tool's typed ``measurement_param`` / ``tolerancing_run`` family was lost, and the
+    dispatch envelope degraded to the generic ``internal`` family.
+
+    ``repr_form=True`` renders ``repr(exc)`` (for the ``{exc!r}`` call sites); the
+    default renders ``str(exc)``. Either way the OTHER renderer is tried as a
+    fallback, then the bare type name, then a constant — every path returns a ``str``.
+
+    THE GUARDS CATCH ``BaseException``, not ``Exception``, for the reason
+    ``server._safe_error_text`` already records: a ``__str__`` that raises
+    ``KeyboardInterrupt`` would otherwise walk straight out of a never-raise
+    envelope. This function does no work anyone would want to interrupt — it renders
+    a string for an exception that has ALREADY been caught.
+
+    The volatile ``" at 0x<hex>"`` address is scrubbed and the result truncated,
+    exactly as ``safe_repr`` does, so an engine-object repr embedded in an error
+    message stays deterministic and bounded.
+    """
+    text = None
+    for render in ((repr, str) if repr_form else (str, repr)):
+        try:
+            rendered = render(exc)
+        except BaseException:  # noqa: BLE001 — the exception's own renderer raised
+            continue
+        if isinstance(rendered, str):
+            text = rendered
+            break
+    if text is None:
+        try:
+            text = "<unprintable " + type(exc).__name__ + ">"
+        except BaseException:  # noqa: BLE001 — even the type name is hostile
+            return "<unprintable exception>"
+    try:
+        text = _ADDR_RE.sub("", text)
+        if len(text) > limit:
+            text = text[:limit] + "...[truncated %d chars]" % (len(text) - limit)
+        return text
+    except BaseException:  # noqa: BLE001 — a hostile ``str`` SUBCLASS reached here
+        return "<unprintable exception>"
+
+
+def safe_call(func, default=None):
+    """Call ``func()`` and return its result; on ANY ``Exception`` return ``default``.
+
+    The guarded-read idiom this module's docstring names, as a callable — for the
+    sites where a read a docstring calls "non-fatal" sits OUTSIDE every ``try`` and
+    is therefore fatal (H-3: the post-Close MFE re-read in ``optimize_run``).
+
+    Pass a ``lambda`` when the ATTRIBUTE LOOKUP can throw too — a bridged .NET handle
+    after teardown fails on the attribute, not only on the call. ``safe_call(lambda:
+    obj.Member())`` guards both; ``safe_call(obj.Member)`` guards only the call,
+    because the attribute is resolved BEFORE this function is entered.
+
+    ``BaseException`` is deliberately NOT caught — a ``KeyboardInterrupt`` /
+    ``SystemExit`` still propagates. This differs from ``safe_exc`` above: that one
+    is rendering an exception already caught, this one is performing real work.
+    """
+    try:
+        return func()
+    except Exception:  # noqa: BLE001 — the guarded read; the caller supplies the default
+        return default
+
+
+def is_finite_number(value) -> bool:
+    """True iff ``value`` is a real number that converts to a FINITE ``float``.
+
+    ``math.isfinite`` is NOT a total predicate: on an ``int`` too large for a
+    ``float`` it RAISES ``OverflowError`` rather than returning ``False`` — and so
+    does ``float(value)``. A JSON payload reaches that state trivially: ``1e400``
+    deserializes to ``inf``, and a bare 400-digit integer literal deserializes to an
+    ``int`` no ``float`` can hold. A param door that PROMISES a typed refusal must
+    therefore ask the finiteness question WITHOUT converting (H-2, measured:
+    ``_require_pos_float(10**400)`` raised ``OverflowError`` past a door whose
+    docstring promises ``OptimizeError(family="optimize_param")``).
+
+    ``bool`` is not a number here — the param doors reject it separately, with their
+    own message, before reaching this predicate.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # noqa: BLE001 — an int too large for a float is not finite
+        return False
+
+
 def safe_float(value):
     """Return ``value`` unchanged if it is a finite number, else a string sentinel.
 

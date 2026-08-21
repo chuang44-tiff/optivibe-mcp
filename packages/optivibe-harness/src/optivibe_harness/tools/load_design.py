@@ -28,6 +28,7 @@ import functools
 import math
 import os
 
+from .._io import safe_exc
 from ..server import ToolSpec
 from . import _analysis_common as _ac
 from . import _optimize_common as _oc
@@ -84,7 +85,16 @@ def _coerce_pin_config(value):
 
 
 def _never_raise(tool_name):
-    """Wrap the handler so it NEVER raises past its boundary (the tool-family posture)."""
+    """Wrap the handler so it NEVER raises past its boundary (the tool-family posture).
+
+    ROUND-13 -- the render goes through ``_io.safe_exc``. This decorator IS the
+    never-raise boundary and it interpolated ``exc`` from INSIDE the ``except``: an
+    exception whose ``__str__`` throws made the handler itself raise, losing the typed
+    ``load_failed`` family to the generic ``internal`` one. Measured on the two
+    sibling decorators (``analysis_measure`` / ``tolerance_run``), both of which
+    ESCAPED with ``RuntimeError``; this one is the same shape and is fixed with them
+    rather than left to be found separately.
+    """
     def _decorate(handler):
         @functools.wraps(handler)
         def _wrapped(session, params):
@@ -93,7 +103,7 @@ def _never_raise(tool_name):
             except Exception as exc:  # noqa: BLE001 — net any throw to a typed envelope
                 return _ac.error_envelope(
                     tool_name, "load_failed",
-                    f"{tool_name} hit an unexpected error: {exc}",
+                    f"{tool_name} hit an unexpected error: {safe_exc(exc)}",
                 )
         return _wrapped
     return _decorate
@@ -169,7 +179,8 @@ def _precheck_file(path):
     except (OSError, ValueError) as exc:
         return _ac.error_envelope(
             "load_design", "load_not_found",
-            f"could not stat the design file at {path!r} ({type(exc).__name__}: {exc})",
+            f"could not stat the design file at {path!r} "
+            f"({safe_exc(exc, repr_form=True)})",
         )
     return None
 
@@ -200,7 +211,7 @@ def _apply_pin(system, pin, n_configs, result):
         cfg = _coerce_pin_config(pin)
     except ValueError as exc:
         result["pin_warning"] = (
-            f"pin_config not applied ({exc}); the design loaded fine but the active "
+            f"pin_config not applied ({safe_exc(exc)}); the design loaded fine but the active "
             "configuration was left as loaded"
         )
         return
@@ -215,7 +226,8 @@ def _apply_pin(system, pin, n_configs, result):
     except Exception as exc:  # noqa: BLE001 — a switch throw -> warn, load still ok
         result["pin_warning"] = (
             f"pin_config {cfg} could not be applied (SetCurrentConfiguration threw: "
-            f"{exc!r}); the design loaded fine but the active config was left as loaded"
+            f"{safe_exc(exc, repr_form=True)}); the design loaded fine but the active config "
+            "was left as loaded"
         )
         return
     # READ-BACK-AS-PROOF (the S1 lever's guard): a silent no-op switch reads back wrong.
@@ -224,7 +236,7 @@ def _apply_pin(system, pin, n_configs, result):
     except Exception as exc:  # noqa: BLE001 — unreadable read-back -> unproven
         result["pin_warning"] = (
             f"pin_config {cfg} applied but the active config read-back is unreadable "
-            f"({exc!r}); the pin is unproven"
+            f"({safe_exc(exc, repr_form=True)}); the pin is unproven"
         )
         return
     if active_now != cfg:
@@ -297,7 +309,8 @@ def load_design(session, params):
         except Exception as exc:  # noqa: BLE001 — an unreadable count -> load unproven
             return _ac.error_envelope(
                 "load_design", "load_failed",
-                f"LoadFile returned but the surface count is unreadable ({exc!r}); the "
+                f"LoadFile returned but the surface count is unreadable "
+                f"({safe_exc(exc, repr_form=True)}); the "
                 f"load is unproven for {resolved!r}",
                 replaced_prior_system=True,
             )
@@ -396,7 +409,7 @@ def load_design(session, params):
         return _ac.error_envelope(
             "load_design", "load_failed",
             f"load_design hit an error AFTER LoadFile was issued for {resolved!r} "
-            f"({type(exc).__name__}: {exc}); the prior in-memory design was already "
+            f"({safe_exc(exc, repr_form=True)}); the prior in-memory design was already "
             "replaced",
             replaced_prior_system=True,
         )
