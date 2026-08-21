@@ -824,11 +824,23 @@ def _author_etgt_edge_floors(system, mfe, min_glass):
             # case; the two conventions differ on purpose -- there the value gates a
             # refusal, here it is a read-back comparison whose pre-existing answer is
             # being preserved.
+            # THE INT BRANCH IS THE SAME FIX ONE SHAPE WIDER: an ``int`` SUBCLASS lies
+            # through ``__float__`` exactly as a ``float`` subclass does, so the honest
+            # magnitude comes from ``int.__index__`` and the outer ``float(...)`` gives
+            # the comparison an exact float. ``not isinstance(_X, bool)`` is SYNTACTIC
+            # POLICY, not behaviour: under the wrapped form a bool answers ``1.0`` down
+            # EITHER arm (measured), so the conjunct changes nothing here. It is kept
+            # for parallelism with the bare-form sites and so the bool sentences above
+            # stay true of the code they sit on.
             if not (
                 math.isclose(float.__float__(_t) if isinstance(_t := op.Target, float)
+                             else float(int.__index__(_t)) if isinstance(_t, int)
+                             and not isinstance(_t, bool)
                              else float(_t), target, rel_tol=1e-9, abs_tol=1e-12)
                 and math.isclose(
                     float.__float__(_w) if isinstance(_w := op.Weight, float)
+                    else float(int.__index__(_w)) if isinstance(_w, int)
+                    and not isinstance(_w, bool)
                     else float(_w), _ETGT_EDGE_WEIGHT, rel_tol=1e-9, abs_tol=1e-12
                 )
             ):
@@ -1058,8 +1070,11 @@ def _reweight_per_config_thic_floors(system, mfe, weight):
             op.Weight = weight
             # ROUND-10a P-4 -- base slot on the read-back canary (see the ETGT site,
             # including its note on why a bool is DELIBERATELY left on the ``float(_w)``
-            # path -- byte-identical to the pre-fix answer).
+            # path -- byte-identical to the pre-fix answer, and why the int branch beside
+            # it carries the same syntactic-policy bool conjunct).
             if not math.isclose(float.__float__(_w) if isinstance(_w := op.Weight, float)
+                                else float(int.__index__(_w)) if isinstance(_w, int)
+                                and not isinstance(_w, bool)
                                 else float(_w), weight, rel_tol=1e-9, abs_tol=1e-12):
                 continue  # a silent no-op read-back -> per-row hiccup, NOT counted
         except Exception:  # noqa: BLE001 — a per-row write hiccup is skipped (not counted)
@@ -1204,12 +1219,24 @@ def _grin_floor_row_view(op):
         # fakes PIN as live behaviour. (``_optimize_common``'s numeric guards reject bool
         # explicitly -- a different convention, on purpose: those gate a refusal, this
         # preserves a read-back comparison.)
-        t = (float.__float__(_t) if isinstance(_t := op.Target, float) else float(_t))
+        #
+        # THE INT BRANCH IS THE SAME FIX ONE SHAPE WIDER: an ``int`` SUBCLASS lies through
+        # ``__float__`` exactly as a ``float`` subclass does, so the honest magnitude comes
+        # from ``int.__index__``. The outer ``float(...)`` is load-bearing for the row
+        # view's wire type as well, and it leaves ``math.isfinite`` an exact float below.
+        # ``not isinstance(_X, bool)`` is SYNTACTIC POLICY, not behaviour: under the
+        # wrapped form a bool answers ``1.0`` down EITHER arm (measured); it is kept for
+        # parallelism with the bare-form sites and to keep the bool sentences above true.
+        t = (float.__float__(_t) if isinstance(_t := op.Target, float)
+             else float(int.__index__(_t)) if isinstance(_t, int)
+             and not isinstance(_t, bool) else float(_t))
         target = t if math.isfinite(t) else None
     except Exception:  # noqa: BLE001
         target = None
     try:
-        w = (float.__float__(_w) if isinstance(_w := op.Weight, float) else float(_w))
+        w = (float.__float__(_w) if isinstance(_w := op.Weight, float)
+             else float(int.__index__(_w)) if isinstance(_w, int)
+             and not isinstance(_w, bool) else float(_w))
         weight = w if math.isfinite(w) else None
     except Exception:  # noqa: BLE001
         weight = None

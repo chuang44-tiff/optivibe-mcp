@@ -807,8 +807,9 @@ def _safe_cell_value(cell):
     (a wedged cell, a missing accessor) degrades to ``None`` and the item is KEPT (the
     value-read-failure rule: an item exists because the SOLVE is Variable,
     independent of whether its value reads back; the count must equal ``opt.Variables``
-    regardless of a value-read hiccup). Tries ``DoubleValue`` then ``Value`` then ``int(...)``.
-    A non-finite reads as ``None`` (a sentinel-ish value is not a useful diagnostic).
+    regardless of a value-read hiccup). Tries ``DoubleValue`` then ``Value`` — those two only.
+    A non-finite reads as ``None`` (a sentinel-ish value is not a useful diagnostic)
+    — and so does an ``int`` too large for a ``float``.
     """
     for attr in ("DoubleValue", "Value"):
         try:
@@ -820,10 +821,19 @@ def _safe_cell_value(cell):
             # must not decide the number the inventory publishes. Non-int/float shapes
             # (a Decimal, a numeric string) keep the ordinary ``float()`` path; only the
             # int/float SUBCLASS shapes can lie about their own value.
+            # THE OUTER ``float(...)`` ON THE INT BRANCH IS LOAD-BEARING TWICE OVER.
+            # (1) WIRE TYPE -- without it an honest ``int`` cell publishes the inventory
+            # item's ``value`` as an ``int``, not the ``float`` this helper promises.
+            # (2) DEGRADE INSIDE THE GUARD -- an ``int`` too large for a ``float`` makes
+            # the conversion raise HERE, inside this ``try``, so it degrades to ``None``.
+            # Bare, ``int.__index__`` hands the huge int straight through to the
+            # ``math.isfinite(v)`` line below, which sits OUTSIDE every guard, and the
+            # ``OverflowError`` escapes the tool. Either way the item is KEPT with a
+            # ``None`` value -- an unconvertible number is not a useful diagnostic.
             v = (float.__float__(raw) if isinstance(raw, float)
-                 else int.__index__(raw) if isinstance(raw, int)
+                 else float(int.__index__(raw)) if isinstance(raw, int)
                  and not isinstance(raw, bool) else float(raw))
-        except Exception:  # noqa: BLE001 — a non-numeric value -> not a useful diagnostic
+        except Exception:  # noqa: BLE001 — a non-numeric value — or a numeric value no ``float`` can hold
             return None
         return v if math.isfinite(v) else None
     return None
@@ -1251,8 +1261,12 @@ def _scan_per_config_thin(system):
                 # as ready), and the mirror FABRICATES one on a healthy zoom. The
                 # ``TypeName`` compare three lines up in this same function was
                 # normalized in round 5; the numeric read beside it was not.
+                # The outer ``float(...)`` on the int branch is load-bearing for the two
+                # reasons spelled out at ``_safe_cell_value``: the published wire type,
+                # and degrading an unconvertible int INSIDE this guard instead of letting
+                # it reach the unguarded ``math.isfinite`` below.
                 value = (float.__float__(raw) if isinstance(raw := cell.DoubleValue, float)
-                         else int.__index__(raw) if isinstance(raw, int)
+                         else float(int.__index__(raw)) if isinstance(raw, int)
                          and not isinstance(raw, bool) else float(raw))
             except Exception:  # noqa: BLE001 — an unreadable value contributes nothing
                 continue

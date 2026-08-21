@@ -140,13 +140,13 @@ def cell_kind(cell) -> str:
     The discriminator's INPUT is the LIVE ``cell`` (not a Header string): blank
     detection is Header-first, int/double comes from ``cell.DataType``.
 
-    1. ``_header_is_blank(cell.Header)`` -> ``"blank"`` (FIRST — a blank cell's
+    1. ``_header_is_blank`` on the NORMALIZED Header -> ``"blank"`` (FIRST — a blank cell's
        ``DataType`` is arbitrary, so it MUST be caught before the DataType read).
-    2. PRIMARY: ``str(cell.DataType) == "Integer"`` -> ``"int"``, else -> ``"double"``
+    2. PRIMARY: ``_base_token(cell.DataType) == "Integer"`` -> ``"int"``, else ``"double"``
        (the live-grounded rule — the probe proved ``DataType`` returns the string
        ``"Integer"`` / ``"Double"``; this is what catches the wizard ``MNEA`` ``Mode``
        Integer cell the old Header-only set misread as Double).
-    3. FALLBACK (only if the ``DataType`` read THROWS): ``cell.Header in _INT_HEADERS``
+    3. FALLBACK (only if the ``DataType`` read THROWS): ``header in _INT_HEADERS``
        -> ``"int"``, else -> ``"double"``. ``cell.IsBLNK`` is NOT used — it does NOT
        exist on ``IEditorCell`` on this engine build (the ``IsBLNK`` note was
        about the MFE ROW, not the cell).
@@ -154,16 +154,35 @@ def cell_kind(cell) -> str:
     ``cell_kind`` SELF-GUARDS its own raw .NET reads (the ``cell.Header`` read
     AND the ``cell.DataType`` read) per §2 ("EVERY raw .NET read THROW-guarded ->
     structured ``SurfaceWriteError``"). As an exported primitive it does NOT rely on
-    every caller pre-guarding: a ``cell.Header`` read THROW re-raises a structured
+    every caller pre-guarding: a ``cell.Header`` read/normalize THROW re-raises a structured
     ``SurfaceWriteError`` (never an opaque dispatch ``internal``). The ``cell.DataType``
     read THROW stays a DEFENSIVE Header fallback (the L24 posture); only a Header-read
     THROW — which leaves us with no discriminator at all — escalates to the firewall.
     """
     try:
-        header = cell.Header
+        # NORMALIZE AT THE READ, ONCE, INSIDE THIS GUARD. ``_base_token`` used to sit on
+        # the FALLBACK comparison below instead, which meant the blank verdict and the
+        # classification could be taken from TWO DIFFERENT ANSWERS: a stateful proxy that
+        # returns ``'Surf'`` to ``_header_is_blank`` and ``'Hx'`` to the frozenset lookup
+        # was measured classifying ``'double'`` off answer #2 while answer #1 had already
+        # decided it was not blank. One read, one normalization, one value -- so blank
+        # detection AND classification are decided by the SAME token.
+        #
+        # It also moves the normalization INSIDE the read guard, which is FAIL-CLOSED by
+        # construction: every shape whose normalization raises (a ``__str__`` that
+        # raises, a ``__str__`` returning a non-``str``, a ``__class__`` lying ``str``)
+        # now leaves as a structured ``SurfaceWriteError`` instead of escaping dispatch
+        # as a bare ``RuntimeError``/``TypeError``.
+        #
+        # NAMED ACCEPTED RESIDUAL: a one-shot stateful proxy is not detected, it is
+        # CONTAINED. It gets exactly one ``__str__`` dispatch and every downstream
+        # decision is taken from that single answer (measured: ``'int'``). Catching such
+        # a proxy would need a normalize-twice-require-equality rule, which is a
+        # different contract and is deliberately not adopted here.
+        header = _base_token(cell.Header)
     except Exception as exc:  # noqa: BLE001 — a Header read THROW -> surface_write
         raise SurfaceWriteError(
-            f"could not read a merit cell Header ({exc!r}); the cell kind is "
+            f"could not read or normalize a merit cell Header ({exc!r}); the cell kind is "
             "unclassifiable — refusing rather than guessing",
             field="cell_header",
             intended=None,
@@ -179,7 +198,9 @@ def cell_kind(cell) -> str:
         # exact wrong-accessor read this function's docstring says NEVER happens.
         data_type = _base_token(cell.DataType)
     except Exception:  # noqa: BLE001 — DataType read THROW -> Header fallback (defensive)
-        return "int" if _base_token(header) in _INT_HEADERS else "double"
+        # ``header`` is ALREADY the base-slot token (normalized at the read above); a
+        # second ``_base_token`` here would hand a stateful proxy a second dispatch.
+        return "int" if header in _INT_HEADERS else "double"
     return "int" if data_type == "Integer" else "double"
 
 
