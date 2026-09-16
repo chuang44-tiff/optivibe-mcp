@@ -207,6 +207,8 @@ def _build_input_schema(entry):
                 # can't corrupt every other ACCEPTS tool (the composite.py
                 # _copy_entry aliasing footgun, closed here too).
                 properties[p] = copy.deepcopy(_CONFIG_ALL_SCHEMA)
+            elif t == "array":
+                properties[p] = {"type": "array", "items": {}}
             else:
                 properties[p] = {"type": t}
         return {"type": "object", "properties": properties, "required": required}
