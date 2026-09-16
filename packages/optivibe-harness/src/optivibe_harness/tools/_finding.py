@@ -866,7 +866,10 @@ def evaluate_gate(*, caller, proven, finding_rows, finding_state,
     **What it never reads**: the promote request's own `judgment` block
     (that row is written AFTER the copy, so counting it would discharge the docket on a
     request not yet on disk — 's `X == X`); any finding's `direction`, `note`,
-    `config` or `key`; any judgment's `reason` CONTENT or `disposition` VALUE; any
+    `config` or `key`; any judgment's `reason` CONTENT or `disposition` VALUE — the
+    `judgment_conflict_key` it is HANDED returns a tuple CONTAINING both, and this
+    module compares those tuples with `!=` and nothing else, so it branches on whether
+    two rows say the SAME thing and never on what either one of them says; any
     `check_clearance` output; a dispatch or round count; the shipped `promote` row; or
     ANY row's file position. The one `seq` comparison it makes is over a
     validated, anchored field.

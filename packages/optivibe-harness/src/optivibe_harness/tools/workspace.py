@@ -3543,11 +3543,17 @@ _FINDING_REMEDIES = {
         "build in which optivibe_harness.loop is importable so the proven-name set can "
         "be established at all"),
     _finding.REFUSE_FINDING_UNREADABLE: (
-        "NONE IN-BAND — this is terminal. A `finding`, `judgment` or `candidate_audit` "
-        "row under this design parses but is not a valid record, and the manifest is "
-        "append-only, so every future promote of this design reads the same fault. "
-        "Repair candidates/zmx/manifest.jsonl OUT OF BAND (quarantine the offending "
-        "line; the reader reports no line number)"),
+        "NONE IN-BAND — this is terminal, and it has TWO reachable causes needing "
+        "DIFFERENT out-of-band repairs. (a) FILE-LEVEL, and NO finding row need exist: "
+        "candidates/zmx/manifest.jsonl was not readable AS A FILE — it is not a regular "
+        "file (a directory, dangling link, junction or device), or it faulted on "
+        "open/decode, or it holds content of which not one line parsed as a record. "
+        "There is no offending line to find; repair the PATH itself (restore a readable "
+        "regular file, fix the permission or the encoding). (b) ROW-LEVEL: the file "
+        "read, and a `finding`, `judgment` or `candidate_audit` row under this design "
+        "parses but is not a valid record — quarantine the offending line (the reader "
+        "reports no line number). Either way the manifest is append-only, so every "
+        "future promote of this design reads the same fault"),
     _finding.REFUSE_FINDING_GATE_INTERNAL: (
         "none — this is a defect report, not a caller error. The finding gate raised "
         "and its outer net refused rather than permitting; file it with the "

@@ -520,6 +520,22 @@ IDENTITY_PRESERVING_TOOLS = frozenset({
     "verify_beam_path", "verify_collimation", "verify_zoom",
     # --- workspace reads/saves: they publish the design, they do not change it ----
     "promote_best", "save_candidate", "save_merit", "save_snapshot",
+    # ``record_findings`` appends a reviewer's finding row against an ALREADY-SAVED
+    # candidate. Its own contract (``tools/finding_record.py``, the SEAT BEHAVIOUR
+    # paragraph) is that it reads ``session.workspace_root`` / ``session.projects_root``
+    # only and NEVER touches ``session.system`` -- it states it as "No read, no write,
+    # no engine." So a centre-thickness budget declared before the call still means the
+    # same thing after it, which is exactly the classification principle above, and
+    # listing it is a true classification rather than the affirmative MIS-listing that
+    # is this allow-list's only fail-open direction.
+    #
+    # It is LISTED rather than recorded as a stated omission because the omission is not
+    # harmless here. The general argument above -- an omitted tool costs a spurious bump
+    # and an honest ``NO_ORACLE`` -- holds only where nothing needs the budget at that
+    # moment. This release's own review workflow records a finding and THEN asks the
+    # ceiling to adjudicate it, so a bump would retire the ``build_merit``-declared
+    # budget at precisely the call the headline feature depends on.
+    "record_findings",
     # --- value / solve / variable mutators: same lineage, moved numbers -----------
     "clear_all_variables", "clear_solve", "clear_variable", "freeze_semidiameters",
     "load_catalog", "set_aperture", "set_asphere", "set_asphere_variable",
