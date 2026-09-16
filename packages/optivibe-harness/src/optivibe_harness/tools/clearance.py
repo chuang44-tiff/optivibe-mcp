@@ -48,6 +48,13 @@ from . import _asphere_cells as _asph
 from . import _clearance_common as _cl
 from . import _config_common as _cfg
 from . import _layout_geometry as _geom
+# The STRICT active-config primitive. NOT a second derivation: this is the SAME
+# function ``_config_common.safe_current_configuration`` wraps -- one read, two
+# consumption policies (see ``resolve_evaluated_config``).
+from . import _mce_cells as _mc
+# V-INT D1-b: the ACTIVE-MERIT ceiling reader. Owns the.. decision list, the
+# three-state lookup vocabulary and the scan budget; this module owns only WHEN to ask.
+from . import _merit_ceiling as _mceil
 from ._analysis_common import error_envelope
 
 _CL_FAMILY = "clearance_unavailable"   # a total geometry-read failure
@@ -184,6 +191,300 @@ def resolve_floors(params):
 
 
 # --------------------------------------------------------------------------- #
+# Tier-1 (the oracle gap): the CENTRE-THICKNESS CEILING channel.
+#
+# THE ONE RULE THIS WHOLE BLOCK EXISTS TO KEEP (probe P-4): a boundary operand's
+# ``value`` is NOT a measurement -- a SATISFIED ``MXCA`` reports its TARGET, a violated
+# one reports the actual, so reading it as a thickness is wrong on exactly the gaps that
+# are FINE. Nothing here ever reads the MFE. The MEASUREMENT is this module's own
+# ``center_thickness``; the CEILING is the DECLARED budget; the comparison is made here.
+#
+# Ceilings are CENTRE-ONLY (probe P-3): the wizard authors ``MNEA``/``MNEG`` for a
+# minimum EDGE but there is no maximum-edge operand anywhere in the block, so an edge
+# ceiling would be a NEW mechanism, not a mirror of an existing one.
+# --------------------------------------------------------------------------- #
+#: The four ``center_ceiling.state`` tokens. ``unreadable`` is FIRST-CLASS, not a
+#: degenerate ``within``: ``nan > ceiling`` is ``False``, so a degraded centre would
+#: otherwise read as "within budget" -- the manufactured verdict this cycle killed twice.
+CEILING_WITHIN = "within"
+CEILING_OVER = "over"
+CEILING_UNREADABLE = "unreadable"
+#: V-INT D1-b. THE CEILING SOURCE did not read -- as opposed to ``unreadable``, which
+#: says THE CENTRE THICKNESS did not read. The two provenances stay APART because their
+#: remedies differ (re-read the geometry vs repair/declare the budget), and collapsing
+#: them is the ABSENT-vs-UNREADABLE error one level up.
+CEILING_SOURCE_UNREADABLE = "source_unreadable"
+
+#: FROZEN as a SET so a fifth token cannot be introduced without reddening a test
+#: (A-STATES). The joiner branches on exactly these.
+CEILING_STATES = frozenset({
+    CEILING_WITHIN, CEILING_OVER, CEILING_UNREADABLE, CEILING_SOURCE_UNREADABLE,
+})
+
+#: ``center_ceiling_audit.status``.
+CEILING_STATUS_COMPLETE = "complete"
+CEILING_STATUS_PARTIAL = "partial"
+CEILING_STATUS_NO_GAPS = "no_gaps"
+CEILING_STATUS_FOLDED = "not_applicable_folded"
+
+#: ``center_ceiling_audit.unresolved[].reason``. Two provenances, kept APART because
+#: they have different remedies: the row was read and its centre is not a number
+#: (``center_unreadable``, kind KNOWN) vs the row was never read at all
+#: (``row_unreadable``, kind ``None`` -- audit-1: the degraded sentinel has already
+#: replaced the unknown material with air-like data, so claiming a kind there would be
+#: FABRICATED evidence).
+#: V-INT D1-b adds a THIRD provenance: the gap was read fine and its BUDGET could not be
+#: established (a tainted kind, a conflicting duplicate, an unreadable operand cell). Its
+#: remedy is a merit repair or an explicit ``max_air``/``max_glass``, not a geometry
+#: re-read -- which is why it is not folded into either of the two above.
+CEILING_REASON_CENTER = "center_unreadable"
+CEILING_REASON_ROW = "row_unreadable"
+CEILING_REASON_SOURCE = "ceiling_source_unreadable"
+
+#: ``center_ceiling_audit.basis``. ``"caller"`` = this call's own explicit
+#: ``max_air``/``max_glass``; ``"declared"`` = the budget DECLARED FOR THIS DESIGN at
+#: ``build_merit`` and carried on the session (owner ruling 1).
+#:
+#: ``"active_merit"`` (V-INT D1-b) = **the ceilings the merit function ACTIVE AT READ
+#: TIME declares.** That is the whole claim, and it is true on every path BY
+#: CONSTRUCTION -- which is why, unlike ``declared``, it needs no suppression machinery
+#: and gets none. ``declared``'s claim had to be narrowed to the DECLARATION EVENT
+#: precisely because ``load_merit`` / ``clear_merit`` / ``apply_merit_recipe(mode=
+#: "replace")`` can divorce the active merit from the call that declared the budget; a
+#: basis that claims only what the ACTIVE merit says cannot be divorced from it. A
+#: suppression flag here would contradict ``server.py``'s shipped ruling that
+#: ``IDENTITY_PRESERVING_TOOLS`` lists every merit mutator, and would go stale in the
+#: permissive direction the moment a future mutator was added -- the exact defect it
+#: would have been meant to prevent.
+BASIS_CALLER = "caller"
+BASIS_DECLARED = "declared"
+BASIS_ACTIVE_MERIT = "active_merit"
+
+#: ``center_ceiling_audit.active_merit_not_offered`` -- FROZEN reasons. The
+#: ``active_merit`` basis is a SINGLE table for the configuration evaluated now, so it
+#: is offered only where that is the question being asked (spec 3.7).
+NOT_OFFERED_SWEEP = "multi_config_sweep"
+NOT_OFFERED_NON_ACTIVE = "non_active_config"
+NOT_OFFERED_CONFIG_UNREADABLE = "active_config_unreadable"
+
+_FLOOR_KEYS = ("min_air", "min_glass")
+_CEILING_KEYS = ("max_air", "max_glass")
+
+
+def _finite_pos_or_none(value, label):
+    """An OPTIONAL ceiling: ``None`` passes through, else a FINITE number ``> 0``.
+
+    The ceiling counterpart of ``_finite_nonneg``, and deliberately STRICTER in one
+    place: a floor of ``0`` is the documented opt-out, but a ceiling of ``0`` is not a
+    budget -- it is a box no design can be inside, so it is refused as
+    ``clearance_param`` rather than adjudicating every gap ``over``.
+
+    Rejects ``bool`` (an int subclass -- a client miswrite), a non-number, inf/-inf/nan,
+    and ``<= 0``. The ``float()`` coercion is guarded for the same measured reason
+    ``_finite_nonneg`` guards it (a huge ``int``, an ``int``/``float`` SUBCLASS whose
+    ``__float__`` misbehaves): every failure of ``float(value)`` means the caller named a
+    ceiling this module cannot apply, which is already the ``ToolParamError`` answer.
+
+    RAISES ``ToolParamError`` AND NOTHING ELSE from its own logic -- the same
+    single-class guarantee ``resolve_floors`` documents, with the same two named limits
+    (a hostile ``__repr__`` runs inside the refusal message; a ``dict`` subclass whose
+    ``get`` raises escapes upstream of here).
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ToolParamError(
+            f"{label} must be a finite number > 0, got {type(value).__name__} "
+            f"{value!r}"
+        )
+    try:
+        coerced = float(value)
+    except Exception:  # noqa: BLE001 - see _finite_nonneg: EVERY float() failure means
+        raise ToolParamError(  # the caller named a ceiling this module cannot apply
+            f"{label} must be a finite number > 0 (this value cannot be represented "
+            f"as a float), got {type(value).__name__}"
+        )
+    if not math.isfinite(coerced):
+        raise ToolParamError(
+            f"{label} must be finite > 0 (inf/-inf/nan are not a clearance ceiling), "
+            f"got {value!r}"
+        )
+    if coerced <= 0.0:
+        raise ToolParamError(
+            f"{label} must be > 0 (a zero/negative ceiling is a box no design can be "
+            f"inside, not a budget), got {coerced}"
+        )
+    return coerced
+
+
+def _has_explicit(params, keys):
+    """True iff the caller NAMED any of ``keys`` with a non-``None`` value.
+
+    ``None`` counts as ABSENT because that is already what ``_finite_nonneg`` /
+    ``_finite_pos_or_none`` mean by it (a ``None`` floor takes the default), so
+    ``check_clearance(min_air=None)`` must not read as hand-driving.
+    """
+    return any(params.get(k) is not None for k in keys)
+
+
+def _validate_box(min_air, min_glass, max_air, max_glass):
+    """Refuse an EMPTY box: a supplied ceiling below its own floor (spec 3.2).
+
+    ``max <= 0`` is already refused by ``_finite_pos_or_none``. THE SAME predicate runs
+    at BOTH doors -- here on the explicit path, and at the ``build_merit`` record step
+    before anything is armed -- so "the empty box is refused" holds on every path that
+    can produce a verdict, not only the consuming one. Raises ``ToolParamError``.
+    """
+    for label, ceiling, floor, floor_label in (
+        ("max_air", max_air, min_air, "min_air"),
+        ("max_glass", max_glass, min_glass, "min_glass"),
+    ):
+        if ceiling is not None and ceiling < floor:
+            raise ToolParamError(
+                f"{label}={ceiling} is below {floor_label}={floor}: that is an EMPTY "
+                "box (no thickness can satisfy both), not a budget"
+            )
+
+
+def _record_ceilings(record):
+    """The CEILING PAIR a session record supplies -- ``(max_air, max_glass)`` -- or ``None``.
+
+    **FLOORS NEVER TRAVEL. OWNER RULING.** REV 3's 3.8c recorded the build's
+    floors beside its ceilings and applied the box whole, and a review's
+    argued that only in the RAISING direction. In the LOWERING direction the same rule
+    EMPTIED ``violations``: the agent measured one design, one session, a
+    0.05 mm air gap --
+
+        no budget -> min_air 0.5, violations [an earlier cycle]
+        after build_merit(min_air=0, min_glass=0, max_glass=20)
+                                                      -> min_air 0.0, violations []
+
+    -- and fed both to the shipped joiner, where the ``looks_tight`` row is
+    ``{True: MATCHED, False: CONTRADICTED}``. So a TRUE "that gap looks tight"
+    observation was AUTHORITATIVELY REFUTED by the ceiling feature, on the one channel
+    AXIS 2 froze. ``min_air=0``/``min_glass=0`` is not contrived: it is the documented
+    target-0 opt-out ``build_merit``'s own prose tells micro-optic callers to pass.
+
+    So the record carries ``max_air``/``max_glass`` and NOTHING else. Floors always come
+    from the call's own params or defaults, exactly as before this cycle, and a session
+    budget can no longer move ``violations`` in either direction.
+
+    **WHAT REPLACES 's GUARANTEE, stated here because it is the cost of the ruling.**
+     Wanted the whole box to travel so a ceiling was always validated against the floor
+    it was declared with. Under ceilings-only that is gone at RECORD time, so
+    ``resolve_ceilings`` re-runs the EMPTY-BOX validation at APPLY time against THE
+    CALL'S floors: a recorded ``max_air=0.3`` meeting a call with ``min_air=0.5`` is a
+    box no thickness can satisfy, and it refuses -- fail-closed to no-oracle, never a
+    verdict in either direction.
+
+    Every field is re-checked here even though the record step validated it at the door.
+    That is not a second acceptance set -- it is a REFUSAL to trust a mutable attribute
+    on a session object that any in-process caller can write. A record that fails any
+    check yields ``None``, which is the no-oracle path, never a verdict.
+    """
+    if not isinstance(record, dict):
+        return None
+    ceilings = []
+    for key in ("max_air", "max_glass"):
+        v = record.get(key)
+        if v is None:
+            ceilings.append(None)
+            continue
+        # An exact float: ``True == 1.0`` in Python, so a bool would satisfy a numeric
+        # compare while meaning something else entirely (the C7 shape).
+        if isinstance(v, bool) or not isinstance(v, float) or not math.isfinite(v):
+            return None
+        if v <= 0.0:
+            return None
+        ceilings.append(v)
+    if ceilings[0] is None and ceilings[1] is None:
+        return None                      # a record with no ceiling declares no budget
+    return tuple(ceilings)
+
+
+def ceiling_is_dark_under_default_floors(max_air, max_glass):
+    """True iff a recorded ceiling can NEVER be applied by a BARE ``check_clearance()``.
+
+    THE PREDICATE IS THE REAL ONE, NOT A PROXY FOR IT. It does not compare against a
+    hardcoded 0.5/1.0: it runs **the same ``_validate_box`` the apply path runs**, against
+    **the same floors ``resolve_floors`` produces for a call that names none**. So if the
+    shipped defaults ever move, or the empty-box rule ever changes, this answer moves with
+    them by construction. A threshold literal here would be the proxy class this cycle has
+    already found five times.
+
+    WHY IT EXISTS (owner ruling). Under ceilings-only a ceiling FINER than the
+    default floors is permanently unapplicable, and every route is closed for a coherent
+    reason: a bare call meets the default floor and the box is empty; a call that names a
+    floor is hand-driving, so the record is not consulted at all; and a call that names the
+    ceiling is ``basis:"caller"`` and never needed the record. That is the micro-optic
+    class this repo explicitly supports, so **the limitation stands and the SILENCE does
+    not** -- ``build_merit`` discloses it at the moment of declaring.
+    """
+    try:
+        _validate_box(*resolve_floors({}), max_air, max_glass)
+    except ToolParamError:
+        return True
+    return False
+
+
+def resolve_ceilings(params, floors, session_record=None):
+    """THE single ceiling resolver -> ``((min_air, min_glass, max_air, max_glass), basis)``.
+
+    ``basis`` is ``"caller"``, ``"declared"``, or ``None`` (no ceiling in force).
+
+    **ALL-OR-NOTHING (spec 3.8c).** A call that names ANY floor or ceiling param is
+    hand-driving, so the session record is NOT consulted at all: explicit ceilings
+    resolve against THIS CALL's floors (``basis:"caller"``), explicit floors alone give a
+    floor-only audit with no ceiling keys. Mixing recorded ceilings with hand-passed
+    floors would recreate the cross-source defect one call later.
+
+    **FLOORS NEVER COME FROM THE RECORD (owner ruling).** The record supplies
+    ``max_air``/``max_glass`` only; ``min_air``/``min_glass`` are always this call's own
+    params or defaults. See ``_record_ceilings`` for the measured verdict-manufacturing
+    path that ruling closes, and for the apply-time empty-box check that replaces the
+    guarantee the full-box rule used to provide.
+
+    Only a fully BARE call reaches the record, and only a record whose four application
+    preconditions already held (no explicit params, dispatch epoch equal, shape equal,
+    config covered -- checked by the caller, which owns the live reads) is passed in.
+    ``session_record=None`` is therefore a positive statement, and the keeper gate passes
+    it BY NAME (3.8e).
+
+    RAISES ``ToolParamError`` ONLY (the caller envelopes it as ``clearance_param``). A
+    bad RECORD never raises -- it degrades to no ceiling, because a stale/corrupt record
+    is an applicability question, not a caller error.
+    """
+    params = _require_dict(params)
+    min_air, min_glass = floors
+    max_air = _finite_pos_or_none(params.get("max_air"), "max_air")
+    max_glass = _finite_pos_or_none(params.get("max_glass"), "max_glass")
+
+    if _has_explicit(params, _FLOOR_KEYS) or max_air is not None or max_glass is not None:
+        if max_air is None and max_glass is None:
+            return (min_air, min_glass, None, None), None
+        _validate_box(min_air, min_glass, max_air, max_glass)
+        return (min_air, min_glass, max_air, max_glass), BASIS_CALLER
+
+    ceilings = _record_ceilings(session_record)
+    if ceilings is None:
+        return (min_air, min_glass, None, None), None
+    rec_air, rec_glass = ceilings
+    try:
+        # THE REPLACEMENT FOR 's GUARANTEE (owner ruling, ceilings-only).
+        # The recorded ceilings were validated against the BUILD's floors at the record
+        # door; they have never been checked against THIS call's floors, which is now the
+        # only place the two meet. A recorded ceiling below the applied floor is an
+        # empty box, and an empty box must never adjudicate.
+        _validate_box(min_air, min_glass, rec_air, rec_glass)
+    except ToolParamError:
+        # Fail-CLOSED, and deliberately NOT a raise: the caller passed nothing wrong, so
+        # refusing the CALL would be blaming them for a record they never saw. The
+        # budget simply does not apply -> no ceiling keys -> NO_ORACLE downstream.
+        return (min_air, min_glass, None, None), None
+    return (min_air, min_glass, rec_air, rec_glass), BASIS_DECLARED
+
+
+# --------------------------------------------------------------------------- #
 # Geometry read (guarded per-surface, never raises).
 # --------------------------------------------------------------------------- #
 def _read_rows(lde, n, system=None):
@@ -255,26 +556,126 @@ def _gap_kind(row_i):
 # --------------------------------------------------------------------------- #
 # Per-gap audit (UNFOLDED).
 # --------------------------------------------------------------------------- #
-def _audit_gaps(rows, n, min_air, min_glass):
+def _ceiling_lookup(surface, kind, max_air, max_glass, ceiling_table):
+    """WHICH ceiling bounds this gap -> ``(state, limit)`` in the frozen 3-state set.
+
+    The one place the two ceiling shapes meet. ``caller`` / ``declared`` are UNIFORM
+    scalars, so their answer is a pure function of the kind; ``active_merit`` is
+    PER-SURFACE, so its answer comes from the table's own ``limit_for``, which owns
+    // and R-TAINT.
+
+    A scalar basis can never answer ``source_unreadable``: the caller handed us the
+    number, or the session record did, and neither can be half-read. That asymmetry is
+    real and is why the state is returned rather than inferred downstream.
+    """
+    if ceiling_table is not None:
+        return ceiling_table.limit_for(surface, kind)
+    limit = max_glass if kind == "glass" else max_air
+    if limit is None:
+        return (_mceil.CEILING_LOOKUP_ABSENT, None)
+    return (_mceil.CEILING_LOOKUP_PRESENT, limit)
+
+
+def _center_ceiling(center, lookup_state, limit):
+    """The per-gap ``{"limit", "state"}`` object, or ``None`` when no ceiling applies.
+
+    ``max_glass`` bounds a glass gap, ``max_air`` an air gap; the OTHER kind gets no
+    object at all (never a borrowed limit) -- that rule now lives in ``_ceiling_lookup``,
+    which resolves it to ``absent``.
+
+    THE STATE IS COMPUTED FROM THE RAW FLOAT, BEFORE any ``_safe()`` stringification,
+    and ``unreadable`` is decided FIRST. This ordering is the whole point: ``nan >
+    ceiling`` is ``False`` in Python, so a degraded centre falling through to the
+    comparison would be published as ``within`` -- a confident "inside budget" derived
+    from a cell nobody could read. Equality is ``within``; the exceedance predicate is
+    strictly ``center > limit``.
+
+    **EXHAUSTIVE DISPATCH, and the ``raise`` is the point (A-EXHAUST).** This is the ONE
+    consumer of a ``limit_for`` answer, and it branches on all three lookup states
+    explicitly. A consumer that handled PRESENT and let everything else fall to a single
+    ``else`` would re-create at the call site the very defect the tagged return type was
+    introduced to fix -- ``absent`` and ``source_unreadable`` are opposite facts with
+    opposite remedies, and a fourth token must not be silently dropped into either.
+    """
+    if lookup_state == _mceil.CEILING_LOOKUP_ABSENT:
+        return None
+    if lookup_state == _mceil.CEILING_LOOKUP_SOURCE_UNREADABLE:
+        # ``limit`` is None HERE and must not be read: the ceiling itself is unknown,
+        # which is the opposite of ``unreadable`` below (where the limit is known and
+        # the CENTRE is not). Only ``state`` separates them, so ``state`` is branched
+        # on first, always.
+        return {"limit": None, "state": CEILING_SOURCE_UNREADABLE}
+    if lookup_state != _mceil.CEILING_LOOKUP_PRESENT:
+        raise AssertionError(lookup_state)
+    if (isinstance(center, bool) or not isinstance(center, (int, float))
+            or not math.isfinite(center)):
+        state = CEILING_UNREADABLE
+    elif float(center) > limit:
+        state = CEILING_OVER
+    else:
+        state = CEILING_WITHIN
+    return {"limit": limit, "state": state}
+
+
+def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
+                ceiling_table=None):
     """Per-gap center + edge audit for an UNFOLDED system (locked §2).
 
     Walks each gap ``i -> i+1`` for ``i`` in ``1 .. n-2`` (skip the object gap at
     ``i=0``; the last real gap ``n-2 -> n-1`` IS the back-airgap, audited as air).
-    Returns ``(gaps, violations, flags)``.
+    Returns ``(gaps, violations, flags, ceiling)``.
+
+    ``ceiling_table`` (V-INT D1-b) is the PER-SURFACE ``active_merit`` basis. When it is
+    present the scalar ``max_air``/``max_glass`` are not in play at all -- the per-gap
+    limit comes from the table -- and the returned ceiling channel gains
+    ``limits_by_surface``: the limits ACTUALLY APPLIED, built from the gaps this walk
+    evaluated rather than from the raw table, so it can never advertise a budget for a
+    surface no gap started.
+
+    ``ceiling`` is ``None`` when neither maximum is in force -- and then every gap record
+    is BYTE-IDENTICAL to what this function has always emitted. Otherwise it is
+    ``{"exceedances": [...], "unresolved": [...]}``, the two lists the top-level
+    ``center_ceiling_audit`` block is assembled from.
+
+    CEILING EXCEEDANCES NEVER JOIN ``violations`` (AXIS 2, FROZEN). 13 measured
+    consumers read that list as "below the manufacturability FLOOR" -- ``promote_best``
+    HARD-REFUSES on it -- so folding a "too long" fact into it would make an unedited
+    ``promote_best`` refuse a design for being long, a behaviour change nobody asked for
+    and reachable without touching ``promote_best`` at all.
     """
     gaps = []
     violations = []
     flags = []
+    audit_ceiling = (
+        max_air is not None or max_glass is not None or ceiling_table is not None
+    )
+    exceedances = []
+    unresolved = []
+    limits_by_surface = {}
     for i in range(1, n - 1):
         ri = rows[i]
         rip1 = rows[i + 1]
+        skipped = None
         if not ri.get("ok", True):
-            flags.append(f"gap {i}->{i + 1} skipped (surface {i} geometry unreadable)")
-            continue
-        if not rip1.get("ok", True):
+            skipped = i
+        elif not rip1.get("ok", True):
+            skipped = i + 1
+        if skipped is not None:
             flags.append(
-                f"gap {i}->{i + 1} skipped (surface {i + 1} geometry unreadable)"
+                f"gap {i}->{i + 1} skipped (surface {skipped} geometry unreadable)"
             )
+            if audit_ceiling:
+                # audit-1: ``kind`` is ``None``, NOT a guess. The degraded sentinel
+                # has already replaced the unknown material with air-like data
+                # (``"material": ""``, ``"role": "air"``), so stamping a kind here would
+                # mislabel a possibly-GLASS gap as air -- fabricated evidence in the one
+                # record whose entire job is to say "this location was not adjudicated".
+                # The location is still recorded: an unaudited gap must be VISIBLE, not
+                # silently absent from a "complete" audit.
+                unresolved.append({
+                    "surface": i, "next_surface": i + 1, "kind": None,
+                    "reason": CEILING_REASON_ROW,
+                })
             continue
         kind = _gap_kind(ri)
         threshold = min_glass if kind == "glass" else min_air
@@ -353,6 +754,47 @@ def _audit_gaps(rows, n, min_air, min_glass):
             "frozen_semi": frozen_semi,
             "frozen_surfaces": frozen_surfaces,
         }
+        # Tier-1: the ADDITIVE nested ceiling object. Computed from the RAW ``center``
+        # above, never from the ``_safe()``-stringified value in the record. Absent
+        # entirely when this gap's kind carries no stated limit, so a no-budget
+        # envelope is byte-identical.
+        lookup_state, lookup_limit = _ceiling_lookup(
+            i, kind, max_air, max_glass, ceiling_table
+        )
+        cc = _center_ceiling(center, lookup_state, lookup_limit)
+        if cc is not None:
+            gap["center_ceiling"] = cc
+            if cc["state"] == CEILING_OVER:
+                exceedances.append({
+                    "surface": i, "next_surface": i + 1, "kind": kind,
+                    "center_thickness": _safe(center), "limit": cc["limit"],
+                })
+            elif cc["state"] == CEILING_UNREADABLE:
+                unresolved.append({
+                    "surface": i, "next_surface": i + 1, "kind": kind,
+                    "reason": CEILING_REASON_CENTER,
+                })
+            elif cc["state"] == CEILING_SOURCE_UNREADABLE:
+                # A DIFFERENT provenance from the line above, and the whole reason the
+                # two reasons are separate tokens: there the centre did not read, here
+                # the BUDGET did not. Same location, opposite remedy.
+                unresolved.append({
+                    "surface": i, "next_surface": i + 1, "kind": kind,
+                    "reason": CEILING_REASON_SOURCE,
+                })
+            if lookup_state == _mceil.CEILING_LOOKUP_PRESENT and ceiling_table is not None:
+                # STRING keys, and the reason is measured rather than stylistic. This
+                # block crosses the MCP boundary as JSON, where object keys are strings
+                # BY THE FORMAT -- so an int key silently becomes ``"1"`` in transit and
+                # a consumer doing ``limits_by_surface.get(surface)`` with an int gets
+                # ``None`` over the wire while getting the record in-process. ``None``
+                # there reads as "no ceiling for this surface", which is ABSENT
+                # manufactured out of a key-type mismatch -- this cycle's own defect
+                # class, arriving through the serializer instead of through a cell.
+                # One representation on both sides; no shipped envelope keys a dict by
+                # int (``per_config`` is a LIST of records for the same reason).
+                limits_by_surface[_mceil.surface_key(i)] = {
+                    "kind": kind, "limit": lookup_limit}
         gaps.append(gap)
         if frozen_semi:
             flags.append(
@@ -372,7 +814,16 @@ def _audit_gaps(rows, n, min_air, min_glass):
                 "threshold": threshold,
                 "is_back_airgap": (i == n - 2),
             })
-    return gaps, violations, flags
+    ceiling = (
+        {"exceedances": exceedances, "unresolved": unresolved}
+        if audit_ceiling else None
+    )
+    if ceiling is not None and ceiling_table is not None:
+        # Only on the per-surface basis. A scalar basis has ONE limit per kind and
+        # already publishes it as ``limits``; emitting this there would be a second
+        # encoding of the same fact.
+        ceiling["limits_by_surface"] = limits_by_surface
+    return gaps, violations, flags, ceiling
 
 
 def _folded_gaps(rows, n):
@@ -526,6 +977,265 @@ def _safe(value):
 # =========================================================================== #
 # check_clearance
 # =========================================================================== #
+
+# --------------------------------------------------------------------------- #
+# The session-declared budget: its IDENTITY BINDING (spec 3.8b/c).
+#
+# ``check_clearance`` was a pure function of the loaded design plus its explicit
+# arguments. Under owner ruling 1 it also reads session history, which is the
+# second-resolution-path shape -- a value reachable two ways, where the defect lives in
+# the DISAGREEMENT between them. Everything below exists to make one of those two ways
+# REFUSE TO ANSWER whenever it cannot prove it still speaks for the loaded design.
+#
+# Two layers, and the failure direction of each is deliberate:
+#   layer 1  the dispatch epoch (server.IDENTITY_PRESERVING_TOOLS) -- an ALLOW-LIST, so a
+#            tool nobody classified bumps the epoch and the budget honestly evaporates.
+#   layer 2  the shape stamp -- catches a swap that defeated layer 1 whenever the swap
+#            changed shape.
+# Neither can be satisfied by silence: a mismatch DELETES the record, an unreadable
+# stamp APPLIES NOTHING. There is no path here that produces a verdict on a doubt.
+# --------------------------------------------------------------------------- #
+def _forget_declared_budget(session):
+    """Positively delete the session record. Guarded -- never breaks a read-only audit."""
+    try:
+        session.declared_budget = None
+    except Exception:  # noqa: BLE001 - a session that refuses the write keeps its record,
+        pass           # and every applicability check below still refuses to apply it
+
+
+def _live_shape(system, n_surfaces):
+    """``{n_surfaces, n_configs}`` from two cheap reads, or ``None``.
+
+    ``None`` means a component could not be READ, which is NOT a mismatch: an
+    unreadable stamp applies nothing and deletes nothing, because deleting on a
+    transient read fault would retire a budget that is still perfectly valid.
+
+    **BOTH components are read STRICTLY, and that is what makes the sentence above true.**
+    It was false until: ``n_configs`` came through
+    ``_config_common.safe_number_of_configurations``, which absorbs a read fault as
+    ``1``, so an unreadable count on a multi-config design was reported as a legitimate
+    single-config stamp and DELETED the record. Identical root cause to the CRIT fixed
+    one field over in ``resolve_evaluated_config`` -- a disclosure-only ``safe_*`` reader
+    used as identity evidence.
+
+    A full prescription digest would be the WRONG stamp here: the loop's whole purpose
+    is to move thicknesses, so any value-derived digest breaks on the first optimization
+    step and the mechanism goes permanently dark. Identity here means LINEAGE.
+
+    **``system_file`` IS DELIBERATELY NOT IN THE STAMP, and its absence is the ruling.**
+    The Tier-1 spec named it as the third component. It cannot be identity material, and
+    this repo had already paid for that lesson in ``aperture_ramp.py``:
+
+      ``:137-140`` -- *"A ``_snapshot_last_good`` ``SaveAs`` REPOINTS
+      ``system.SystemFile`` to the checkpoint path, so ``SystemFile ==
+      checkpoint["path"]`` is VACUOUSLY true BEFORE the restore ``LoadFile`` runs ... So
+      NEITHER a SystemFile-match NOR a count-match can discriminate a REAL restore from
+      a gotcha- SILENT NO-OP ``LoadFile``"*
+
+      ``:419-420`` -- *"NOTE (accepted): SaveAs REPOINTS system.SystemFile at this temp
+      checkpoint, which the finally then reaps -> SystemFile is left dangling after a
+      clean ramp."*
+
+    So the field is repointed by ANY save and can DANGLE at a reaped temp path. Concretely
+    it moves under ``save_candidate`` / ``promote_best`` (``workspace._save_as_seam``) and
+    under ``optimize``'s Hammer fork (``optimize_run.py:1533``) -- all three of which are
+    correctly IDENTITY-PRESERVING, so including it would have DELETED the budget on an
+    ordinary save of an unchanged design.
+
+    Two reasons dropping it is safe, and both are load-bearing:
+
+    1. **Layer 2 is a BACKSTOP, not the primary.** The sound mechanism is layer 1, the
+       dispatch epoch (``server.IDENTITY_PRESERVING_TOOLS``), and it is untouched.
+    2. **A stamp that FALSE-INVALIDATES on every ``save_candidate`` is strictly worse
+       than a weaker one.** It makes the oracle dark in ordinary operation -- which is
+       this ticket's own defect ("a rule that reads decisive and cannot fire") re-created
+       one layer out. A weaker backstop that fires correctly beats a stronger one that
+       fires constantly and wrongly.
+
+    The residual is named rather than hidden: a same-``n_surfaces``, same-``n_configs``
+    design swap now defeats layer 2, so it is caught by layer 1 alone -- i.e. it requires
+    the affirmative MIS-LISTING that ``test_cc20`` / ``V-43`` exist to catch.
+    """
+    try:
+        # STRICT, for the same reason ``resolve_evaluated_config`` is strict, and this is
+        # the OTHER HALF of that fix rather than a new idea. ``safe_number_of_configurations``
+        # is throw-GUARDED and degrades an unreadable count to ``1``, so it never raises:
+        # the ``return None`` below was UNREACHABLE through the only component that can
+        # fault, and a transient MCE wedge on a 3-config design produced the stamp
+        # ``{n_configs: 1}`` -- a MISMATCH against the recorded ``3``, which POSITIVELY
+        # DELETED a valid record, permanently, after the fault had healed. The docstring
+        # above promised the opposite. Measured by the agent (at2/at2b).
+        n_configs = _mc.number_of_configurations(system)
+    except Exception:  # noqa: BLE001 — an unreadable count is not a mismatch
+        return None
+    if not isinstance(n_configs, int) or isinstance(n_configs, bool):
+        return None
+    if not isinstance(n_surfaces, int) or isinstance(n_surfaces, bool):
+        return None
+    return {"n_surfaces": n_surfaces, "n_configs": n_configs}
+
+
+def resolve_evaluated_config(system):
+    """The ACTIVE configuration for the applicability PROOF -- or ``None``: UNREADABLE.
+
+    **THE ONE READER FOR PRECONDITION (4), AT BOTH DOORS**, exported so
+    ``optimize_merit`` records ``config_scope`` from the same read this module compares
+    it against. Two derivations of one identity is the class this binding exists to
+    prevent, not to add.
+
+    **WHY IT IS NOT ``_config_common.safe_current_configuration``, which is what this
+    used to call.** That function's own docstring calls it *"the disclosure-only
+    active-config read"* and says *"A read fault degrades to ``1``"*. Using it as an
+    applicability proof made a WEDGED config read silently satisfy "config 1 is
+    covered", so a budget declared for config 1 would adjudicate a design whose active
+    configuration nobody could read -- a value that ABSORBS degradation used as evidence
+    that nothing was degraded. That is the manufactured-verdict shape this cycle has
+    already killed three times, found by a review as a CRIT.
+
+    So this consumes the STRICT primitive ``_mce_cells.current_configuration`` -- the one
+    ``safe_current_configuration`` itself wraps -- and keeps the fault instead of
+    swallowing it. ``None`` means "I could not read this", which is DISTINCT from "it is
+    1" and is never treated as a covered configuration.
+
+    The cost is named rather than hidden: on a system whose ``MCE`` cannot be read at all
+    the session budget goes dark and every bare call books the no-oracle path. That is
+    the correct direction -- a spurious ``NO_ORACLE`` costs an unadjudicated finding, a
+    stale verdict costs a wrong one.
+    """
+    try:
+        config = _mc.current_configuration(system)
+    except Exception:  # noqa: BLE001 - UNREADABLE, and it stays unreadable
+        return None
+    if isinstance(config, bool) or not isinstance(config, int):
+        return None
+    if config < 1:
+        return None
+    return config
+
+
+def active_merit_offered(system, params):
+    """Is the ``active_merit`` basis offered for THIS call? -> ``(bool, reason|None)``.
+
+    TWO INDEPENDENT MULTI-CONFIG GATES EXIST AND NEITHER SUBSUMES THE OTHER (spec 3.7).
+    ``_merit_ceiling``'s is about which configuration a ROW belongs to; this is about
+    which configuration the CALLER asked about. A merit with no ``CONF`` row passes
+    and can still be the wrong question to ask under a sweep.
+
+    - ``config=None`` -> OFFERED. ``None`` means "current", which IS the active
+      configuration, so nothing needs comparing -- and deliberately so: on a system whose
+      MCE cannot be read at all a bare call still gets its merit basis, because no read
+      was required to answer the question.
+    - ``config=<int>`` -> offered IFF it names the configuration that is active NOW.
+      ``evaluate_over_configs`` runs a ``single`` grade INSIDE ``with_configuration``, so
+      on the healthy path the requested config IS the active one and this passes. Where
+      it does NOT pass, the switch did not take -- and that is precisely a call whose
+      merit rows would be attributed to the wrong configuration.
+    - ``config="all"`` -> REFUSED. Stated honestly: on a multi-config design with no
+      ``CONF`` rows this is conservative beyond strict necessity, since unbracketed rows
+      do apply to every configuration. It is kept because the reader produces ONE table
+      while a sweep needs a verdict per configuration, and because under-delivering
+      costs an unadjudicated finding while over-delivering costs a wrong verdict. A
+      deliberate under-delivery, not an oversight.
+    - the active configuration cannot be read -> REFUSED.
+    """
+    config = params.get("config")
+    if config is None:
+        return (True, None)
+    if isinstance(config, str):
+        # Only the exact spelling ``"all"`` survives ``resolve_config_selector``; any
+        # other string already raised as a param error before this call site.
+        return (False, NOT_OFFERED_SWEEP)
+    active = resolve_evaluated_config(system)
+    if active is None:
+        return (False, NOT_OFFERED_CONFIG_UNREADABLE)
+    try:
+        requested = _cfg._coerce_config_int(config)
+    except Exception:  # noqa: BLE001 - already validated upstream; fail CLOSED anyway
+        return (False, NOT_OFFERED_NON_ACTIVE)
+    if requested != active:
+        return (False, NOT_OFFERED_NON_ACTIVE)
+    return (True, None)
+
+
+def build_shape_stamp(system, n_surfaces):
+    """The shape stamp as recorded at ``build_merit`` -- the SAME builder both doors use.
+
+    Exported so ``optimize_merit`` cannot record a stamp this module would then compare
+    against a differently-derived one; two derivations of one identity is the class this
+    binding exists to prevent, not to add.
+    """
+    return _live_shape(system, n_surfaces)
+
+
+def _applicable_record(session, system, n_surfaces, evaluated_config):
+    """The session budget record, ONLY if it still speaks for this design and config.
+
+    Returns the record dict or ``None``. The three checks it owns (the fourth, "no
+    explicit params", belongs to ``resolve_ceilings``):
+
+    2. **epoch** -- ``Dispatcher.dispatch`` bumps ``session.design_epoch`` at call ENTRY
+       for every tool NOT in ``IDENTITY_PRESERVING_TOOLS``. Unequal => DELETE.
+    3. **shape** -- ``{n_surfaces, n_configs}``. Unequal => DELETE.
+       Unreadable => apply nothing, keep the record.
+    4. **config scope** -- a non-spanning build covers ONE configuration. An uncovered
+       config => apply nothing but KEEP the record, because switching back re-enables a
+       budget that never stopped being true; only an IDENTITY mismatch deletes. An
+       UNREADABLE config (``evaluated_config is None``) is not a covered one and never
+       becomes one -- see ``resolve_evaluated_config``.
+
+    Layer 1 also has a POISON LATCH. ``Dispatcher._bump_design_epoch`` sets
+    ``session.design_epoch_unusable`` when it could not increment the epoch: from that
+    moment the epoch proves nothing, so no record may be applied through it again. The
+    latch is checked FIRST, before any read, because the whole point of layer 1 is that
+    its failure direction is a spurious NO_ORACLE and never a stale verdict.
+    """
+    record = getattr(session, "declared_budget", None)
+    if not isinstance(record, dict):
+        return None
+
+    if getattr(session, "design_epoch_unusable", False):
+        _forget_declared_budget(session)
+        return None
+
+    live_epoch = getattr(session, "design_epoch", 0)
+    rec_epoch = record.get("epoch")
+    if (isinstance(rec_epoch, bool) or not isinstance(rec_epoch, int)
+            or isinstance(live_epoch, bool) or not isinstance(live_epoch, int)
+            or rec_epoch != live_epoch):
+        _forget_declared_budget(session)
+        return None
+
+    shape = _live_shape(system, n_surfaces)
+    if shape is None:
+        return None                       # unreadable != mismatch (see _live_shape)
+    if record.get("shape") != shape:
+        _forget_declared_budget(session)
+        return None
+
+    scope = record.get("config_scope")
+    # ``evaluated_config`` is ``None`` when the active configuration could not be READ.
+    # ``None`` is never equal to a recorded ``int`` and never equal to ``"all"``, so an
+    # unreadable config falls through to the no-oracle return by CONSTRUCTION -- and the
+    # ``"all"`` arm is guarded explicitly below so a spanning budget cannot adjudicate a
+    # design whose active configuration is unknown either.
+    if evaluated_config is None:
+        return None                       # UNREADABLE != covered. Never a verdict.
+    if scope != "all" and scope != evaluated_config:
+        return None                       # scope miss: NOT a verdict, and NOT a deletion
+    return record
+
+
+def _ceiling_status(folded, gaps, ceiling):
+    """The ``center_ceiling_audit.status`` token."""
+    if folded:
+        return CEILING_STATUS_FOLDED
+    if ceiling is not None and ceiling["unresolved"]:
+        return CEILING_STATUS_PARTIAL
+    if not gaps:
+        return CEILING_STATUS_NO_GAPS
+    return CEILING_STATUS_COMPLETE
+
+
 def check_clearance(session, params):
     """Audit per-gap center/edge clearance + the global back-focal distance.
 
@@ -540,20 +1250,63 @@ def check_clearance(session, params):
     int=that config, ``"all"`` sweeps every config (cheap geometry) into a ``per_config``
     vector + coverage reconcile + ``config_differs`` (the min edge clearance headline). A
     bad ``config`` -> ``clearance_param``.
+
+    **Tier-1 CENTRE-THICKNESS CEILINGS (additive).** ``max_air`` / ``max_glass`` declare
+    a maximum CENTRE thickness (finite ``> 0``, and never below the matching floor). When
+    a ceiling is in force each gap of that kind gains
+    ``center_ceiling: {"limit", "state"}`` with ``state`` in ``within|over|unreadable``,
+    and the envelope gains a ``center_ceiling_audit`` block. Exceedances live THERE and
+    NEVER in ``violations`` (which stays a FLOOR list for its 13 consumers). With no
+    ceiling in force the envelope is byte-identical to before.
+
+    **THIS HANDLER IS STATEFUL (owner ruling 1).** A call with NO explicit floor or
+    ceiling param applies the budget the session DECLARED at ``build_merit`` (basis
+    ``"declared"``) -- but only while a dispatch epoch, a shape stamp and the config
+    scope all still prove it speaks for the loaded design. Any doubt applies nothing.
+    Naming ANY floor or ceiling param is hand-driving and bypasses the record entirely.
+    ``check_clearance_floor_only`` is the entry for callers that must never inherit it.
     """
+    return _check_clearance(session, params, consult_session_budget=True)
+
+
+def check_clearance_floor_only(session, params):
+    """The keeper gate's entry: IDENTICAL floor audit, session budget NEVER consulted.
+
+    Exists so the suppression is EXPLICIT at the seam whose own docstring warns about
+    two independent resolutions -- the gate opts out by NAMING it, not by hoping.
+
+    ``save_candidate`` / ``promote_best`` call the shared handler BARE, so under session
+    carriage they would INHERIT a budget declared mid-run: keeper records, the identity
+    ladder and all 13 ``violations`` consumers would start moving under a declaration
+    that has nothing to do with the manufacturability floor they gate on. This entry
+    passes ``session_record=None`` by name, runs no identity reads, and deletes nothing
+    -- so the gate is byte-identical to a session that never declared a budget.
+    """
+    return _check_clearance(session, params, consult_session_budget=False)
+
+
+def _check_clearance(session, params, consult_session_budget):
     params = _require_dict(params)
     try:
         # ONE resolver, shared with workspace._effective_floors.
         # Do NOT re-inline the _finite_nonneg calls here — two copies is two acceptance
         # sets, and the guard would then be able to disagree with the producer.
-        min_air, min_glass = resolve_floors(params)
+        floors = resolve_floors(params)
+        # Tier-1: run THE ceiling resolver once, here, purely to REFUSE a bad explicit
+        # box before any config sweep starts. Its answer is discarded; the binding
+        # resolution happens once per evaluated config inside ``_impl`` (which is the
+        # only place that knows the live epoch/shape/config). Doing it here is what
+        # makes ``max_air=-1`` a ``clearance_param`` refusal instead of a degraded
+        # ``per_config`` entry under ``config="all"``, where ``_grade_safe`` swallows a
+        # grader throw into ``ok:false``.
+        resolve_ceilings(params, floors, session_record=None)
     except ToolParamError as exc:
         return error_envelope("check_clearance", _CL_PARAM, str(exc))
 
     config = params.get("config")
 
     def _grade(sess):
-        return _impl(sess, min_air, min_glass)
+        return _impl(sess, floors, params, consult_session_budget)
 
     try:
         return _cfg.evaluate_over_configs(session, config, _grade)
@@ -566,10 +1319,53 @@ def check_clearance(session, params):
         )
 
 
-def _impl(session, min_air, min_glass):
+def _impl(session, floors, params, consult_session_budget=False):
     system = session.system
     lde = system.LDE
     n = int(lde.NumberOfSurfaces)
+
+    # Tier-1: resolve the box for THIS evaluation. Precondition (1) of 3.8c -- the
+    # all-or-nothing rule -- is checked HERE so a hand-driven call costs no identity
+    # reads at all; ``resolve_ceilings`` enforces it again over the record it is handed,
+    # so the rule holds even if this guard were deleted.
+    record = None
+    if consult_session_budget and not (
+        _has_explicit(params, _FLOOR_KEYS) or _has_explicit(params, _CEILING_KEYS)
+    ):
+        record = _applicable_record(
+            session, system, n, resolve_evaluated_config(system)
+        )
+    (min_air, min_glass, max_air, max_glass), ceiling_basis = resolve_ceilings(
+        params, floors, session_record=record
+    )
+
+    # V-INT D1-b: the THIRD basis, and THE ONLY CALL SITE. At most ONE reader invocation
+    # per ``check_clearance`` call, reached only when ``caller`` and ``declared`` both
+    # yielded nothing -- so a hand-driven or session-declared call costs zero merit reads.
+    #
+    # THE KEEPER GATE OPTS OUT THROUGH THE SAME NAMED SWITCH, and that is a BUILD-TIME
+    # decision the does not cover (recorded in AUDIT-RESPONSE.md, not
+    # silently taken). ``check_clearance_floor_only`` exists so ``save_candidate`` /
+    # ``promote_best`` are byte-identical to a session that never declared a budget; the
+    # ACTIVE MERIT is a design-derived budget, so letting it in through the back door
+    # would defeat an opt-out whose whole point is that it is EXPLICIT. Measured, the
+    # keeper verdict itself cannot move (``workspace.py`` reads no ceiling key at all and
+    # exceedances never join ``violations``) -- the change would be to the envelope and
+    # to a 227 ms read on every save. Both are refused here for nothing gained.
+    ceiling_table = None
+    active_merit_not_offered = None
+    if ceiling_basis is None and consult_session_budget:
+        offered, not_offered_reason = active_merit_offered(system, params)
+        if offered:
+            table = _mceil.read_ceiling_table(system, n)
+            # A merit that declares NOTHING is not a basis -- see
+            # ``CeilingTable.declares_anything``. Without this the block would appear on
+            # every bare call in the repo, asserting a basis that bounds no gap.
+            if table.declares_anything():
+                ceiling_table = table
+                ceiling_basis = BASIS_ACTIVE_MERIT
+        else:
+            active_merit_not_offered = not_offered_reason
 
     rows = _read_rows(lde, n, system=system)
     # ONE shared fold predicate (geometry-readouts §1): scan ALL surfaces (incl. 0
@@ -580,8 +1376,24 @@ def _impl(session, min_air, min_glass):
     folded = _geom.lde_is_folded(lde, n)
 
     flags = []
+    # The invalidation-failure DISCLOSURE (a review, HIGH). A dispatch that could
+    # not increment the design epoch has latched this session: layer 1 can no longer
+    # prove anything, so any declared budget was retired and none will be applied again.
+    # It is emitted in the ARTIFACT rather than only logged, because a silent
+    # invalidation failure is indistinguishable from a session that never declared a
+    # budget -- and those two have opposite remedies.
+    if getattr(session, "design_epoch_unusable", False):
+        _faults = getattr(session, "design_epoch_faults", None)
+        flags.append(
+            "the design-identity epoch could not be maintained for this session"
+            + (f" (failed on: {_faults})" if isinstance(_faults, list) and _faults else "")
+            + "; any session-declared centre-thickness budget has been RETIRED and no "
+            "further one will be applied — pass max_air/max_glass explicitly to audit "
+            "against a ceiling"
+        )
     gaps = []
     violations = []
+    gap_ceiling = None
     folded_gaps = None
     note = None
 
@@ -602,7 +1414,10 @@ def _impl(session, min_air, min_glass):
             "future work."
         )
     elif n >= 3:
-        gaps, violations, gap_flags = _audit_gaps(rows, n, min_air, min_glass)
+        gaps, violations, gap_flags, gap_ceiling = _audit_gaps(
+            rows, n, min_air, min_glass, max_air, max_glass,
+            ceiling_table=ceiling_table,
+        )
         flags.extend(gap_flags)
 
     bfd, bfd_flags = _global_bfd(lde, rows, n)
@@ -842,6 +1657,50 @@ def _impl(session, min_air, min_glass):
         }
     if grin_not_audited:
         result["grin_not_audited"] = grin_not_audited
+    # Tier-1 (AXIS 3): the additive ``center_ceiling_audit`` block. Emitted ONLY when a
+    # budget was APPLIED -- in force AND all four preconditions held -- so an envelope
+    # with no budget is BYTE-IDENTICAL to the shipped one, per-gap keys included.
+    # ``limits`` are the RESOLVED DECLARED values, never re-derived from the gap records
+    # (a limit re-derived from what it adjudicated cannot falsify anything).
+    if ceiling_basis is not None:
+        # ``limits`` is a SCALAR pair and is correct for ``caller``/``declared``, which
+        # really are uniform. It is MEANINGLESS for a per-surface basis, so on
+        # ``active_merit`` it is emitted as ``null`` and ``limits_by_surface`` (inside
+        # the gap-ceiling channel) carries the real answer. ``null`` is honest -- there
+        # is no single limit -- and a consumer that reads ``limits["glass"]`` anyway gets
+        # a failure rather than a confidently wrong number.
+        result["center_ceiling_audit"] = {
+            "basis": ceiling_basis,
+            "limits": (
+                None if ceiling_table is not None
+                else {"air": max_air, "glass": max_glass}
+            ),
+            "status": _ceiling_status(folded, gaps, gap_ceiling),
+            # A FOLD suppresses the per-gap audit entirely (the raw LDE thickness is the
+            # fold direction, not a length), so both lists are empty and the status says
+            # so -- never an empty ``exceedances`` read as "nothing is over budget".
+            "exceedances": gap_ceiling["exceedances"] if gap_ceiling else [],
+            "unresolved": gap_ceiling["unresolved"] if gap_ceiling else [],
+        }
+        if ceiling_table is not None:
+            # The per-surface answer, plus what the SCAN could not establish -- kept
+            # separate from what the DESIGN says, because "no ceiling is declared here"
+            # and "I could not finish reading" are opposite facts.
+            result["center_ceiling_audit"]["limits_by_surface"] = (
+                gap_ceiling.get("limits_by_surface", {}) if gap_ceiling else {}
+            )
+            result["center_ceiling_audit"]["scan"] = ceiling_table.disclosure()
+    elif active_merit_not_offered is not None:
+        # No basis at all, but the reason is not "nobody declared one" -- the design may
+        # well declare ceilings this call could not honestly ATTRIBUTE. Disclosed so the
+        # downstream NO_ORACLE is legible rather than mute.
+        #
+        # A TOP-LEVEL key, deliberately NOT a ``center_ceiling_audit`` block with a null
+        # basis. The presence of that block has always meant "a budget was applied"; a
+        # half-shaped one carrying no ``status``, ``exceedances`` or ``limits`` would
+        # overload the same key with the opposite fact, which is the collapse this whole
+        # cycle exists to prevent -- one level up from the ABSENT/UNREADABLE one.
+        result["active_merit_not_offered"] = active_merit_not_offered
     if note is not None:
         result["note"] = note
     return result
@@ -857,6 +1716,8 @@ CHECK_CLEARANCE_SPEC = ToolSpec(
     param_types={
         "min_air": "number",
         "min_glass": "number",
+        "max_air": "number",
+        "max_glass": "number",
         # config is a UNION None|int|"all"; advertised "number" (the dominant int type
         # — the MCP reparse shim preserves the "all" string via raw-fallback).
         "config": "number",
@@ -874,6 +1735,13 @@ CHECK_CLEARANCE_SPEC = ToolSpec(
         "optical surface) — for a folded/Cassegrain system this behind_first_optic is "
         "the true behind-primary clearance, NOT the misleading raw back-airgap "
         "thickness that get_first_order.back_focal_length reports. "
+        "Optional max_air/max_glass declare a maximum CENTRE thickness: each gap of that "
+        "kind then carries center_ceiling {limit, state in within|over|unreadable} and the "
+        "envelope carries a center_ceiling_audit block. A ceiling exceedance is reported "
+        "THERE and never in violations (which stays the manufacturability FLOOR list), so "
+        "promote_best never refuses a design for being long. Omit both and a budget "
+        "declared at build_merit for this design is applied automatically while it still "
+        "provably describes it; pass explicit values to override. "
         "Run after optimize to catch a thin/negative gap a merit floor missed. An authored "
         "GRIN element (Gradient2/Gradient3) is audited as a solid (glass) element at "
         "min_glass; see grin_geometric_audit. A non-authorable GRIN family member is listed "

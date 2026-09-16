@@ -1,6 +1,6 @@
 ---
 name: optimize-loop
-description: Use when the user wants to optimize a lens design. Triggers on "optimize", "run optimization", "improve this design", "make it better", "hit the spec". Drives the OptiVibe optimize tool with checkpoints and a preflight.
+description: Use when the user wants to optimize a lens design. Triggers on "optimize", "run optimization", "improve this design", "make it better", "hit the spec". Drives the OptiVibe optimize tool with checkpoints and a preflight, pauses at a midpoint for a look at the layout figure, and records a response to every finding raised there.
 ---
 
 # Optimize Loop — Driving OptiVibe Optimization
@@ -14,6 +14,12 @@ monitored optimization bursts for you and returns a verdict
 A DLS or OD run commits its result in place — there is no automatic restore of the
 starting form, which is why Step 1 checkpoints it. A Hammer run is the exception: it
 checkpoints first and attempts a best-restore if it comes out worse.
+
+The loop does not run start-to-finish unattended. Step 4 is a **midpoint pause**: you
+save a candidate, optionally ask for a look at its layout figure, and put what comes
+back to the user as suggestions before going further. A design can meet every number
+you gave it and still be the wrong shape, and a merit function cannot see a defect
+nobody wrote a target for.
 
 ## When to Use
 
@@ -82,13 +88,38 @@ a per-pass `.zmx` trail.
 A clean call is not proof of success — and neither is `improved` on its own. Trust
 the verdict, the read-back merit, **and** the geometry read-back together.
 
-### Step 4: Assess + checkpoint
+### Step 4: Assess, checkpoint, then pause
 
 1. Read final EFL / F-number (`get_first_order`) and RMS spot (`get_spot`); compare
    to the pre-optimization state.
 2. Confirm the geometry is physical (`check_clearance`) — this is the Step-3 reality
-   check, repeated once on the design you are about to keep.
-3. `save_candidate` an accepted result; once you have a keeper, `promote_best` it.
+   check, repeated once on the design you are about to keep. Run it BEFORE asking for
+   a look at the figure, not after: a remark about an element looking too thick or too
+   generous is judged against a measured thickness budget, and with no audit in hand
+   there is nothing to judge it against.
+
+   **It reports; it does not certify.** A `check_clearance` that flags nothing is not a
+   statement that the design is manufacturable. It substitutes for a degraded read
+   rather than refusing, so a surface it could not measure can still produce a
+   confident number — and on a folded system the per-gap thickness audit is suppressed
+   entirely, so an empty violation list there means *nothing was measured*, not
+   *nothing is wrong*. Read what it measured, never the absence of a complaint.
+3. `save_candidate` the result. This is the checkpoint the pause is built on, and it is
+   what makes a remark about the figure recordable: the candidate's `seq` and its
+   `png_sha256` both come from this envelope.
+4. **The midpoint pause — ask, then stop.** With the candidate saved, you may invoke the
+   `design-vision-review` skill with that candidate's seq to get a second pair of eyes on
+   its paired layout figure. Do it here, and whenever the user asks what you think of the
+   layout.
+
+   **The reviewer is an ADVISOR, never an autopilot.** What it returns are SUGGESTIONS
+   for the user and for you. Nothing it raises edits the design, authors a constraint, or
+   re-enters the loop on its own. Present each remark with what was seen, where, the
+   levers that would address it, and the evidence — then **WAIT for the user's steer**
+   before optimizing again or promoting.
+
+   A review that comes back silent is not a pass. Say the eye found nothing; silence
+   never certifies.
 
 Report:
 
@@ -103,6 +134,7 @@ Report:
 
 Design class: unchanged  (or: name exactly what changed — see below)
 Setup changes: none  (or: list what YOU changed — wavelengths, fields, aperture, scale)
+Figure review: <n> recorded (<k> unanswered)  (or: silent — the eye found nothing; or: not asked)
 
 Verdict: improved / diverged  (cycles/passes as reported by optimize)
 ```
@@ -131,7 +163,47 @@ there as **your** change. Two rules about attribution:
   restate the system. Changing the field set changes what every field-dependent
   number in your table means.
 
-### Step 5: Suggest next steps
+### Step 5: Answer every recorded finding, then suggest next steps
+
+If the midpoint pause recorded anything about the figure, each remark owes a RECORDED
+RESPONSE before the design can be promoted. **`promote_best` refuses** while any
+recorded finding under this design has no response anchored to a saved candidate, and
+it names the open ids when it does.
+
+The rule is narrower than it sounds, and the narrowness is the point: **the gate never
+reads whether the remark was TRUE, nor whether you AGREED with it.** It reads only that
+a response exists for those ids, bound to those bytes, carrying a non-empty reason.
+
+**Answering is not agreeing.** A rejection is a valid response — an obligation to
+respond is not an obligation to comply. Declining should be argued, and the argument is
+the reason you record. At the pause the user's steer IS the response: record it,
+whichever way it went.
+
+Record it rather than merely saying it. A remark you silently dropped and one you
+deliberately dismissed look identical afterwards, and prose in the reply scrolls past.
+Pass the call to the tool that writes it to disk beside the exact bytes it is about:
+
+```
+save_candidate(design_name=..., render=False, judgment={
+    "finding_ids": ["<the id the review returned for this remark>"],
+    "disposition": "acted" | "declined" | "superseded" | "referred",
+    "reason": "<why it is or is not worth acting on>"})
+```
+
+`finding_ids` are the ids the review RETURNED — never invented. They are computed from
+each remark's own content plus the picture's digest, so an id you composed yourself
+names nothing and discharges nothing.
+
+`disposition` is required whenever `finding_ids` is non-empty, and the vocabulary is
+four: `acted` (a change was made), `declined` (considered and rejected — the reason is
+the argument), `superseded` (it is about bytes the design has moved past), `referred`
+(routed to a person or a named test; open on someone else's desk). `reason` has no
+default and an empty one is refused. `promote_best` takes the same block.
+
+State it in your reply as well — the user is reading that. But the reply is not the
+record, and if you only write prose the judgment did not happen.
+
+Then:
 
 - Converged well: "Looks good. Run `/design-review` for a full assessment, or
   `save_candidate` / `promote_best` to keep it."
@@ -159,5 +231,15 @@ there as **your** change. Two rules about attribution:
 - **Disclose any change of design class** — conics freed, glass substituted, element
   count changed — in the `Design class:` line of the report. Always, even when the
   user did not ask.
+- **The figure review is an ADVISOR, not an autopilot.** At the midpoint pause you
+  present its suggestions and WAIT for the user's steer; a lever is applied only when
+  the user picks it. Nothing it raises edits the design or re-enters the loop by
+  itself. When the user asks what you think of the layout, save a candidate and ask for
+  a review of that seq — at any point in the session, not only at the pause.
+- **You cannot promote over an unanswered recorded finding.** `promote_best` refuses and
+  names the open ids. Meeting every stated target is not the same as being finished:
+  answer each recorded remark with a `judgment` block. The gate checks that a response
+  exists, never that it agreed — so a rejection closes it, provided the reason argues
+  the decline.
 - Ground operands and glasses with `lookup_operand` / `search_reference` /
   `lookup_glass` — do not guess a code.

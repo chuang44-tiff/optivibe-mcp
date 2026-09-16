@@ -1638,6 +1638,197 @@ def _grin_floor_warning(system):
         return None
 
 
+
+# =========================================================================== #
+# Tier-1 (the oracle gap): the SESSION-DECLARED centre-thickness budget.
+# =========================================================================== #
+def _record_declared_budget(session, system, min_air, min_glass, max_air, max_glass,
+                            span_configs):
+    """Arm / clear / REFUSE the session-carried budget. Returns a ``budget_note`` or None.
+
+    ``build_merit`` is the DECLARATION EVENT: this is the one place a caller states the
+    centre-thickness box it wants this design built inside, so it is the one place the
+    box is recorded. A later BARE ``check_clearance`` then applies it -- while, and only
+    while, the dispatch epoch, the shape stamp and the config scope all still prove the
+    record speaks for the loaded design.
+
+    **CEILINGS ONLY -- FLOORS NEVER TRAVEL (owner ruling).** An earlier cut
+    recorded this build's floors alongside its ceilings and applied the box whole. In the
+    LOWERING direction that EMPTIED ``violations``: ``build_merit(min_air=0,
+    min_glass=0, max_glass=20)`` -- the documented target-0 opt-out this module's own
+    prose recommends for micro-optics -- turned a real 0.05 mm floor violation into
+    ``violation: False``, and the shipped joiner then REFUTED a true "that gap looks
+    tight" finding. AXIS 2 froze ``violations``; that rule moved it.
+
+    So the floors below are used to VALIDATE the declaration and are then discarded. The
+    guarantee the full-box rule used to provide is replaced by an APPLY-time empty-box
+    check against the CALL's floors -- ``clearance._record_ceilings`` documents the
+    trade.
+
+    **TRANSACTIONAL.** This runs ONLY on the success path, so:
+      * a FAILED declaring build arms nothing (it never reaches here);
+      * a FAILED ceilingless rebuild clears nothing -- a build failure touches the MFE,
+        never the design's identity, so the prior declaration still speaks for the
+        unchanged design;
+      * a SUCCESSFUL ceilingless build CLEARS the record: the new declaration supersedes
+        the old one BY SILENCE, and a budget nobody re-stated must not keep verdicting.
+
+    **VALIDATED AT THE DOOR.** The same empty-box predicate ``resolve_ceilings`` applies
+    on the explicit path runs here BEFORE anything is armed, so "an invalid box never
+    adjudicates" holds on every path that can produce a verdict rather than only on the
+    consuming one. An invalid declaration arms nothing AND clears any prior record --
+    the build succeeded under a box this module could not record, so leaving the
+    previous one armed is precisely the stale-budget verdict the mechanism exists to
+    prevent. The wizard write itself is untouched; only the RECORD refuses.
+
+    NEVER raises: a record step that throws leaves nothing armed, which is the
+    no-oracle path.
+    """
+    from . import clearance as _clearance
+
+    def _forget():
+        try:
+            session.declared_budget = None
+        except Exception:  # noqa: BLE001 — a session refusing the write is not a build failure
+            pass
+
+    try:
+        if max_air is None and max_glass is None:
+            _forget()
+            return None
+
+        for label, ceiling, floor, floor_label in (
+            ("max_air", max_air, min_air, "min_air"),
+            ("max_glass", max_glass, min_glass, "min_glass"),
+        ):
+            if ceiling is None:
+                continue
+            if ceiling <= 0.0:
+                _forget()
+                return (
+                    f"{label}={ceiling} is not a budget (a zero/negative ceiling is a "
+                    "box no design can be inside), so NO session budget was recorded; "
+                    "pass max_air/max_glass to check_clearance explicitly to audit "
+                    "against a ceiling"
+                )
+            if ceiling < floor:
+                _forget()
+                return (
+                    f"{label}={ceiling} is below {floor_label}={floor}: that is an "
+                    "EMPTY box (no thickness can satisfy both), so NO session budget "
+                    "was recorded; the merit WAS built with the values you passed"
+                )
+
+        if getattr(session, "design_epoch_unusable", False):
+            # Layer 1 has been latched unusable by a failed epoch bump, so nothing can
+            # ever invalidate a budget armed now. A budget that cannot be retired must
+            # not be armed -- that is the stale-verdict direction, arrived at from the
+            # declaring end instead of the consuming one.
+            _forget()
+            return (
+                "the design-identity epoch could not be maintained for this session, so "
+                "NO session budget was recorded — a budget nothing can retire must not "
+                "adjudicate; pass max_air/max_glass to check_clearance explicitly"
+            )
+
+        # THE SAME reader the applicability proof uses (``clearance`` owns it), so the
+        # recorded scope and the compared scope can never be two derivations of one
+        # identity. ``None`` means the active configuration could not be READ, which is
+        # distinct from "it is 1" -- and recording ``1`` from a degraded read is how a
+        # budget declared for config 3 would come to claim config 1.
+        config_scope = "all"
+        if not span_configs:
+            config_scope = _clearance.resolve_evaluated_config(system)
+            if config_scope is None:
+                _forget()
+                return (
+                    "the active configuration could not be read, so NO session budget "
+                    "was recorded — a budget whose covered configuration is unknown "
+                    "must not adjudicate one; pass max_air/max_glass to check_clearance "
+                    "explicitly, or use span_configs=true"
+                )
+
+        n_surfaces = int(system.LDE.NumberOfSurfaces)
+        shape = _clearance.build_shape_stamp(system, n_surfaces)
+        if shape is None:
+            _forget()
+            return (
+                "the design's shape stamp (surface count / config count) could not be "
+                "read, so NO session budget was recorded — a budget that cannot be bound "
+                "to a design must not adjudicate one"
+            )
+
+        seq = getattr(session, "_declared_budget_seq", 0)
+        if isinstance(seq, bool) or not isinstance(seq, int):
+            seq = 0
+        seq += 1
+        try:
+            session._declared_budget_seq = seq
+        except Exception:  # noqa: BLE001 — the id is provenance, never a precondition
+            pass
+
+        epoch = getattr(session, "design_epoch", 0)
+        if isinstance(epoch, bool) or not isinstance(epoch, int):
+            epoch = 0
+
+        session.declared_budget = {
+            # CEILINGS ONLY. The build's FLOORS are deliberately NOT recorded (owner
+            # ruling) -- see ``clearance._record_ceilings`` for the measured
+            # path where a recorded floor of 0 emptied ``violations`` and refuted a true
+            # finding. They are still used HERE, to validate the declaration, and then
+            # discarded.
+            "max_air": None if max_air is None else float(max_air),
+            "max_glass": None if max_glass is None else float(max_glass),
+            # A non-spanning build authors its bound operands for ONE configuration, so
+            # the budget it declares covers that one. ``span_configs=True`` brackets
+            # every config, so it covers "all". An evaluation outside the covered scope
+            # applies nothing -- and KEEPS the record, because switching back re-enables
+            # a budget that never stopped being true. Resolved STRICTLY above.
+            "config_scope": config_scope,
+            "shape": shape,
+            "epoch": epoch,
+            "build_op": seq,
+        }
+
+        # DISCLOSURE, not a refusal -- the record above is ARMED and stays armed.
+        #
+        # Under ceilings-only a ceiling FINER than the shipped default floors can never
+        # be applied by a bare ``check_clearance()``: the apply-time empty-box check
+        # meets the default floor and refuses, a call that names a floor is hand-driving
+        # so the record is not consulted, and a call that names the ceiling never needed
+        # the record. Owner ruling: THE LIMITATION STANDS, THE SILENCE DOES
+        # NOT. The caller learns at the moment of declaring, not never.
+        #
+        # This also closes an asymmetry the agent named: the unreadable-config
+        # and unreadable-shape doors above already refuse WITH a ``budget_note``, and this
+        # door -- the same class of "your declaration will not adjudicate" -- was silent.
+        #
+        # The predicate is THE REAL ONE: ``ceiling_is_dark_under_default_floors`` runs the
+        # same ``_validate_box`` the apply path runs against the same floors
+        # ``resolve_floors`` gives a call that names none, so it moves with the defaults
+        # instead of hardcoding them.
+        if _clearance.ceiling_is_dark_under_default_floors(max_air, max_glass):
+            floor_air, floor_glass = _clearance.resolve_floors({})
+            named = []
+            if max_air is not None and max_air < floor_air:
+                named.append(f"max_air={max_air} is below the default min_air={floor_air}")
+            if max_glass is not None and max_glass < floor_glass:
+                named.append(
+                    f"max_glass={max_glass} is below the default min_glass={floor_glass}")
+            return (
+                "the budget WAS recorded, but it will NOT apply to a bare "
+                "check_clearance(): " + "; ".join(named) + ", so the ceiling and the "
+                "floors a bare call applies form an empty box and the audit refuses "
+                "rather than adjudicating. Pass the ceiling explicitly on the call "
+                "instead -- check_clearance(max_air=..., max_glass=..., min_air=..., "
+                "min_glass=...) -- which audits against the floors you name"
+            )
+        return None
+    except Exception:  # noqa: BLE001 — a record step NEVER breaks a successful build
+        _forget()
+        return None
+
+
 def build_merit(session, params):
     """Build the default RMS-spot merit via the SEQ wizard (Apply + OK).
 
@@ -2020,6 +2211,17 @@ def build_merit(session, params):
         result["max_air"] = max_air
     if max_glass is not None:
         result["max_glass"] = max_glass
+    # Tier-1: arm / clear / refuse the session-carried budget. At the SUCCESS-path
+    # envelope site, beside the echoes it is derived from — publishing anywhere earlier
+    # would arm a box for a build that then refused.
+    _budget_note = _record_declared_budget(
+        session, system, min_air, min_glass, max_air, max_glass, span_configs
+    )
+    if _budget_note is not None:
+        # Additive key, present ONLY when a declaration was refused, so its PRESENCE is
+        # the disclosure. It never flips ``ok``: the merit was built with the values the
+        # caller passed; what was refused is the RECORD.
+        result["budget_note"] = _budget_note
     if note is not None and warn_extra is not None:
         result["note"] = f"{note}; {warn_extra}"
     elif note is not None:
@@ -3444,7 +3646,11 @@ BUILD_MERIT_SPEC = ToolSpec(
         "By DEFAULT authors positive thickness floors (min_air=0.5, min_glass=1.0, in "
         "lens units — assumes a mm-scale ~10-500mm system; override for micro-optics, or "
         "pass min_air=0/min_glass=0 to restore target-0 bounds) so optimization cannot "
-        "drive a center/edge thickness negative. rings/arms set the Gaussian-Quadrature "
+        "drive a center/edge thickness negative. Optional max_air/max_glass author the "
+        "matching CENTRE-THICKNESS CEILINGS (MXCA/MXCG) — the upper half of the box, and "
+        "the only thing that makes a later 'this element looks too thick' judgement "
+        "adjudicable rather than NO_ORACLE, since a floor measures a MINIMUM and says "
+        "nothing about thickness. rings/arms set the Gaussian-Quadrature "
         "pupil sampling density (more = finer, slower). Returns the operand count + merit "
         "+ the applied floors + resolved ring/arm counts + the applied criterion. NOTE a "
         "rebuild REPLACES the whole MFE (hand-authored operands DELETED) — preserve them "

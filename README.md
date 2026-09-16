@@ -127,6 +127,7 @@ The repository includes a few Claude Code skills for common tasks:
 |---|---|
 | `design-review` | Assess a design against a spec |
 | `design-compare` | Compare designs side by side |
+| `design-vision-review` | Observe a rendered layout and report what lens data does not show (advisory) |
 | `optimize-loop` | Run optimization with monitoring |
 | `zos-api-debug` | Troubleshoot OpticStudio connection / license errors |
 

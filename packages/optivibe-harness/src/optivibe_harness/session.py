@@ -254,6 +254,27 @@ class ZemaxSession:
         # logged, so a leaked engine is never silent. Queryable by callers/tests.
         self.reap_failures = []
 
+        # ------------------------------------------------------------------ #
+        # Tier-1 (the oracle gap): the design-identity epoch + the declared budget.
+        #
+        # ``design_epoch`` is a MONOTONIC counter, incremented by
+        # ``Dispatcher.dispatch`` at call ENTRY for every tool NOT in
+        # ``server.IDENTITY_PRESERVING_TOOLS``. It is the POSITIVE act the owner
+        # ruling required: nothing has to remember to invalidate, because
+        # invalidation is the DEFAULT and preservation is the enumerated exception.
+        # A bump BEFORE the handler is load-bearing -- ``load_design``'s ``LoadFile``
+        # destroys the prior design the moment it is called, so an epoch bumped after
+        # a handler would miss a load that threw halfway.
+        #
+        # ``declared_budget`` is the centre-thickness box ``build_merit`` declared for
+        # THIS design (``clearance._applicable_record`` documents its four application
+        # preconditions). ``None`` means no budget is armed, which is the ONLY state
+        # that can be reached by silence -- every other transition is written on a
+        # success path or is a positive deletion.
+        # ------------------------------------------------------------------ #
+        self.design_epoch = 0
+        self.declared_budget = None
+
         # atexit close is UNCONDITIONAL (standing order L22: reap every spawn).
         atexit.register(self._atexit_close)
 
