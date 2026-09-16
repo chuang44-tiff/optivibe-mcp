@@ -2411,9 +2411,19 @@ def render_layout(session, params):
     """Render a meridional layout PNG from surface geometry. NEVER raises.
 
     Returns ``{ok:true, path, size_bytes, surface_labels, stop_label, folded,
-    note, cb_suppressed, scaffold_suppressed}`` on success, or an ``ok:false`` envelope
-    (``render_unavailable``/``render_gate_failed``/``render_failed``). The figure
+    note, cb_suppressed, scaffold_suppressed, n_surfaces}`` on success, or an ``ok:false``
+    envelope (``render_unavailable``/``render_gate_failed``/``render_failed``). The figure
     is always closed; the write is atomic (temp -> ``_is_png`` gate -> ``os.replace``).
+
+    ``n_surfaces`` is the authoritative ``lde.NumberOfSurfaces`` READ AT
+    RENDER TIME from the state this figure was drawn from — every row, including object,
+    image and every suppressed CB / flat-air dummy; the image plane is ``n_surfaces - 1``.
+    It is NOT ``len(surface_labels)`` (those are only the surfaces DRAWN) and must never
+    be derived from them. It is present on EVERY ``ok:true`` envelope and ABSENT from
+    every ``ok:false`` one, so ``"n_surfaces" in env`` means exactly "a successful render
+    by a producer at or after this change, value a builtin ``int`` >= 3". A count that
+    cannot be read refuses as ``render_unavailable`` ("surface count unreadable: ...")
+    before anything is drawn or written.
 
     Coordinate-break AND flat powerless air dummy/spacer surfaces are SUPPRESSED
     (scaffolding — frame operators / spacers, not surfaces the beam lands on) — only real
@@ -2505,8 +2515,28 @@ def _render_layout_at(session, params):
                 f"matplotlib/numpy unavailable: {type(exc).__name__}: {exc}",
             )
 
-        lde = session.system.LDE
-        n = int(lde.NumberOfSurfaces)
+        # The authoritative surface count is read HERE, ONCE, from the
+        # state about to be drawn, and emitted as `n_surfaces` in the success envelope
+        # (the ONE place the success envelope is BUILT — note `render_layout` then
+        # RETURNS it through two branches, and the config-wrapped one mutates the
+        # dict afterwards, so "built once" is not "cannot be removed downstream";
+        # that second exit is covered by its own tests). A count that cannot be read refuses
+        # BEFORE any geometry is read or any byte is written, so no PNG can exist
+        # without the measurement that qualifies it — the pairing a driver was
+        # previously asked to make in prose, and made once in three renders.
+        #
+        # `except Exception`, NOT BaseException: a deliberate abort must still reach
+        # the outer handler and stay `render_failed` (pinned by
+        #: the deliberate-abort projection test),
+        # which is the same reason the projection read below is narrow.
+        try:
+            lde = session.system.LDE
+            n = int(lde.NumberOfSurfaces)
+        except Exception as exc:  # noqa: BLE001 — unreadable count -> refuse, never draw
+            return _fail(
+                "render_unavailable",
+                f"surface count unreadable: {type(exc).__name__}: {exc}",
+            )
 
         # Need at least one OPTICAL surface to draw (not object/image only).
         optical_count = max(0, n - 2)
@@ -2916,6 +2946,19 @@ def _render_layout_at(session, params):
             "effective_draw_rays": bool(effective_draw_rays and n_rays_drawn > 0),
             "n_fields": n_fields,
             "n_rays_drawn": n_rays_drawn,
+            # The LDE row count read at the TOP of this call —
+            # the SAME `n` this figure was drawn from, never a re-read (a re-read here
+            # would recreate 's temporal proxy inside one tool and would pass
+            # every other test, because the two readings agree on healthy systems).
+            # NEVER derived from surface_labels: those are the surfaces DRAWN, and the
+            # gap is not a constant — live 9/7, 4/2, 14/12, 25/23 (gap 2, nothing
+            # suppressed) but 12/5 (gap 7) on cb_folded_rows. Counts EVERY row,
+            # including object, image and every suppressed CB / flat-air dummy;
+            # the image plane is `n_surfaces - 1`.
+            # Present on this envelope (the only ok:true exit) and ABSENT on every
+            # ok:false envelope, so `"n_surfaces" in env` means exactly: ok:true from
+            # a producer at or after this change, value a builtin int >= 3.
+            "n_surfaces": n,
             "flags": flags,
             # --- aperture / projection / configuration provenance (additive) --- #
             # Always present, may be []; NEVER truncated by what fitted on the
@@ -2986,16 +3029,24 @@ RENDER_LAYOUT_SPEC = ToolSpec(
         "not a part dimension. An aperture that could not be read is DISCLOSED "
         "(drawn as unknown, never as a number nobody measured), as is a projection "
         "the check cannot vouch for; one active configuration is drawn and labelled. "
-        "Returns the saved PNG path plus png_valid/n_fields/n_rays_drawn/"
+        "Returns the saved PNG path plus png_valid/n_fields/n_rays_drawn/n_surfaces/"
         "aperture_not_measured/profile_not_measured/out_of_plane/figure_disclosures/"
-        "cb_suppressed/scaffold_suppressed/flags; inspect result.ok. Folded systems "
+        "cb_suppressed/scaffold_suppressed/flags; inspect result.ok. n_surfaces is the "
+        "system's surface count measured at render time from the state drawn — every "
+        "row including object, image and suppressed scaffolding, so the image plane is "
+        "n_surfaces-1; it is NOT len(surface_labels) and must not be derived from them. "
+        "It is present on every ok:true result and absent when ok is false. Folded systems "
         "(coordinate break / mirror) are drawn in the GLOBAL frame, coherent with "
         "the rays — so the rays ARE drawn for a fold; coordinate-break and flat "
         "powerless air dummy/spacer surfaces are suppressed (scaffolding, not "
         "drawn); real optics (glass, mirrors, curved lens-backs), the stop, and the "
         "image are stamped with their true Zemax numbers. Gotcha: this is a "
         "self-drawn headless figure (native export writes text, not an image) — for "
-        "native fidelity, open the saved .zmx. See describe_surfaces, fold_beam."
+        "native fidelity, open the saved .zmx. This PNG is a SCRATCH drawing for your "
+        "own eyes; it is NOT the reviewable figure — a finding about it cannot be "
+        "recorded (record_findings refuses it as finding_figure_unbound). To have a "
+        "figure reviewed, call save_candidate first and review ITS paired PNG, which is "
+        "the one png_sha256 binds. See describe_surfaces, fold_beam."
     ),
 )
 

@@ -52,6 +52,7 @@ _CB_VARIABLE_INT = "cb_variable_integer_cell"  # §3 refusal family
 from ._cb_solve_guard import (  # noqa: E402 — after the family constants it sits beside
     CB_SOLVE_LOSS as _CB_SOLVE_LOSS,
     CHANGETYPE_ATTEMPTED as _CHANGETYPE_ATTEMPTED,
+    PAR_SOLVE_UNCHECKED as _PAR_UNCHECKED,
     abort_finding as _cb_abort_finding,
     disclosure as _solve_loss_disclosure,
     failure_disclosure as _solve_loss_on_failure,
@@ -979,12 +980,20 @@ def _emit_cb_abort_signal(session, tool, exc, committed, attempted, solve_audit)
             session._log("%s: %s" % (tool, err))
         except BaseException:  # noqa: BLE001 — a breadcrumb NEVER displaces the abort
             pass
+        # ONE OWNER FOR BOTH BREADCRUMBS. ``attach_partial_state`` writes the explicit
+        # partial-state attribute AND ``exc.__context__`` inside its own guard, so the
+        # second guarded ``exc.__context__ = err`` that used to sit here was a redundant
+        # copy of a write this call already performs. The helper's own docstring names "a
+        # second guarded copy at the call site" as the drifting-sibling shape this module
+        # keeps paying for -- and this WAS that copy, so deleting it completes the move
+        # rather than trimming beside it.
+        #
+        # WHAT IS LOST: an independent retry that could only ever fire if
+        # ``setattr(exc, PARTIAL_STATE_ATTR, err)`` raised AND ``exc.__context__ = err``
+        # would then succeed -- a ``__setattr__`` that discriminates BY ATTRIBUTE NAME.
+        # Unmeasured and contrived; not worth carrying a sibling for.
         from .surface_solve import attach_partial_state
         attach_partial_state(exc, err)
-        try:
-            exc.__context__ = err
-        except BaseException:  # noqa: BLE001 — as above
-            pass
     except BaseException:  # noqa: BLE001 — as above; the abort is re-raised by the caller
         pass
 
@@ -1307,6 +1316,29 @@ def _add_return_cb_impl(session, params, committed, attempted,
         # return surface was already a CB or carried nothing non-default (``solves_before``
         # stays ``None`` on both of those paths, so the ordinary envelope is unchanged).
         **_solve_loss_disclosure(system, lde, return_surface, solves_before),
+        # F-F (0.1.6 PR #8 review batch). The ALREADY-CB arm's Par disclosure, and it is
+        # an EXPRESSION rather than an ``if`` on purpose: when this was written
+        # ``cb_surface.py`` sat at 333 against its 334 size ceiling, so a statement here
+        # would have been a design-review event for a disclosure that costs nothing in
+        # this shape.
+        #
+        # THE NUMBER MOVED IN ROUND 2 AND THE SHAPE DOES NOT. The module now measures
+        # 330: deleting the redundant call-site ``__context__`` guard above freed three
+        # statements. THOSE THREE ARE NOT HEADROOM AND MAY NOT BE SPENT — they were freed
+        # by a fix whose reason was the drifting-sibling shape, not by a budget decision,
+        # and rewriting this splat as an ``if`` "because there is room now" is
+        # trim-to-fit reasoning pointed backwards. The expression stands on being the
+        # right shape for a nothing-to-say disclosure; the count is recorded here only so
+        # a reader who checks it does not find a stale 333. The constant lives in
+        # ``_cb_solve_guard`` (no ceiling) beside the retype guard it is the sibling of;
+        # its docstring carries WHY the naive "call the precheck on the other arm" fix is
+        # REFUTED, and this is a DISCLOSURE, never a guard.
+        #
+        # KEYED ON ``changed_type`` BECAUSE THAT IS THE ARM. When the return surface was
+        # retyped, ``precheck`` DID run and the ``solve_loss_audited`` diff one line up is
+        # the real (measured) report; stamping both would claim the row is simultaneously
+        # audited and unaudited. When it was already a CB, no precheck ran at all.
+        **({} if changed_type else _PAR_UNCHECKED),
     }
 
 

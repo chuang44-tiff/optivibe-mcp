@@ -77,7 +77,9 @@ from ..server import ToolSpec
 # ``resolve_floors`` is the ONE floor resolver both tools share — the record a save
 # writes and the guard a promote applies must not be able to disagree about what
 # ``min_air``/``min_glass`` mean.
-from .clearance import check_clearance, resolve_floors
+from .clearance import check_clearance, check_clearance_floor_only, resolve_floors
+from . import _finding
+from . import _judgment
 from ._image_gate import _is_png
 # The bound-scorecard seam. ``loop/`` imports ``tools.*``
 # handlers and ``catalog.metrics``; it imports THIS module only LAZILY, inside
@@ -110,17 +112,18 @@ try:                                                    # pragma: no cover - pac
 # ``tools.*``, so the row-acceptance predicate is INJECTED (``validate_row=``) rather
 # than re-implemented there — ONE acceptance predicate, no layering inversion.
     from ..loop import promotion_gate as _promotion_gate
-# ``criteria.path_state`` — THE ONE ``lstat``-based absence predicate, shared
-# rather than re-expressed. ``_read_audit_record``'s ``record_state`` crosses into the
-# guard WHOLE, where ``absent`` is read as a POSITIVELY ESTABLISHED absence, so this
-# reader is on the enforcement path and its absence question must be the same question
-# the gate's own champion / manifest / contract reads ask. Pure stdlib + ``statuses`` /
-# ``registry``; ``promotion_gate`` already imports it, so no new package edge is created.
-    from ..loop import criteria as _loop_criteria
+# ``criteria`` is DELIBERATELY NOT IMPORTED HERE, and the absence is the correct state.
+# An import of it stood at this line, bound, guarded — and never dereferenced once in this
+# file's ~926 statements. Its comment claimed ``criteria.path_state`` was "shared rather
+# than re-expressed" and named ``_read_audit_record``'s enforcement path, while the block
+# six lines below states the opposite in terms and defines the local twin that actually
+# answers that question (``_path_state``, called at ``_read_audit_record``). A published
+# build has no ``loop/`` package, so importing across that boundary cannot be the shared
+# path the sentence promised; the twin exists precisely because it cannot. Found by the
+# 0.1.6 external review, which read the import and the contradicting block together.
 except ImportError:                                     # pragma: no cover - packaging
     _loop_scorecard = None
     _promotion_gate = None
-    _loop_criteria = None
 
 #: ``"absent"`` | ``"present"`` | ``"unknown"`` for one path.  NEVER raises.
 #:
@@ -796,8 +799,10 @@ def _run_clearance_gate(session, min_air=None, min_glass=None, config=None):
     Returns ``(verdict, summary, gate)`` where ``verdict`` is ``"clean"|"thin"|
     "indeterminate"``. A ``check_clearance`` throw OR a malformed envelope ->
     ``("indeterminate", None, None)`` so a gate defect can never break the save tools'
-    never-raise contract. ``check_clearance`` is looked up on THIS module at call time
-    so a unit test patches ``workspace.check_clearance``.
+    never-raise contract. ``check_clearance_floor_only`` is looked up on THIS module at
+    call time so a unit test patches ``workspace.check_clearance_floor_only`` (Tier-1
+    renamed that seam from ``check_clearance`` when the shared handler became stateful;
+    the gate must audit FLOORS only — see the call site's comment).
 
     ``gate`` is ``{"params": <the params this gate actually ran>, "result": <the raw
     envelope>}`` — the scorecard seam's ``clearance_env``. It
@@ -815,7 +820,16 @@ def _run_clearance_gate(session, min_air=None, min_glass=None, config=None):
             cp["min_glass"] = min_glass
         if config is not None:
             cp["config"] = config
-        env = check_clearance(session, cp)
+        # Tier-1: the FLOOR-ONLY entry, named explicitly. ``check_clearance`` is
+        # now STATEFUL — a bare call inherits the centre-thickness budget the session
+        # declared at ``build_merit`` — and this gate must not. Its verdict feeds the
+        # keeper record, the identity ladder and ``promote_best``'s HARD REFUSAL, all of
+        # which are about the manufacturability FLOOR; a budget declared mid-run has no
+        # business moving any of them. The suppression is a NAMED call, not a hope: the
+        # entry passes ``session_record=None`` by name, performs no identity reads and
+        # deletes nothing, so this gate is byte-identical to a session that never
+        # declared a budget.
+        env = check_clearance_floor_only(session, cp)
         verdict, summary = _classify_clearance(env)
         return verdict, summary, {"params": cp, "result": env}
     except Exception:  # noqa: BLE001 — the gate must NEVER break the never-raise contract
@@ -886,7 +900,8 @@ def _promote_thin_error(summary):
     if not viols:
         return (
             "REFUSED: the design has a manufacturably-thin gap (clearance violation); "
-            "pass force=True to promote anyway, or widen the gap"
+            "pass force=True WITH judgment={'reason': ...} to promote anyway, "
+            "or widen the gap"
         )
     v = _worst_of(viols)
     cfg = v.get("config")
@@ -895,7 +910,8 @@ def _promote_thin_error(summary):
     return (
         f"REFUSED: surface {v.get('surface')} {v.get('kind')} clearance "
         f"{v.get('worst')} < {v.get('threshold')} mm{cfg_txt} is manufacturably "
-        f"thin{extra}; pass force=True to promote anyway, or widen the gap "
+        f"thin{extra}; pass force=True WITH judgment={{'reason': ...}} to promote "
+        f"anyway, or widen the gap "
         "(check_clearance for the full audit)"
     )
 
@@ -1503,8 +1519,14 @@ def _validated_audit_row(row):
     return True
 
 
-def _read_audit_record(zmx_dir, seq, filename):
+def _read_audit_record(zmx_dir, seq, filename, cache=None):
     """Return ``(validated_records, state)`` with ``state`` in absent/unreadable/ok.
+
+    ``cache`` is the OPTIONAL per-call manifest snapshot memo threaded through to
+    ``_scan_manifest_records`` (see its docstring). It is a POSITIONAL-OR-KEYWORD 4th
+    parameter and every production call site passes it POSITIONALLY, deliberately: the
+    shipped test suite monkeypatches this reader with ``lambda *a: ...`` doubles, which
+    absorb a 4th positional argument and would raise on a keyword one.
 
     It is HANDED the already-resolved ``filename`` — it never chooses a file. That is
     what makes it a DEPENDENT reader rather than the independent second resolution
@@ -1559,36 +1581,110 @@ def _read_audit_record(zmx_dir, seq, filename):
     # reader's two — ABSENT alone is absent; PRESENT (a regular file) proceeds to the
     # open; everything else, INCLUDING an unenumerated future state, is UNREADABLE and
     # fails closed.
-    path_state = _path_state(manifest_path)
-    if path_state != PATH_PRESENT:
-        return [], ("absent" if path_state == PATH_ABSENT
-                    else "unreadable")
-    try:
-        with open(manifest_path, "r", encoding="utf-8", newline="") as fh:
-            lines = fh.read().split("\n")
-    except (OSError, ValueError):
-        return [], "unreadable"
+    return _scan_manifest_records(
+        manifest_path,
+        targets=lambda row: _audit_row_targets(row, seq, filename),
+        validated=_validated_audit_row,
+        cache=cache,
+    )
 
-    saw_content = False
-    parsed_any = False
+
+def _scan_manifest_records(manifest_path, *, targets, validated, cache=None):
+    """The manifest row-scan and its ABSENT/UNREADABLE ladder. -> ``(records, state)``.
+
+    EXTRACTED at V-INT Part 2 so the JUDGMENT reader inherits this ladder
+    instead of copying it. It is not a tidy-up: the discrimination below took **four
+    audit rounds** to get right — a bare ``not isfile -> absent`` collapsed "no evidence
+    exists" into "something is there and I cannot read it" (round 3, broken inside
+    the very function whose docstring table exists to enforce it), and the repair for
+    THAT still fell through on a dangling link or a directory junction, both of which are
+    creatable on this platform with no privilege (round 4). A second hand-written copy of
+    a ladder with that history is an sibling waiting to happen.
+
+    ``targets`` and ``validated`` are INJECTED, so the ladder cannot know or care which
+    row family it is scanning, and neither family can drift from the other.
+
+    NEVER raises (``RecursionError`` included). ``ArtifactSink.load_manifest`` is
+    deliberately NOT reused — it RAISES on a non-final torn line, so one mid-file
+    corruption would break every promote.
+
+    ▶ ``cache`` — **ONE FILE PASS PER PROMOTE, NOT ONE PER ROW CLASS.** The finding gate
+ asks THREE row-class questions of the same manifest at the same instant, and
+      before this parameter existed each one re-opened and re-parsed the whole file: a
+      2000-row manifest went from 2 opens to 5 on every promote, which
+      ``test_x4_a_2000_row_manifest_resolves_in_two_linear_passes`` pins against.
+
+      What is memoised is the FILE-LEVEL half of the scan and nothing else — the
+      ``_path_state`` verdict, the open/decode outcome, the rows that parsed to a dict,
+      and the two file-level flags (``saw_content`` / ``parsed_any``). The CLASS-LEVEL
+      half — ``targets``, ``validated``, ``saw_targeting``, ``saw_invalid_targeting`` and
+      the whole ABSENT/UNREADABLE derivation below — is re-run per call, over the same
+      rows in the same order, so each class still derives its OWN state from its OWN
+      predicates. That is what keeps a class's blast radius its own: an invalid AUDIT row
+      still makes the audit read ``unreadable`` without touching the finding read's state,
+      and ABSENT is never collapsed into UNREADABLE (or the reverse) for any class.
+      A shared cache changes WHEN the bytes were read, never WHAT a class concludes.
+
+      Keyed by ``manifest_path``, so a cache handed to two different manifests cannot
+      answer for the wrong one. ``cache=None`` — every shipped call site but the promote
+      gate — reads the file exactly as before, byte-for-byte identical behaviour.
+
+      THE ONE THING IT DOES CHANGE, said plainly: the identity read and the three
+      finding-gate classes now observe ONE snapshot of the manifest instead of four taken
+      microseconds apart. Nothing on this path writes the manifest between them, and a
+      gate that reasons about a single observation cannot be handed a torn intermediate
+      state that a re-read would have produced — the fail-consistent direction.
+    """
+    scan = None if cache is None else cache.get(manifest_path)
+    if scan is None:
+        # ``criteria.path_state`` is THE one absence predicate — ``lstat``-based,
+        # so a link is OBSERVED rather than resolved-and-lost, and its default arm is
+        # UNKNOWN. Its three states map onto this reader's two: ABSENT alone is absent;
+        # PRESENT (a regular file) proceeds to the open; everything else, INCLUDING an
+        # unenumerated future state, is UNREADABLE and fails closed.
+        path_state = _path_state(manifest_path)
+        if path_state != PATH_PRESENT:
+            scan = ((), False, False,
+                    ("absent" if path_state == PATH_ABSENT
+                     else "unreadable"))
+        else:
+            try:
+                with open(manifest_path, "r", encoding="utf-8", newline="") as fh:
+                    lines = fh.read().split("\n")
+            except (OSError, ValueError):
+                scan = ((), False, False, "unreadable")
+            else:
+                parsed_rows = []
+                saw_content = False
+                parsed_any = False
+                for line in lines:
+                    if not line:
+                        continue
+                    saw_content = True
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, RecursionError):
+                        continue  # torn / partial / pathological row — skip, never raise
+                    if not isinstance(row, dict):
+                        continue
+                    parsed_any = True
+                    parsed_rows.append(row)
+                scan = (tuple(parsed_rows), saw_content, parsed_any, None)
+        if cache is not None:
+            cache[manifest_path] = scan
+
+    parsed_rows, saw_content, parsed_any, load_state = scan
+    if load_state is not None:
+        return [], load_state
+
     saw_targeting = False
     saw_invalid_targeting = False
     records = []
-    for line in lines:
-        if not line:
-            continue
-        saw_content = True
-        try:
-            row = json.loads(line)
-        except (ValueError, RecursionError):
-            continue  # torn / partial / pathological row — skip, never raise
-        if not isinstance(row, dict):
-            continue
-        parsed_any = True
-        if not _audit_row_targets(row, seq, filename):
+    for row in parsed_rows:
+        if not targets(row):
             continue
         saw_targeting = True
-        if _validated_audit_row(row):
+        if validated(row):
             records.append(row)
         else:
             saw_invalid_targeting = True
@@ -1622,6 +1718,441 @@ def _read_audit_record(zmx_dir, seq, filename):
     if saw_targeting:
         return [], "unreadable"
     return [], "absent"
+
+
+# =========================================================================== #
+# THE JUDGMENT RECORD — V-INT Part 2.
+#
+# The IO half. Every rule lives in `_judgment`, which is pure and knows nothing about
+# manifests; this half knows nothing about what makes a judgment valid. The predicates
+# cross the boundary by INJECTION, so there is exactly one acceptance set and no second
+# opinion about what a sha256 is or whether ``True`` is the integer 1.
+# =========================================================================== #
+def _judgment_row_targets(row, seq, filename, design_name):
+    # ``design_name`` threaded through after a review (H-3): the frozen
+    # identity is a five-tuple and the selection was comparing two of it.
+    return _judgment.row_targets(row, seq, filename, exact_int=_exact_int,
+                                 design_name=design_name)
+
+
+def _validated_judgment_row(row):
+    return _judgment.validated_row(row, exact_int=_exact_int, is_hex64=_is_hex64)
+
+
+def _write_judgment_record(zmx_dir, *, seq, design_name, filename, zmx_sha256,
+                           finding_ids, reason, disposition=None):
+    """Append ONE ``judgment`` row to ``<zmx_dir>/manifest.jsonl``.
+
+    Returns ``"written"`` or ``"not_written:<reason>"``. NEVER raises.
+
+    THE RETURNED TOKEN IS A REPORT, NOT A PROOF. A fault can leave zero bytes, a torn
+    prefix, or a complete line. **No rollback is specified and none is wanted** — the contract is
+    explicit that a rollback here would orphan an append-only manifest row, a consumed
+    seq, the PNG, and possibly a scorecard binding the deleted artifact's digest. The
+    failure mode that ships instead is a MISSING RECORD, and since Part 1 nothing blocks
+    on one, so a missing record is a lost note rather than a wrongly-unblocked design.
+
+    IT VALIDATES ITS OWN ROW with the reader's predicate before writing. A row this
+    writer cannot get past that reader is evidence DEAD ON ARRIVAL, and a sibling module
+    shipped exactly that: it reported ``"written"`` for a row that could never validate,
+    and the later read then served a remedy blaming the user's filesystem while the
+    manifest was intact.
+    """
+    try:
+        row = _judgment.build_row(
+            seq=seq, design_name=design_name, filename=filename,
+            zmx_sha256=zmx_sha256, finding_ids=finding_ids, reason=reason,
+            disposition=disposition, ts=_io.utc_now_iso(),
+        )
+        sanitised = _sanitize_nonfinite(row)
+        if not (_judgment_row_targets(sanitised, seq, filename, design_name)
+                and _validated_judgment_row(sanitised)):
+            return "not_written:record_would_not_validate"
+        payload = json.dumps(sanitised, ensure_ascii=False, allow_nan=False)
+        _io.append_line_fsync(os.path.join(zmx_dir, "manifest.jsonl"), payload)
+        return "written"
+    except Exception as exc:  # noqa: BLE001 — the record is evidence, never a gate
+        return f"not_written:{type(exc).__name__}"
+
+
+def _read_judgment_record(zmx_dir, seq, filename, design_name):
+    """Judgment rows for this EXACT ``(design_name, seq, filename)``. -> ``(rows, state)``.
+
+    A DEPENDENT reader, HANDED the resolved ``filename`` — it never chooses a file.
+    That is the property `_read_audit_record`'s docstring names as what makes it a
+    dependent reader "rather than the independent second resolution that reopened the
+    Promote CRIT", and it is inherited here rather than re-argued.
+
+    The ABSENT/UNREADABLE ladder is `_scan_manifest_records`, shared with the audit
+    reader. It is NOT copied: that ladder took four audit rounds to settle (a bare
+    ``not isfile`` collapsing absent into unreadable, then a repair that still fell
+    through on a dangling link or a junction), and a second hand-written copy is the
+    sibling this programme keeps finding.
+    """
+    return _scan_manifest_records(
+        os.path.join(zmx_dir, "manifest.jsonl"),
+        targets=lambda row: _judgment_row_targets(row, seq, filename, design_name),
+        validated=_validated_judgment_row,
+    )
+
+
+def _judgment_receipt(zmx_dir, *, design_name, seq, filename, subject):
+    """The receipt, produced ONLY from a RE-READ. NEVER raises.
+
+    Never built from the request. The request says what the caller ASKED to record; the
+    receipt says what is on disk AND still bound to these bytes. They differ exactly when
+    something went wrong, which is the only time a receipt earns its keep.
+
+    ▶ THE DIGEST RE-BIND IS THE REPLAY GUARD, and it is why the receipt re-reads the FILE
+      and not just the manifest. A caller can hand any ``(seq, filename)``; the row it
+      finds names the bytes that were there when the judgment was made. If the file at
+      that path now digests differently, the record is about a DIFFERENT candidate and
+      the receipt says ``digest_mismatch`` rather than reporting a judgment that was
+      never made about what is there now.
+
+    An unreadable file digests to ``None`` (`_sha256_file` returns UNKNOWN, never "no
+    match"), and UNKNOWN resolves toward the alarm: ``unreadable``, never a silent pass.
+    """
+    def _receipt(zmx_sha256, ids, state, reason=None, disposition=None):
+        return _judgment.receipt(
+            zmx_dir=zmx_dir, design_name=design_name, seq=seq, filename=filename,
+            zmx_sha256=zmx_sha256, recorded_finding_ids=ids, recorded_reason=reason,
+            recorded_disposition=disposition, read_state=state)
+
+    # The digest of what is on disk NOW, read up front so that even a receipt which
+    # establishes NOTHING still names the bytes it was asked about (H-3). The failure
+    # receipt used to report ``zmx_sha256: null``, losing the one field that says which
+    # candidate the answer is about.
+    on_disk = _sha256_file(os.path.join(zmx_dir, filename))
+    try:
+        records, state = _read_judgment_record(zmx_dir, seq, filename, design_name)
+        if state != "ok":
+            return _receipt(on_disk, None, state)
+        rec, resolved = _judgment.resolve_records(records, subject=subject)
+        if resolved == "absent":
+            # Rows may exist for these bytes under OTHER subjects; none records this
+            # one. Reported as absent rather than conflicting -- see resolve_records.
+            return _receipt(on_disk, None, "absent")
+        if resolved != "ok":
+            # Two rows for the same bytes that DISAGREE. Never resolved by append order:
+            # that is the `[-1]` hazard `_key`'s own comment records being hit three
+            # times in this file. Reported as its own state, not folded into
+            # "unreadable", because "I read two rows and they disagree" and "I could not
+            # read it" have opposite remedies.
+            return _receipt(on_disk, None, resolved)
+        if on_disk is None:
+            return _receipt(rec.get("zmx_sha256"), None, "unreadable")
+        if on_disk != rec.get("zmx_sha256"):
+            return _receipt(rec.get("zmx_sha256"), None, "digest_mismatch")
+        # ``disposition`` is read from the ROW, exactly as the ids and the reason are —
+        # never echoed from the request. On the empty-ids path the key is FORBIDDEN, so
+        # ``.get`` answers ``None`` and the receipt says what the row says.
+        return _receipt(rec.get("zmx_sha256"), list(rec.get("finding_ids") or ()), "ok",
+                        reason=rec.get("reason"),
+                        disposition=rec.get("disposition"))
+    except Exception:  # noqa: BLE001 - a receipt is disclosure and never a gate
+        return _receipt(on_disk, None, "unreadable")
+
+
+# =========================================================================== #
+# THE FINDING RECORD — VISION<->DESIGN CONTRACT, PHASE 2.
+#
+# The IO half, on EXACTLY the split `_judgment` established one section up: every rule
+# lives in `_finding`, which is pure and knows nothing about manifests; this half knows
+# nothing about what makes a finding valid. The predicates cross by INJECTION, so there
+# is one acceptance set and no second opinion about what a sha256 is.
+#
+# ▶ EVERY reader here is ONE call to `_scan_manifest_records`. Not one of them
+#   re-implements the ABSENT/UNREADABLE ladder: that ladder took four audit rounds to
+#   settle (a bare ``not isfile`` collapsing absent into unreadable, then a repair that
+#   still fell through on a dangling link or a directory junction), and a second
+# hand-written copy is the sibling this programme keeps finding.
+#
+# ▶ WHAT THE INHERITED LADDER MEANS FOR A FINDING, stated rather than discovered:
+#   * an INVALID PARSED row that TARGETS the scope fails the WHOLE read `"unreadable"`
+#     (`:1638-1659` above). That is the fail-closed direction a coverage scan needs — a
+#     hand-edited finding row might have been the unanswered one.
+#   * a TORN line is SKIPPED before ``targets`` is ever called (`:1623-1626`), so it is
+#     invisible to this reader and the read proceeds on the other rows. A torn finding
+#     line is therefore a LOST finding in the PERMISSIVE direction — the shipped
+#     writer's own stated failure mode (`:1694-1699`, *"a MISSING RECORD"*). Disclosed
+# as the contract an earlier cycle; NOT pinned as correct.
+# =========================================================================== #
+def _validated_finding_row(row):
+    return _finding.validated_row(row, exact_int=_exact_int, is_hex64=_is_hex64)
+
+
+def _read_finding_records(zmx_dir, *, design_names):
+    """Validated `finding` rows for these DESIGNS. -> ``(rows, state)``. NEVER raises.
+
+    DESIGN-scoped, not identity-scoped, and that is the Q3 ruling in one argument: a finding
+    SURVIVES the bytes it was made about, so scoping
+    the read to one `zmx_sha256` would retire every finding the moment the design moved
+    on — which is the behaviour the ruling rejected.
+    """
+    return _scan_manifest_records(
+        os.path.join(zmx_dir, "manifest.jsonl"),
+        targets=lambda row: _finding.row_targets_design(row,
+                                                        design_names=design_names),
+        validated=_validated_finding_row,
+    )
+
+
+def _read_finding_records_any(zmx_dir, *, cache=None):
+    """Validated `finding` rows for ANY design. -> ``(rows, state)``. NEVER raises.
+
+    The NAME-PROOF arm: when the subject set cannot be
+    proven, the question is not "is there an open finding under MY design" but "is there
+    a finding row here AT ALL", and a design-scoped read cannot answer it — a row filed
+    under a name the caller cannot prove is precisely the row the arm exists to see.
+    """
+    return _scan_manifest_records(
+        os.path.join(zmx_dir, "manifest.jsonl"),
+        targets=_finding.row_targets_any,
+        validated=_validated_finding_row,
+        cache=cache,
+    )
+
+
+def _read_audit_records_design(zmx_dir, *, design_names, cache=None):
+    """Validated `candidate_audit` rows for these DESIGNS. -> ``(rows, state)``.
+
+    The rows the contract ANCHOR joins against. Without them a judgment row is
+    a self-certified token: anyone who can append a well-formed line can discharge a
+    finding by naming a `zmx_sha256` that never existed.
+
+    An invalid parsed audit row under the subject set makes THIS read `unreadable` and
+    the gate then refuses — the design-wide blast radius of the shipped per-seq rule
+    (`:1518-1538`), inherited rather than re-argued. Disclosed the contract S10.
+    """
+    names = set(design_names)
+    return _scan_manifest_records(
+        os.path.join(zmx_dir, "manifest.jsonl"),
+        targets=lambda row: (row.get("event") == _AUDIT_EVENT
+                             and row.get("design_name") in names),
+        validated=_validated_audit_row,
+        cache=cache,
+    )
+
+
+def _read_judgment_records_design(zmx_dir, *, design_names, cache=None):
+    """Validated `judgment` rows for these DESIGNS. -> ``(rows, state)``.
+
+    ▶ **SELECTION IS NOT ACCEPTANCE.** The rows this returns are shape-valid CANDIDATES
+      for anchoring, and only the subset `_finding.anchored_judgment_rows` admits
+      may reach `open_finding_ids` / `per_id_conflicts`. Handing these rows straight to
+      either is defect, and the contract is the tripwire for it.
+
+    The shipped `_read_judgment_record` (`:1724-1742`) is per ARTIFACT IDENTITY and stays
+    untouched: it answers "did THIS judgment land on THESE bytes", which is a different
+    question from "what has this DESIGN judged", and collapsing the two is how the Q3
+    ruling would be lost at the reader.
+    """
+    names = set(design_names)
+    return _scan_manifest_records(
+        os.path.join(zmx_dir, "manifest.jsonl"),
+        targets=lambda row: (row.get("event") == _judgment.JUDGMENT_EVENT
+                             and row.get("design_name") in names),
+        validated=_validated_judgment_row,
+        cache=cache,
+    )
+
+
+def _read_finding_gate_records(zmx_dir, *, design_names, cache=None):
+    """The contract gate's THREE row classes, from ONE pass over the manifest.
+
+    -> ``{"finding": (rows, state), "judgment": (rows, state), "audit": (rows, state)}``.
+    NEVER raises.
+
+    ▶ **THIS EXISTS FOR ITS COST, NOT ITS CONVENIENCE.** Point P asks three row-class
+      questions of one file at one instant. Asked as three independent reads, a 2000-row
+      manifest was OPENED AND RE-PARSED THREE TIMES on every promote — measured, the
+      promote went from 2 file opens to 5, which
+      ``test_x4_a_2000_row_manifest_resolves_in_two_linear_passes`` pins against as a
+      LINEAR, LOW-CONSTANT property of a hot path. Sharing one ``cache`` with the
+      identity read (`_read_audit_record`) puts it back at 2.
+
+    ▶ **ONE ACCEPTANCE SET, THREE TIMES OVER.** Each class is admitted by the SAME
+      validated-row predicate it has always used — `_validated_finding_row`,
+      `_validated_judgment_row`, `_validated_audit_row` — reached through the SAME single
+      readers above, not a fourth inlined copy of any of them. This function ROUTES; it
+      decides nothing about what a row is.
+
+    ▶ **AND THEREFORE THE LADDER IS UNCHANGED, PER CLASS.** Because the collapse is in
+      `_scan_manifest_records`'s FILE-LEVEL half only, every class still derives its own
+      ``absent`` / ``unreadable`` / ``ok`` from its own ``targets`` over the same rows in
+      the same order. An invalid audit row makes the AUDIT read unreadable and leaves the
+      finding read's state untouched (the contract S10 design-wide blast radius stays exactly
+      as wide as it was, no wider); ABSENT and UNREADABLE are never collapsed into one
+      another for any class. The.. ladder above this reader consumes three
+      independent ``(rows, state)`` pairs, exactly as before.
+    """
+    if cache is None:
+        cache = {}
+    finding = _read_finding_records_any(zmx_dir, cache=cache)
+    judgment = _read_judgment_records_design(
+        zmx_dir, design_names=design_names, cache=cache)
+    audit = _read_audit_records_design(
+        zmx_dir, design_names=design_names, cache=cache)
+    return {"finding": finding, "judgment": judgment, "audit": audit}
+
+
+def _finding_resolver(zmx_dir, design_name):
+    """The `resolve_ids` carrier for `_judgment.normalize_request`. -> callable.
+
+    ``resolve_ids(ids) -> list[str] | None`` — the ids NOT carried by any validated
+    `finding` row in scope, or ``None`` when the manifest could not be READ.
+
+    ▶ **ONE BUILDER, TWO CALL SITES** (`save_candidate` and `promote_best`), because two
+      hand-written closures are two chances to scope the read differently — and the scope
+      IS the Q3 ruling. A divergence here would make the same ids resolvable on save and
+      unresolvable on promote, which reads to an author as the manifest having changed.
+
+    ``None`` IS NOT ``[]`` (`promotion_gate.py:32-36`). An unreadable manifest does
+    not mean "these ids name nothing"; it means nobody can tell. The distinction is what
+    :data:`_judgment.JUDGMENT_UNRESOLVABLE` exists to carry, and collapsing it here would
+    send an author with a valid judgment to re-type their own ids.
+    """
+    def resolve_ids(ids):
+        if not isinstance(zmx_dir, str):
+            # The manifest's DIRECTORY could not be resolved, so nobody can say what
+            # these ids point at. UNKNOWN, and UNKNOWN travels as `None` — the same
+            # answer an unreadable file gives, for the same reason.
+            return None
+        rows, state = _read_finding_records(zmx_dir, design_names={design_name})
+        if state == "unreadable":
+            return None
+        # `absent` is a POSITIVELY ESTABLISHED absence and answers the question: no
+        # finding row exists, so every id names nothing. That is a refusal the author
+        # can act on, and it is NOT the unreadable case.
+        known = set()
+        for row in rows:
+            fid = row.get("finding_id")
+            if isinstance(fid, str):
+                known.add(fid)
+        return [i for i in ids if i not in known]
+    return resolve_ids
+
+
+def _finding_row_targets_identity(row, seq, filename, design_name):
+    """True iff ``row`` is a finding row FOR this ``(design_name, seq, filename)``.
+
+    The five-tuple selection `_judgment.row_targets` performs, one event over, and with
+    the two properties that function's docstring argues for kept EXACTLY: ``filename`` by
+    RAW string equality (never basenamed, so ``../0005_x.zmx`` FAILS rather than silently
+    matching), and ``seq`` through the injected ``_exact_int`` (so a row carrying
+    ``seq: True`` does not match seq 1).
+    """
+    if not isinstance(row, dict) or row.get("event") != _finding.FINDING_EVENT:
+        return False
+    row_seq = row.get("seq")
+    if not _exact_int(row_seq) or not _exact_int(seq) or row_seq != seq:
+        return False
+    if row.get("design_name") != design_name:
+        return False
+    return row.get("filename") == filename
+
+
+def _write_finding_record(zmx_dir, *, rows):
+    """Append `finding` rows to ``<zmx_dir>/manifest.jsonl``. NEVER raises.
+
+    Returns ``"written"`` or ``"not_written:<reason>"``, on the shipped judgment writer's
+    contract (`:1688-1705`): THE RETURNED TOKEN IS A REPORT, NOT A PROOF, and no rollback
+    is specified or wanted — a rollback here would orphan an append-only manifest row.
+
+    IT VALIDATES ITS OWN ROWS with the READER's predicate before writing ANY of
+    them. A row this writer cannot get past that reader is evidence DEAD ON ARRIVAL, and
+    a sibling module shipped exactly that: it reported ``"written"`` for a row that could
+    never validate, and the later read served a remedy blaming the user's filesystem
+    while the manifest was intact.
+
+    ALL-OR-NOTHING on validation, and only on validation: every row is checked BEFORE the
+    first byte is appended, so a batch containing one bad row leaves the manifest
+    byte-identical. A fault DURING the appends is a different thing entirely and is
+    reported, not repaired — the partial write stands and the receipt's re-read is what
+    tells the caller which rows landed.
+    """
+    try:
+        sanitised = [_sanitize_nonfinite(row) for row in rows]
+        for row in sanitised:
+            if not _validated_finding_row(row):
+                return "not_written:record_would_not_validate"
+        payloads = [json.dumps(row, ensure_ascii=False, allow_nan=False)
+                    for row in sanitised]
+        path = os.path.join(zmx_dir, "manifest.jsonl")
+        for payload in payloads:
+            _io.append_line_fsync(path, payload)
+        return "written"
+    except Exception as exc:  # noqa: BLE001 — the record is evidence, never a gate
+        return f"not_written:{type(exc).__name__}"
+
+
+def _finding_receipt(zmx_dir, *, design_name, seq, filename, expected_ids):
+    """The receipt, produced ONLY from a RE-READ. NEVER raises.
+
+    Never built from the request (`_judgment.py:357-359`). The request says what the
+    caller ASKED to record; the receipt says what is ON DISK and still bound to these
+    bytes. They differ exactly when something went wrong, which is the only time a
+    receipt earns its keep — and the contract T8 is the row that pins it: a writer
+    that lands 2 of 3 rows must not be able to report 3.
+
+    ▶ THE DIGEST RE-BIND IS THE REPLAY GUARD (`:1752-1757`), inherited rather than
+      re-argued. A caller can hand any ``(seq, filename)``; the rows it finds name the
+      bytes that were there when the findings were recorded. If the file at that path now
+      digests differently, the records are about a DIFFERENT candidate.
+
+    ``recorded_finding_ids`` is the ids found on disk IN ``expected_ids`` ORDER — the
+    reply's order, never the manifest's — and ``None`` on every non-``ok`` state, so a
+    reader cannot mistake "no ids recorded" for "the record is absent/unreadable"
+    (`_judgment.py:361-362`, schema 4).
+    """
+    def _receipt(zmx_sha256, ids, state):
+        if state != "ok":
+            ids = None
+        return {
+            "identity": {
+                "zmx_dir": zmx_dir,
+                "design_name": design_name,
+                "seq": seq,
+                "filename": filename,
+                "zmx_sha256": zmx_sha256,
+            },
+            "recorded_finding_ids": ids,
+            "read_state": state,
+        }
+
+    # The digest of what is on disk NOW, read up front so that even a receipt which
+    # establishes NOTHING still names the bytes it was asked about (H-3).
+    on_disk = _sha256_file(os.path.join(zmx_dir, filename)
+                           if isinstance(filename, str) else zmx_dir)
+    try:
+        records, state = _scan_manifest_records(
+            os.path.join(zmx_dir, "manifest.jsonl"),
+            targets=lambda row: _finding_row_targets_identity(
+                row, seq, filename, design_name),
+            validated=_validated_finding_row,
+        )
+        if state != "ok":
+            return _receipt(on_disk, None, state)
+        if on_disk is None:
+            # UNKNOWN resolves toward the alarm: `_sha256_file` returns UNKNOWN, never
+            # "no match", so an unreadable candidate is `unreadable` and never a pass.
+            return _receipt(records[0].get("zmx_sha256"), None, "unreadable")
+        bound = [r for r in records if r.get("zmx_sha256") == on_disk]
+        if not bound:
+            return _receipt(records[0].get("zmx_sha256"), None, "digest_mismatch")
+        found = {r.get("finding_id") for r in bound}
+        # REPLY ORDER, from `expected_ids`; the manifest's own order is append order and
+        # answering in it would make the receipt a function of when rows were written.
+        ids = [i for i in expected_ids if i in found]
+        if len(ids) != len(list(expected_ids)):
+            # A write that landed some rows and not others. The caller is NEVER told ids
+            # landed that did not (T8), and the state says the read did not establish
+            # what was asked — `absent`, because the rows genuinely are not there.
+            return _receipt(on_disk, None, "absent")
+        return _receipt(on_disk, ids, "ok")
+    except Exception:  # noqa: BLE001 — a receipt is disclosure and never a gate
+        return _receipt(on_disk, None, "unreadable")
 
 
 def _classify_identity(records, state, src_sha, design_name, floors):
@@ -2314,6 +2845,91 @@ def _get_default_sink(session):
     return sink
 
 
+#: reviewable-figure an earlier cycle (DRAFT-SPEC section 2.4, route (a)) -- the keys of the INNER
+#: ``render_layout`` envelope that ``save_candidate`` propagates onto its OWN envelope.
+#:
+#: WHY THEY HAVE TO TRAVEL AT ALL: ``png_sha256`` names the REVIEWABLE figure, and the
+#: analyzer's ``stamped_universe`` (bench ``vision_review/schema.py``) needs
+#: ``surface_labels`` PLUS ``n_surfaces`` to build the universe a recorded finding is
+#: scored against. Without them a candidate PNG is a picture nobody can score, and the
+#: only alternative -- pairing this PNG with a separately dispatched ``render_layout``
+#: envelope from the same turn -- is the TEMPORAL PROXY ``universe_for`` exists to
+#: refuse (a mutating call between the two contaminates the answer). So the facts ride
+#: WITH the bytes they describe, from the SAME render invocation that wrote them.
+#:
+#: THE PROVENANCE HAZARD THIS WIDENS, STATED HERE RATHER THAN DISCOVERED LATER.
+#: ``n_surfaces`` is NOT unique to render envelopes, and the number that matters is the
+#: CALLER-FACING one. Measured on this tree: fourteen files under ``tools/`` mention the
+#: identifier; five lines emit it as a dict key, across four files; and exactly **TWO**
+#: of those reach an envelope a caller ever sees --
+#:
+#:   ``layout_render.py:2960``  -> ``render_layout``'s success envelope
+#:   ``_beam_reach.py:453``     -> returned VERBATIM by ``verify_beam_path``
+#:                                 (``beam_verify.py:158``), with ``figure_path`` written
+#:                                 into that same dict at ``:156``
+#:
+#: The other two emissions never leave the module: ``clearance.py:1075`` is
+#: ``_live_shape``'s private shape stamp, whose only consumer compares it against a
+#: recorded one (``optimize_merit.py:1755``); ``zoom_compose.py:174`` and ``:1310`` are an
+#: internal validation plan and a topology checkpoint. **This change makes
+#: ``save_candidate`` the THIRD caller-facing emitter.**
+#:
+#: The key does not carry WHO produced it, so nothing in the envelope distinguishes a
+#: count read at render time from one taken by an earlier call; what keeps them apart is
+#: the consumer's tool-NAME filter, which lives in the analyzer, not here. That is
+#:, and this constant is a
+#: deliberate widening of it, not an oversight. Do not teach any consumer to trust the
+#: key by presence alone.
+#:
+#: — THE COUNT ABOVE IS THE THIRD ONE WRITTEN HERE, AND THE FIRST TWO WERE BOTH WRONG.
+#: A probe census said TEN (it counted MENTIONS and filtered by filename convention,
+#: excluding ``_beam_reach.py`` -- the dangerous one). The correction said FOUR (right
+#: about emissions, wrong about reach). A cold-read lane checking the CORRECTION found
+#: TWO. Each number was internally consistent and each answered a slightly different
+#: question than the sentence it sat in. The precise reading is worth the words because
+#: it SHARPENS the hazard rather than softening it: the caller-facing set is small, and
+#: ``verify_beam_path`` -- the temporal proxy this ticket exists for -- is half of it.
+#:
+#: WHY THEY TRAVEL ONLY ON A SUCCESSFUL RENDER: ``layout_render._fail()`` puts
+#: ``"surface_labels": []`` on EVERY failure envelope. Copying keys off a failed render
+#: would therefore publish an empty label list that describes no picture at all -- and
+#: ``stamped_universe`` refuses empty labels precisely because scoring against nothing
+#: reads as a vacuous 1.000. So these keys travel ONLY when the render succeeded, and a
+#: caller reads their ABSENCE as "no reviewable figure was produced", exactly as the
+#: shipped ``_scorecard_key`` / ``_lineage_key`` construction does one function down.
+#:
+#: — THIS DOES NOT MEAN AN EMPTY LABEL LIST CANNOT ARRIVE, AND AN EARLIER DRAFT OF
+#: THIS COMMENT SAID IT DID [internal adversarial audit, ]. It was headed
+#: "ABSENT-ENTIRELY, NEVER EMPTY, AND THAT IS MEASURED" while the measurement behind it
+#: covered ONLY ``_fail()``. The ``png_ok`` gate stops the empty list arriving from a
+#: FAILED render. Nothing stops it arriving from a SUCCESSFUL one:
+#: ``_render_layout_at`` returns ``ok:True`` with ``surface_labels == []`` when every
+#: optical surface is suppressed scaffolding (an all-coordinate-break fold), appends a
+#: blank-figure flag and falls through to the success dict. That state is SHIPPED and
+#: ASSERTED -- ``the unit test``.
+#:
+#: **The empty list is PROPAGATED anyway, deliberately.** It is what the renderer
+#: established: nothing was drawn. Withholding it would report "not established", which
+#: is a different and false claim, and would cost the consumer the reason -- with the
+#: list present ``stamped_universe`` refuses with "surface_labels is EMPTY"; without it
+#: the analyzer can only say the envelope is unstamped. Both refuse; one says why.
+#:
+#: The trap that remains is NOT in this propagation and is not an earlier cycle's to close:
+#: ``png_sha256`` IS bound on such a save, so ``record_findings`` will ACCEPT a
+#: judgement against a figure the analyzer will then refuse to score. That is
+#:. Pinned here as a measured
+#: state by ``the unit test...`` so it is known rather
+#: than discovered.
+_FIGURE_ENVELOPE_KEYS = (
+    "surface_labels",       # the surfaces DRAWN, stamped; NEVER the row count
+    "n_surfaces",           # lde.NumberOfSurfaces read INSIDE that render; image = n-1
+    "stop_label",           # which stamp is the stop, as drawn
+    "figure_disclosures",   # what the figure does NOT faithfully depict
+    "flags",                # render-time flags (ray-trace degradations, etc.)
+    "config_evaluated",     # the multi-config configuration this picture depicts
+)
+
+
 def save_candidate(session, params):
     """Snapshot the live system as a durable candidate ``.zmx`` (+ paired ``.png``).
 
@@ -2347,6 +2963,65 @@ def save_candidate(session, params):
             "png_path": None,
             "png_ok": False,
         }
+
+    # V-INT Part 2 — the optional JUDGMENT block, validated BEFORE anything is created.
+    #
+    # PRE-MUTATION ON PURPOSE. ``_get_sink`` below makes directories, so validating
+    # after it would leave a workspace half-built for a call that is going to be
+    # refused. The caller fixes the block and re-calls, and nothing was lost.
+    #
+    # A MALFORMED JUDGMENT REFUSES THE SAVE rather than being dropped, and that is the
+    # deliberate direction: silently discarding it leaves an agent believing it recorded
+    # a reason when it recorded nothing, which is precisely the hole this record exists
+    # to close. Absent is different from malformed — an absent block is the ordinary
+    # case and changes nothing.
+    judgment_req = None
+    if "judgment" in params:
+        # ``_writable_name`` is INJECTED, not re-implemented (M-1). It is THE
+        # manifest-encodability rule this file already owns; a second copy in
+        # `_judgment` could drift from the writer it is supposed to predict.
+        #
+        # ``resolve_ids`` is the SECOND injected carrier, built
+        # by the ONE builder both call sites share so the id scope cannot diverge
+        # between save and promote. ``judgment_family`` is the channel the refusal's
+        # family travels in: a caller cannot tell `judgment_param` from
+        # `judgment_unresolvable` by parsing an error string, and the two have OPPOSITE
+        # remedies (the request vs the manifest).
+        #
+        # ▶ **SPEC DEVIATION, REPORTED NOT SMUGGLED**. The spec
+        #   names the closure's directory as ``_design_dir(session, design_name)``. That
+        #   is the DESIGN dir; the manifest every finding, audit and judgment row lives
+        #   in is ``<design_dir>/candidates/zmx/manifest.jsonl`` — what `_get_sink`
+        #   (`:2625`) builds, what `save_candidate` later resolves as ``_audit_dir``
+        #   (`:2981`), and what `promote_best` computes at `:3400`. Reading the design
+        #   dir would find NO manifest, so every id would resolve to nothing and EVERY
+        #   judgment answering a finding would be refused. The path is derived from the
+        #   shipped writer rather than transcribed.
+        #
+        #   Resolved in a guard because this site is PRE-MUTATION and outside every
+        #   `try` in this function: an unresolvable root must not raise out of a tool
+        #   that returns envelopes. An unresolved dir answers UNKNOWN, not "no findings".
+        try:
+            _judgment_manifest_dir = os.path.join(
+                _design_dir(session, design_name), "candidates", "zmx")
+        except Exception:  # noqa: BLE001 — an unwritable/unresolvable root is UNKNOWN
+            _judgment_manifest_dir = None
+        judgment_req, judgment_err, judgment_family = _judgment.normalize_request(
+            params.get("judgment"), writable=_writable_name,
+            resolve_ids=_finding_resolver(_judgment_manifest_dir, design_name))
+        if judgment_err is not None:
+            return {
+                "ok": False,
+                "error_family": judgment_family,
+                "error": judgment_err,
+                "design_name": design_name,
+                "label": label,
+                "seq": None,
+                "zmx_path": None,
+                "zmx_ok": False,
+                "png_path": None,
+                "png_ok": False,
+            }
 
     try:
         sink = _get_sink(session, design_name)
@@ -2430,6 +3105,11 @@ def save_candidate(session, params):
 
     png_path = None
     png_ok = False
+    # reviewable-figure an earlier cycle: bound HERE, on EVERY path, before any branch can read it --
+    # the same discipline the ``png_sha`` / ``audit_record`` comments below spell out.
+    # ``render=False`` and a raising render both leave it ``{}``, so the envelope gains
+    # no key and stays byte-identical to today for those callers.
+    _render_keys = {}
     if render:
         # Mirror the snapshot's seq prefix so 000N_*.zmx <-> 000N_*.png pair.
         png_dir = os.path.join(
@@ -2459,6 +3139,21 @@ def save_candidate(session, params):
             png_ok = bool(render_res.get("ok"))
             # Echo the renderer's actual path (it may sanitize the stem).
             png_path = render_res.get("path", png_path)
+            # reviewable-figure an earlier cycle -- read off THIS envelope, from THIS invocation, the
+            # one that wrote the bytes at ``png_path``. Never a second render (a second
+            # render is a different picture), never a re-read of the LDE (that is the
+            # temporal proxy again, inside one tool). Gated on ``png_ok`` because the
+            # failure envelope carries ``surface_labels: []`` -- see
+            # ``_FIGURE_ENVELOPE_KEYS``. A key the renderer did not establish (e.g.
+            # ``config_evaluated`` after a configuration-read fault) stays ABSENT rather
+            # than arriving as None: absent is "not established", None would be a
+            # contract violation the analyzer must then fail closed on.
+            if png_ok:
+                _render_keys = {
+                    key: render_res[key]
+                    for key in _FIGURE_ENVELOPE_KEYS
+                    if key in render_res
+                }
         except Exception as exc:  # noqa: BLE001 — render is a convenience; never raise
             png_ok = False
             png_path = png_path
@@ -2624,6 +3319,47 @@ def save_candidate(session, params):
             parent_source=parent_source,
         )
 
+    # V-INT Part 2 — the JUDGMENT row, beside the exact bytes it judges.
+    #
+    # It is written AFTER the audit row and reads the SAME resolved ``_audit_dir`` /
+    # ``zmx_sha`` / basename, so a judgment can never be recorded against a directory
+    # or a digest the audit row did not agree to. The receipt is then produced from a
+    # RE-READ — never from ``judgment_req`` — because a receipt built from the request
+    # would report success for a row that never landed, which is the one thing a receipt
+    # is for.
+    judgment_record = None
+    judgment_receipt = None
+    if judgment_req is not None:
+        if not _write_audit:
+            judgment_record = "not_written:dir_unresolved"
+        else:
+            judgment_record = _write_judgment_record(
+                _audit_dir,
+                seq=seq,
+                design_name=design_name,
+                filename=(os.path.basename(zmx_path)
+                          if isinstance(zmx_path, str) else None),
+                zmx_sha256=zmx_sha,
+                finding_ids=judgment_req["finding_ids"],
+                reason=judgment_req["reason"],
+                # ABSENT on the empty-ids path, where the field is FORBIDDEN — the
+                # `.get` is the iff rule read from the normalized request rather than
+                # re-derived, so writer and validator cannot disagree about it.
+                disposition=judgment_req.get("disposition"),
+            )
+            judgment_receipt = _judgment_receipt(
+                _audit_dir,
+                design_name=design_name,
+                seq=seq,
+                filename=(os.path.basename(zmx_path)
+                          if isinstance(zmx_path, str) else None),
+                # The SUBJECT is the question, not the answer: it asks "did the row
+                # recording THESE findings land?" while every field of the reply is
+                # read from disk. Naming it is what lets a second, unrelated judgment
+                # on the same bytes coexist instead of colliding (H-2).
+                subject=judgment_req["finding_ids"],
+            )
+
     # MATRIX B, APPLIED AS ONE INVARIANT RATHER THAN PER-SKIP-PATH: a CONTRACTED
     # checkpoint is ``ok`` only if it produced a bound scorecard — a card written AND
     # a record that accepted it. Stated as a property, this covers the two skip paths
@@ -2633,6 +3369,48 @@ def save_candidate(session, params):
     # is half the conjunct. An UNCONTRACTED save is untouched.
     if _contracted and (scorecard_ref is None or audit_record != "written"):
         ok = False
+    # V-INT Part 2 — THE SECOND OBLIGATION, AND IT IS NEVER CONJOINED WITH THE FIRST.
+    #
+    # the contract states both as separate expressions, and the separation is the contract: a
+    # PERFECT judgment save on an UNCONTRACTED design must report success, and a
+    # scorecard failure must not be laundered through a judgment that landed fine.
+    #
+    # ▶ SPEC ERRATUM, corrected here rather than transcribed. the contract writes
+    #   ``judgment_failed = _judgment_requested and (audit_record != "written" or ...)``
+    #   — reading the AUDIT row's token inside the JUDGMENT obligation. That is the
+    #   conjunction the same paragraph forbids, one identifier over: an uncontracted
+    #   save whose audit row was skipped would report a judgment failure although the
+    #   judgment row landed perfectly. The token read here is the JUDGMENT writer's own.
+    #
+    # The READ-BACK half is what makes this more than a write report: ``judgment_record``
+    # is the writer's claim, and the receipt is what a re-read plus a digest re-bind
+    # actually found. They differ exactly when something went wrong.
+    if judgment_req is not None and (
+            judgment_record != "written"
+            or not isinstance(judgment_receipt, dict)
+            or judgment_receipt.get("read_state") != "ok"
+            or (judgment_receipt.get("recorded_finding_ids")
+                != judgment_req["finding_ids"])
+            # H-4 (a review). The REASON is compared too, and it is the
+            # half that matters: the ids say WHAT was judged, the reason says WHY, and
+            # only the second is the thing ten force-promotes failed to record. Comparing
+            # the ids alone let a row whose reason differed from the request read back as
+            # a clean landing.
+            or judgment_receipt.get("recorded_reason") != judgment_req["reason"]
+            # the contract / the contract J6 — H-4's repair one field over. A row whose
+            # disposition on disk said `acted` where the request said `declined` would
+            # otherwise read back CLEAN: the ids match, the reason matches, and the one
+            # field that says WHAT KIND of response this is went uncompared. Both sides
+            # use `.get`, so the empty-ids path compares `None` to `None` and is
+            # byte-identical to what it was.
+            or (judgment_receipt.get("recorded_disposition")
+                != judgment_req.get("disposition"))):
+        ok = False
+    _judgment_keys = (
+        {} if judgment_req is None
+        else {"judgment_record": judgment_record,   # "written"|"not_written:<reason>"
+              "judgment_receipt": judgment_receipt}  # from a RE-READ, never the request
+    )
     # L-7: TOTAL. The bare dict index here raised KeyError straight out of save_candidate
     # on any unrecognised verdict token; an unknown token now reads None = could-not-audit.
     clearance_ok = _clearance_ok_flag(verdict)
@@ -2680,7 +3458,20 @@ def save_candidate(session, params):
         # Identity keys (additive; ``ok`` is NEVER touched by the record):
         "artifact_sha256": zmx_sha,          # sha256 of the candidate .zmx on disk
         "png_sha256": png_sha,               # null when the picture is unbindable
+        # reviewable-figure an earlier cycle (spec section 2.4) — the render envelope's OWN facts about
+        # THESE bytes, so a reviewer's finding can be scored against the figure it was
+        # made about. PRESENT only when a figure was rendered; see
+        # ``_FIGURE_ENVELOPE_KEYS`` for why absent-entirely rather than empty, and for
+        # the provenance hazard the key ``n_surfaces`` carries into any consumer that
+        # trusts it by presence alone.
+        **_render_keys,
         "audit_record": audit_record,        # "written" | "not_written:<reason>"
+        # V-INT Part 2 — ABSENT ENTIRELY when no judgment was requested, so a call that
+        # records nothing gains no key and stays byte-identical to today. That is the
+        # same construction ``_scorecard_key`` and ``_lineage_key`` use below, and it is
+        # the only one under which "byte-identical" is a true statement rather than a
+        # nearly-true one.
+        **_judgment_keys,
         **_scorecard_key,                    # PRESENT only when a card was written
         # DECLARED lineage — "declared" or "rejected:<missing_pair|bad_design_name|
         # bad_seq>". ABSENT ENTIRELY when NO parent param was supplied, so a call that
@@ -2718,6 +3509,97 @@ _GATE_REMEDY_UNBOUND, _GATE_REMEDY_REFEREE = (
     "for them, or unset OPTIVIBE_CRITERIA_ROOT",
     "the criteria referee compared this candidate against the incumbent and did not "
     "permit the move; see the referee block for the limb that decided")
+
+
+#: Per-verdict IN-BAND remedies for the FINDING-DOCKET gate.
+#:
+#: ▶ PER VERDICT, NOT ONE UNIVERSAL SENTENCE. Round 2 of the spec audit found that the
+#:   single remedy *"then promote again. One call"* was FALSE for two of the four
+#:   refusals: `name_unproven` needs a different NAME, and `unreadable` has NO in-band
+#:   remedy at all — the manifest is append-only, so the invalid row refuses every
+#:   future promote of the design until a human quarantines the line OUT OF BAND. A
+#:   remedy sentence that is wrong is worse than none: it sends the caller into a loop.
+#:
+#: ▶ ``force`` APPEARS IN NONE OF THEM, on the shipped `_GATE_REMEDIES` precedent one
+#:   dict up: the finding gate is read ABOVE the ``force`` statement, so offering it
+#:   here would train the caller to reach for the one lever that cannot work.
+_FINDING_REMEDIES = {
+    _finding.REFUSE_FINDING_UNANSWERED: (
+        "record the response and promote again: "
+        "save_candidate(design_name=…, judgment={\"finding_ids\": [<the open ids>], "
+        "\"disposition\": \"acted\"|\"declined\"|\"superseded\"|\"referred\", "
+        "\"reason\": \"<why>\"}) — ONE call, no design change; it costs one candidate "
+        "file. The judgment block passed to THIS call is not read by the gate: that row "
+        "is written AFTER the copy, so counting it would discharge the docket on a "
+        "request not yet on disk"),
+    _finding.REFUSE_FINDING_CONFLICTING: (
+        "the same save_candidate(judgment=…) call naming the CONFLICTING ids: the new "
+        "seq becomes each id's latest identity, and the older contradiction is "
+        "disclosed as superseded_conflict_ids rather than erased"),
+    _finding.REFUSE_FINDING_NAME_UNPROVEN: (
+        "finding rows here are filed under a design name these bytes are not proven to "
+        "carry, so the question cannot be answered: promote under the name the bytes "
+        "are proven for (load_design then save_candidate under that name), or run a "
+        "build in which optivibe_harness.loop is importable so the proven-name set can "
+        "be established at all"),
+    _finding.REFUSE_FINDING_UNREADABLE: (
+        "NONE IN-BAND — this is terminal, and it has TWO reachable causes needing "
+        "DIFFERENT out-of-band repairs. (a) FILE-LEVEL, and NO finding row need exist: "
+        "candidates/zmx/manifest.jsonl was not readable AS A FILE — it is not a regular "
+        "file (a directory, dangling link, junction or device), or it faulted on "
+        "open/decode, or it holds content of which not one line parsed as JSON. "
+        "There is no offending line to find; repair the PATH itself (restore a readable "
+        "regular file, fix the permission or the encoding). (b) ROW-LEVEL: the file "
+        "read, and a `finding` row under ANY DESIGN — the finding read is "
+        "deliberately not design-scoped, so a bad row filed under another name "
+        "blocks this one — or a `judgment` / `candidate_audit` row under THIS "
+        "design, "
+        "parses but is not a valid record — quarantine the offending line (the reader "
+        "reports no line number), and for a `finding` row search EVERY design, not "
+        "only this one. Either way the manifest is append-only, so every "
+        "future promote of this design reads the same fault"),
+    _finding.REFUSE_FINDING_GATE_INTERNAL: (
+        "none — this is a defect report, not a caller error. The finding gate raised "
+        "and its outer net refused rather than permitting; file it with the "
+        "finding_gate block"),
+}
+
+
+def _finding_refusal_text(outcome):
+    """The contract refusal sentence — NAMES the verdict, the IDS, and the remedy.
+
+    The ids are named because an operator who cannot see WHICH finding is open cannot
+    answer it, and `finding_id` is a 16-hex content hash with no other surface.
+    ``.get`` on every field: `detail` is disclosure and this text must not be the thing
+    that raises inside a tool documented never to raise.
+    """
+    detail = outcome.detail if isinstance(outcome.detail, dict) else {}
+    ids = list(detail.get("open_finding_ids") or ())
+    if outcome.verdict == _finding.REFUSE_FINDING_CONFLICTING:
+        ids = list(detail.get("conflicting_finding_ids") or ())
+    named = (" finding_ids %s;" % (ids,)) if ids else ""
+    return ("REFUSED by the vision<->design finding docket (%s):%s %s."
+            % (outcome.verdict, named,
+               _FINDING_REMEDIES.get(outcome.verdict,
+                                     _FINDING_REMEDIES[
+                                         _finding.REFUSE_FINDING_GATE_INTERNAL])))
+
+
+def _finding_gate_block(outcome):
+    """The contract disclosure body, JSON-safe. Emitted ONLY when the gate ENGAGED.
+
+    The three id fields cross as LISTS: `_finding` returns tuples (a tuple cannot be
+    mutated by a consumer), and the envelope is JSON, where a tuple and a list are the
+    same thing — converting here rather than in the pure module keeps the pure module's
+    immutability and the wire's shape both true.
+    """
+    body = dict(outcome.detail if isinstance(outcome.detail, dict) else {})
+    for key in ("open_finding_ids", "conflicting_finding_ids",
+                "superseded_conflict_ids", "subject_names"):
+        body[key] = list(body.get(key) or ())
+    body["verdict"] = outcome.verdict
+    body["family"] = outcome.family
+    return {"finding_gate": body}
 
 
 def _gate_refusal_text(gate):
@@ -2937,7 +3819,16 @@ def promote_best(session, params):
         # The reader is HANDED ``cand_file`` — the basename _resolve_candidate already
         # confined. It never chooses a file: an INDEPENDENT second resolution is exactly
         # what reopened promote CRIT.
-        records, record_state = _read_audit_record(zmx_dir, seq, cand_file)
+        # ONE manifest snapshot for this promote. The identity read below and the three
+        # finding-gate classes at Point P all ask about the SAME file at the same instant;
+        # sharing the memo keeps the promote at TWO file opens (this one and
+        # ``_resolve_candidate``'s) no matter how many row classes are consulted — the
+        # property ``test_x4_a_2000_row_manifest_resolves_in_two_linear_passes`` pins.
+        # Passed POSITIONALLY: the suite's ``lambda *a`` doubles for this reader absorb a
+        # 4th positional argument and would raise on a keyword one.
+        manifest_cache = {}
+        records, record_state = _read_audit_record(
+            zmx_dir, seq, cand_file, manifest_cache)
         floors = _effective_floors(params)
         rec, identity = _classify_identity(
             records, record_state, src_sha, design_name, floors)
@@ -3048,12 +3939,173 @@ def promote_best(session, params):
             }
         # === END POINT P =========================================================
 
+        # === POINT P, SECOND QUESTION — THE VISION<->DESIGN FINDING DOCKET =======
+        # the contract The FIRST production caller of `_finding.evaluate_gate`:
+        # before this statement the contract refused NOTHING, and every offline suite
+        # was green because no offline test can cover a gate that does not exist.
+        #
+        # THE POSITION IS THE ENFORCEMENT, and it is the SAME position, for the same
+        # four reasons the block above states in full:
+        #
+        #   * ABOVE ``force`` (read eight statements below at the ``params.get("force")
+        #     is True``), so the guard is force-independent MECHANICALLY. ``force`` is
+        #     NOT IN SCOPE at this statement — the name is unbound here and reading it
+        #     would be a NameError, which is a stronger property than a convention.
+        #     `_finding.py` has no ``force`` parameter and no ``"force"`` literal, and
+        # the contract is the AST tripwire for that. *A guard the guarded
+        #     party can switch off is a diagnosis wearing a gate's clothes*
+        #     (`promotion_gate.py:14`);
+        #   * ABOVE the audit-source fork and therefore above the ONLY engine call on
+        #     this path (``_run_clearance_gate``), so a finding refusal is SEAT-FREE;
+        #   * BELOW the owner guard's return, so a proven-foreign candidate is refused
+        #     as an ARTIFACT question first;
+        #   * BELOW ``_resolve_candidate``, so ``src_sha`` is the digest of the file
+        #     this promote would actually copy.
+        #
+        # It is BELOW the criteria-contract guard rather than above it for the reason
+        # that guard's own comment gives about the owner guard: the more SPECIFIC
+        # refusal must be reachable. The contract guard asks whether these BYTES may
+        # replace the champion; the docket asks whether this DESIGN has answered what
+        # its reviewer wrote down. Neither ordering changes the other's answer — both
+        # are pre-fork, pre-``force``, and neither reads the other's state.
+        #
+        # THREE READS AND ONE PURE CALL — the whole of the contract Every argument is ALREADY
+        # IN SCOPE: ``design_name``, ``src_sha``, ``records``, ``record_state``,
+        # ``zmx_dir``. Nothing is re-derived and no second file resolution is created.
+        #
+        # ▶ THE SUBJECT SET IS COMPUTED ONCE, BY THE MODULE THAT DEFINES IT. The two
+        #   design-scoped readers below need the set BEFORE `evaluate_gate` can be
+        # called, and `evaluate_gate` computes it again internally for the Rule 1/2
+        #   arms. A second hand-written ``{design_name} | (proven or set())`` here is
+        # the generator this repository keeps finding — and it is the FAIL-OPEN
+        #   direction, because ``proven is None`` means UNKNOWN and spelling it
+        #   ``set()`` is exactly the collapse `promotion_gate.py:220-223` exists to
+        #   forbid. So the ONE definition is called.
+        proven = (None if _promotion_gate is None
+                  else _promotion_gate.proven_design_names(
+                      records, src_sha, record_state))
+        finding_subject = _finding._subject_names(design_name, proven)
+        # THREE ROW CLASSES, ONE FILE PASS. The three reads below are the SAME three
+        # single-class readers the contract ladder has always used — same predicates, same
+        # per-class ABSENT/UNREADABLE derivation — routed through one call that shares
+        # the promote's manifest snapshot (`_read_finding_gate_records`). Asked as three
+        # independent reads they re-opened and re-parsed the whole manifest three times,
+        # taking a 2000-row promote from 2 file opens to 5.
+        #
+        # * — ANY design, because the name-proof arm asks "is there a finding row
+        #     here AT ALL", which a design-scoped read cannot answer.
+        # * / — design-scoped over the SUBJECT SET (the union), so an alias must
+        #     answer the owner's findings and a judgment can only anchor to an identity
+        #     the harness actually saved under one of those names.
+        #
+        # Each class still arrives as its OWN ``(rows, state)`` pair: the ladder below is
+        # handed three independent read states, and a class that reads ``unreadable``
+        # does not drag the other two with it.
+        _gate_reads = _read_finding_gate_records(
+            zmx_dir, design_names=finding_subject, cache=manifest_cache)
+        finding_rows_any, finding_read_state = _gate_reads["finding"]
+        judgment_rows_scoped, judgment_read_state = _gate_reads["judgment"]
+        audit_rows_scoped, audit_read_state = _gate_reads["audit"]
+        finding_outcome = _finding.evaluate_gate(
+            caller=design_name,
+            proven=proven,
+            finding_rows=finding_rows_any,
+            finding_state=finding_read_state,
+            audit_rows=audit_rows_scoped,
+            audit_state=audit_read_state,
+            judgment_rows=judgment_rows_scoped,
+            judgment_state=judgment_read_state,
+            # INJECTED, never re-implemented: the shipped selector and the shipped
+            # conflict key. A second opinion about what a judgment row TARGETS, or
+            # about which fields it AUTHORISES, is the divergence `_judgment.py:22-27`
+            # names — one acceptance set, both directions.
+            judgment_row_targets=_judgment.row_targets,
+            judgment_conflict_key=_judgment.conflict_key,
+            exact_int=_exact_int,
+        )
+        # NOT ENGAGED ⇒ NOT ONE NEW KEY. Omitting the key — rather than emitting
+        # it as null — is the only construction under which "an uncontracted promote is
+        # byte-identical" is a TRUE statement, and it is the half a fix most easily
+        # breaks (the shipped ``gate_keys`` / ``_scorecard_key`` precedent). pins the
+        # 21-key envelope by EQUALITY and reddens the moment a key appears.
+        finding_keys = (
+            {} if finding_outcome.verdict == _finding.FINDING_NOT_APPLICABLE
+            else _finding_gate_block(finding_outcome))
+        if not finding_outcome.permits:
+            # A PRE-FORK exit on the `:3196-3209` shape: every existing promote_best key
+            # present and NULLED — this promotes NOTHING. ``identity`` HAS been
+            # evaluated by now (three statements above the contract guard), so the
+            # identity keys carry their REAL values; ``clearance_source`` still reads
+            # "not_evaluated" because no audit ran on this path, and claiming otherwise
+            # here was this cycle's own defect one guard over.
+            return {
+                "ok": False,
+                "error_family": finding_outcome.family,
+                "error": _finding_refusal_text(finding_outcome),
+                "design_name": design_name,
+                "seq": seq,
+                "best_zmx": None,
+                "best_png": None,
+                "png_promoted": False,
+                "candidate_file": cand_file,
+                "clearance_ok": None,          # no audit ran on this path
+                "clearance_summary": None,
+                "active_configuration": None,
+                **_pre_fork_identity_keys(),
+                "identity_proven": bool(identity.get("proven")),
+                "identity": identity,
+                "identity_warning": identity_warning,
+                **gate_keys,
+                **finding_keys,
+            }
+        # === END POINT P (FINDING) ===============================================
+
         # STRICT bool — only the literal ``True`` forces. ``bool()`` coercion would
         # let ``force="no"`` / ``force="0"`` (truthy strings) silently override the keeper
         # refusal — the OPPOSITE of intent. ``is True`` admits ONLY True (1 / "yes" / any
         # other truthy value does NOT force). ``force`` overrides a CLEARANCE verdict; it
         # is not a claim about BYTES, so it reaches none of the identity branches.
         force = (params.get("force") is True)
+
+        # === V-INT Part 2 — VALIDATE a supplied judgment, PRE-COPY ==============
+        #
+        # A SUPPLIED block is validated here whether or not this promote forces: a
+        # malformed judgment must refuse before anything is published, and an agent that
+        # wants to state why it KEPT something should not have to force in order to say
+        # so — the record is about the DESIGN, not about the override.
+        #
+        # The REQUIREMENT (a force must state its reason) is NOT here. It lands further
+        # down, where the verdict is known — see the override gate.
+        judgment_req = None
+        if "judgment" in params:
+            # The SAME builder `save_candidate` uses (`:2536`), for the reason its own
+            # comment gives: two hand-written closures are two chances to scope the id
+            # read differently, and the scope IS the Q3 ruling.
+            judgment_req, judgment_err, judgment_family = _judgment.normalize_request(
+                params.get("judgment"), writable=_writable_name,
+                resolve_ids=_finding_resolver(zmx_dir, design_name))
+            if judgment_err is not None:
+                return {
+                    "ok": False,
+                    "error_family": judgment_family,
+                    "error": judgment_err,
+                    "design_name": design_name,
+                    "seq": seq,
+                    "best_zmx": None,
+                    "best_png": None,
+                    "png_promoted": False,
+                    "candidate_file": cand_file,
+                    "clearance_ok": None,      # no audit ran before this refusal
+                    "clearance_summary": None,
+                    "active_configuration": None,
+                    **_pre_fork_identity_keys(),
+                    "identity_proven": bool(identity.get("proven")),
+                    "identity": identity,
+                    "identity_warning": identity_warning,
+                    **gate_keys,
+                    **finding_keys,
+                }
+        # === END OF THE FORCE-REASON GATE =======================================
 
         # THE AUDIT-SOURCE FORK.
         if rec is not None:
@@ -3106,6 +4158,64 @@ def promote_best(session, params):
         # OF-4 / L-7: a POSITIVE allow-list, never a deny-list. Under the shipped
         # ``verdict in ("thin","indeterminate")`` test an unrecognised token PROMOTED.
         # Net effect: an unknown token now refuses instead of promoting.
+        # === V-INT Part 2 — AN OVERRIDING FORCE MUST STATE ITS REASON ===========
+        #
+        # BREAKING, DELIBERATE, PRECEDENTED (`build_merit`'s positive floors; this gate
+        # itself; `set_diffraction_grating`'s required `reflective`). It is the half of
+        # this cycle that never depended on the oracle, and it is MEASURED:
+        # TEN designs were force-promoted and not one records why — ``forced`` is stamped
+        # in the RETURNED ENVELOPE only and never reaches disk, so every override was
+        # invisible the moment the envelope scrolled past.
+        #
+        # ▶ IT KEYS ON THE SAME EXPRESSION ``forced`` DOES, AND THAT IS A CORRECTION.
+        # The first cut demanded a reason for ANY ``force=True``. the contract
+        #   says exactly that, and it is wrong for a reason the shipped code already
+        #   knew: ``forced`` is ``force and verdict not in _PROMOTING_VERDICTS``, and
+        #   ``test_t15b_forced_is_false_on_a_clean_forced_promote`` pins it — a force
+        #   over a CLEAN verdict overrode NOTHING.
+        #
+        #   Demanding a justification for a no-op is not free, and the cost lands on the
+        #   record this cycle exists to create: a field required on every call gets
+        #   satisfied with boilerplate, and a log of boilerplate says nothing on the one
+        #   call where it mattered. A reason demanded exactly when something WAS overridden
+        #   is a reason that means something.
+        #
+        #   THE TEST COST IS NOT THE ARGUMENT. Every forcing test in the suite was already
+        #   updated to carry a judgment and those edits are KEPT — they exercise the
+        #   recording path and read as real callers. The argument is that TWO definitions
+        #   of "this force did something" in one file is the drift this codebase keeps
+        # finding, and there is now exactly one.
+        #
+        # PRE-COPY: nothing has been published at this point, so a refusal leaves the
+        # workspace untouched and the caller re-calls with a reason.
+        if force and verdict not in _PROMOTING_VERDICTS and judgment_req is None:
+            return {
+                "ok": False,
+                "error_family": _judgment.JUDGMENT_PARAM,
+                "error": (
+                    "REFUSED: force=True would override a '%s' clearance verdict, and an "
+                    "override must state its reason. Pass judgment={\"reason\": \"<why "
+                    "this is acceptable>\"}. Ten designs were force-promoted with no "
+                    "reason recorded anywhere; the reason is written to disk beside the "
+                    "candidate bytes, not just returned." % (verdict,)
+                ),
+                "design_name": design_name,
+                "seq": seq,
+                "best_zmx": None,
+                "best_png": None,
+                "png_promoted": False,
+                "candidate_file": cand_file,
+                "clearance_ok": _clearance_ok_flag(verdict),
+                "clearance_summary": clearance_summary,
+                "clearance_source": clearance_source,
+                "active_configuration": active_configuration,
+                **_pre_fork_identity_keys(),
+                "identity_proven": bool(identity.get("proven")),
+                "identity": identity,
+                "identity_warning": identity_warning,
+                **gate_keys,
+                **finding_keys,
+            }
         if not force and verdict not in _PROMOTING_VERDICTS:
             if verdict == "thin":
                 family = "promote_clearance_violation"
@@ -3116,7 +4226,8 @@ def promote_best(session, params):
                 family = "promote_clearance_indeterminate"
                 error = (
                     "REFUSED: " + _coverage_text(clearance_summary)
-                    + "; pass force=True to promote anyway"
+                    + "; pass force=True WITH judgment={'reason': ...} to "
+                      "promote anyway"
                 )
                 clearance_ok = _clearance_ok_flag(verdict)
             return {
@@ -3262,6 +4373,41 @@ def promote_best(session, params):
         except Exception as exc:  # noqa: BLE001 — manifest note is best-effort; never raise
             note = f"promote row append failed: {type(exc).__name__}: {exc}"
 
+        # V-INT Part 2 — RECORD THE JUDGMENT, beside the candidate bytes it judges.
+        #
+        # It is written on the way out of a SUCCESSFUL promote, and the placement is the
+        # contract: a judgment is a note about a design that was kept, so a promote that
+        # refused must not leave one behind claiming otherwise. It binds to the CANDIDATE
+        # (``zmx_dir`` / ``cand_file`` / ``src_sha``) — the bytes the gate audited and the
+        # only ones a later reader can re-digest — never to ``BEST_*``, which is a copy
+        # under a name that gets overwritten by the next promote.
+        #
+        # ``ok`` IS NEVER TOUCHED HERE. The promote has already happened; the .zmx is on
+        # disk. Reporting a completed promote as failed because a NOTE did not land is
+        # the exact defect the ``clearance_ok`` comment above records ("the .zmx IS on
+        # disk and the envelope said it failed"). The receipt discloses instead.
+        judgment_record = None
+        judgment_receipt = None
+        if judgment_req is not None:
+            judgment_record = _write_judgment_record(
+                zmx_dir,
+                seq=seq,
+                design_name=design_name,
+                filename=cand_file,
+                zmx_sha256=src_sha,
+                finding_ids=judgment_req["finding_ids"],
+                reason=judgment_req["reason"],
+                disposition=judgment_req.get("disposition"),
+            )
+            judgment_receipt = _judgment_receipt(
+                zmx_dir, design_name=design_name, seq=seq, filename=cand_file,
+                subject=judgment_req["finding_ids"])
+        _judgment_keys = (
+            {} if judgment_req is None
+            else {"judgment_record": judgment_record,
+                  "judgment_receipt": judgment_receipt}
+        )
+
         result = {
             "ok": True,
             "design_name": design_name,
@@ -3330,10 +4476,17 @@ def promote_best(session, params):
             "clearance_source": clearance_source,
             # The SAME allow-list the gate reads, so ``forced`` can never disagree with it.
             "forced": bool(force and verdict not in _PROMOTING_VERDICTS),
+            # V-INT Part 2 — ABSENT unless a judgment was recorded, so every existing
+            # promote envelope is byte-identical. ``forced`` above is the key this
+            # cycle exists because of: it was stamped HERE and never reached disk, so
+            # ten overrides left no trace. These two are the disk-side answer, and the
+            # receipt comes from a RE-READ plus a digest re-bind, never from the request.
+            **_judgment_keys,
             # The four contract keys, on a CONTRACTED success only. ``{}`` when no
             # contract governs these bytes, which is what keeps the "byte-identical to
             # today" claim literally true rather than nearly true.
             **gate_keys,
+            **finding_keys,
         }
         if note is not None:
             result["note"] = note
@@ -3388,6 +4541,15 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         # is MADE, never re-asserted where it is published.
         "parent_design_name": "string",
         "parent_seq": "number",
+        # V-INT Part 2 — the JUDGMENT block: {"reason": str, "finding_ids": [str]}.
+        # An OBJECT, not two scalars, and the asymmetry with the lineage pair above is
+        # deliberate: lineage is two independent facts that are validated separately,
+        # while a reason and the ids it explains are ONE statement and must arrive or be
+        # refused together. A `reason` with the ids silently dropped is a judgment about
+        # nothing in particular. The adapter's type-aware shim json.loads a non-"string"
+        # param, so a string-coercing client's `{"reason": ...}` reaches the handler as a
+        # dict (/002).
+        "judgment": "object",
     },
     description=(
         "Snapshot the live system as a durable project candidate .zmx (+ paired "
@@ -3402,13 +4564,38 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "later promote_best of THIS seq can report a verdict about THESE bytes instead of "
         "about whatever is loaded then. Returns the saved Zemax file path under zmx_path; "
         "use that value for persistence/read-back. "
+        "png_sha256 names the REVIEWABLE figure: a vision judgement is recorded "
+        "against it via record_findings, and a render_layout PNG is NOT reviewable on "
+        "the record — that picture is scratch and its digest is refused there "
+        "(finding_figure_unbound). When a figure was rendered the envelope also carries "
+        "that render's own facts about THESE bytes — surface_labels, n_surfaces, "
+        "stop_label, figure_disclosures, flags, config_evaluated — read inside the "
+        "same render invocation that wrote them, so a reviewer's finding can be scored "
+        "against the picture it was actually made about without pairing this PNG with a "
+        "separately dispatched render. Those keys are ABSENT when no figure was "
+        "produced; do not call render_layout to obtain them, because a second render is "
+        "a different picture. "
         "Declare the checkpoint this one was derived from with parent_design_name AND "
         "parent_seq TOGETHER (a seq alone names a WORKSPACE candidate, not this "
         "design's, so a lone seq is refused): lineage is a DECLARED field, never "
         "inferred from session state, and is recorded beside the bytes. Supplying "
         "neither is recorded as 'undeclared' — an honest no-claim, not a gap. The "
         "lineage key echoes 'declared' or 'rejected:<reason>' and is ABSENT when you "
-        "declared nothing; a rejected declaration NEVER fails the checkpoint."
+        "declared nothing; a rejected declaration NEVER fails the checkpoint. "
+        "Record a JUDGMENT you made about this design with judgment={'reason': '<why>', "
+        "'finding_ids': ['<id>', ...]} — the place to put your ballpark call on a "
+        "REPORTED clearance finding, where the audit published both numbers and left the "
+        "call to you. reason is REQUIRED and has NO default; finding_ids is optional. "
+        "When finding_ids names a recorded finding you MUST also pass disposition — one "
+        "of acted | declined | superseded | referred — saying WHAT KIND of response this "
+        "is; it is FORBIDDEN when finding_ids is empty, and every id must name a finding "
+        "already recorded against this design (an unknown id is judgment_param; a "
+        "manifest that could not be READ is judgment_unresolvable, whose remedy is the "
+        "manifest, not your request). A "
+        "malformed judgment REFUSES the save with zero mutation (judgment_param) rather "
+        "than being dropped, so you are never left believing you recorded a reason you "
+        "did not. judgment_receipt is read BACK from disk with the digest re-checked, so "
+        "it reports what is actually recorded against these exact bytes."
     ),
 )
 
@@ -3423,6 +4610,11 @@ PROMOTE_BEST_SPEC = ToolSpec(
         "force": "boolean",
         "min_air": "number",
         "min_glass": "number",
+        # V-INT Part 2 — REQUIRED WHENEVER force=true, and that conditional is the
+        # handler's to enforce, not the schema's: `required` here is a FLAT list and
+        # JSON-Schema conditional requiredness is deliberately not used anywhere in this
+        # manifest. Listing it here would demand it on every promote.
+        "judgment": "object",
     },
     description=(
         "Atomically promote a caller-asserted candidate seq to the project root "
@@ -3432,6 +4624,17 @@ PROMOTE_BEST_SPEC = ToolSpec(
         "(promote_clearance_indeterminate) — the gate audits the LIVE session "
         "geometry at config=all (tunable via min_air/min_glass for a non-macro-scale "
         "design; promote right after saving), so pass force=true to override. "
+        "A force that OVERRIDES a refusal REQUIRES "
+        "judgment={'reason': '<why this is acceptable>'} and REFUSES without one "
+        "(judgment_param), promoting nothing: an override with no stated reason "
+        "leaves no trace anyone can act on. A force over an ALREADY-CLEAN verdict "
+        "overrode nothing and needs no reason. The reason is written to disk "
+        "beside the candidate bytes and read back (judgment_record / judgment_receipt); "
+        "judgment is accepted on an UNFORCED promote too, because a note about a design "
+        "you kept should not require forcing to say. When the judgment names "
+        "finding_ids it MUST also carry disposition — acted | declined | superseded | "
+        "referred — and each id must name a finding already recorded against this "
+        "design; disposition is FORBIDDEN when finding_ids is empty. "
         "LIMITATION: clearance_ok:true is a claim about COVERAGE, not correctness — it "
         "does NOT mean the geometry is right; clearance_ok:null means the gate could not "
         "CERTIFY clearance (a FOLDED system is one such cause); "

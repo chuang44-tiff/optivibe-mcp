@@ -115,5 +115,7 @@ skill is selected:
 
 - **`design-review`** — assess a design against a spec.
 - **`design-compare`** — rank designs side by side.
+- **`design-vision-review`** — look at the rendered layout and report what the lens
+  data does not show. ADVISORY: it observes and feeds back, it does not decide.
 - **`optimize-loop`** — set up, preflight, and run optimization with checkpoints.
 - **`zos-api-debug`** — troubleshoot an OpticStudio connection / license error.

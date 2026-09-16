@@ -435,6 +435,11 @@ _MULTI_SPEC_MODULES = (
     "optivibe_harness.tools.lens_describe",      # describe_surfaces
     "optivibe_harness.tools.layout_render",      # render_layout
     "optivibe_harness.tools.workspace",          # save_candidate, promote_best
+    # Vision<->design contract Phase 2 the contract: the finding RECORDING door
+    # (record_findings). A module of its own rather than a third handler in
+    # workspace.py, which carries an open size size escalation; the IO half it drives
+    # is workspace's, imported and not copied.
+    "optivibe_harness.tools.finding_record",     # record_findings
 )
 
 
@@ -457,6 +462,97 @@ def load_manifest():
         for spec in module.TOOL_SPECS:
             manifest[spec.name] = spec
     return manifest
+
+
+
+# =========================================================================== #
+# Tier-1 (the oracle gap): the design-identity ALLOW-LIST.
+# =========================================================================== #
+#: The tools a length budget SURVIVES.
+#:
+#: **THE CLASSIFICATION PRINCIPLE.** A tool is listed ONLY if a centre-thickness budget
+#: declared BEFORE the call still means the same thing AFTER it: the call may move
+#: VALUES within the design's lineage, but it may not replace the design, its topology,
+#: its configuration structure, or its unit scale.
+#:
+#: **THE DIRECTION IS LOAD-BEARING, AND IT IS AN ALLOW-LIST ON PURPOSE.**
+#: ``Dispatcher.dispatch`` bumps ``session.design_epoch`` for every tool name NOT in
+#: here, which retires any declared budget. So:
+#:
+#:   * a tool ACCIDENTALLY OMITTED (including every tool a future cycle adds) causes a
+#:     spurious bump -> the budget honestly evaporates -> ``NO_ORACLE`` and a visibly
+#:     missing basis. An annoyance. Never a verdict.
+#:   * only an AFFIRMATIVE MIS-LISTING -- somebody adding a design-replacing tool to
+#:     this frozenset -- can fail open, and that is one reviewed constant with mutation
+#:     coverage, not an open-ended sync obligation against the manifest.
+#:
+#: A deny-list would invert exactly that, which is why the earlier "enumerate the
+#: design-identity-changing tools" design was rejected: its staleness failed OPEN.
+#:
+#: NOT LISTED, and each for a stated reason (recorded here so the omissions are
+#: reviewable rather than merely absent):
+#:   ``load_design`` (a different design), ``apply_lens_spec`` (rebuilds the
+#:   prescription), ``insert_surface``/``remove_surface``/``place_element`` (topology),
+#:   ``add_coordinate_break``/``add_return_cb``/``fold_beam``/``set_mirror`` (topology +
+#:   a fold changes what a "length" along the axis even means),
+#:   ``add_configuration``/``remove_configuration``/``reset_to_single_config``/
+#:   ``set_zoom``/``set_config_operand`` (configuration STRUCTURE),
+#:   ``scale_lens`` (the owner named it: a scaled design changes the meaning of every
+#:   mm), ``normalize_stop``/``set_stop_surface`` (may relocate/insert a stop surface),
+#:   ``ramp_aperture`` and ``tolerance`` (both perturb the live design across a
+#:   SaveAs/LoadFile checkpoint and restore it; a failed restore is a different design),
+#: and EVERY tool not present.
+#: Cap on ``session.design_epoch_faults``. The list is DISCLOSURE, not a ledger:
+#: the budget dies on the first fault, so the entries after that name which other
+#: tools also could not bump -- useful, but never worth unbounded growth inside a
+#: never-raise path on a persistently wedged session.
+_MAX_EPOCH_FAULTS = 16
+
+IDENTITY_PRESERVING_TOOLS = frozenset({
+    # --- pure reads and analyses: they cannot change anything ---------------------
+    "analyze_aspheric_profile", "analyze_axial_color", "analyze_distortion",
+    "analyze_grin_profile", "analyze_lateral_color", "analyze_relative_illumination",
+    "analyze_strehl", "analyze_wavefront", "capture_graphic", "check_clearance",
+    "describe_configurations", "describe_surfaces", "dry_run", "dump_merit_function",
+    "get_first_order", "get_mtf", "get_operand", "get_spot", "get_system_info",
+    "list_catalogs", "list_glass_catalog", "list_variables", "read_lens_spec",
+    "read_surface", "render_layout", "serialize_merit", "surface_count", "trace_rays",
+    "verify_beam_path", "verify_collimation", "verify_zoom",
+    # --- workspace reads/saves: they publish the design, they do not change it ----
+    "promote_best", "save_candidate", "save_merit", "save_snapshot",
+    # ``record_findings`` appends a reviewer's finding row against an ALREADY-SAVED
+    # candidate. Its own contract (``tools/finding_record.py``, the SEAT BEHAVIOUR
+    # paragraph) is that it reads ``session.workspace_root`` / ``session.projects_root``
+    # only and NEVER touches ``session.system`` -- it states it as "No read, no write,
+    # no engine." So a centre-thickness budget declared before the call still means the
+    # same thing after it, which is exactly the classification principle above, and
+    # listing it is a true classification rather than the affirmative MIS-listing that
+    # is this allow-list's only fail-open direction.
+    #
+    # It is LISTED rather than recorded as a stated omission because the omission is not
+    # harmless here. The general argument above -- an omitted tool costs a spurious bump
+    # and an honest ``NO_ORACLE`` -- holds only where nothing needs the budget at that
+    # moment. This release's own review workflow records a finding and THEN asks the
+    # ceiling to adjudicate it, so a bump would retire the ``build_merit``-declared
+    # budget at precisely the call the headline feature depends on.
+    "record_findings",
+    # --- value / solve / variable mutators: same lineage, moved numbers -----------
+    "clear_all_variables", "clear_solve", "clear_variable", "freeze_semidiameters",
+    "load_catalog", "set_aperture", "set_asphere", "set_asphere_variable",
+    "set_cb_variable", "set_config_value", "set_config_variable",
+    "set_current_configuration", "set_diffraction_grating", "set_field", "set_grin",
+    "set_grin_variable", "set_ray_aiming", "set_solve", "set_surface",
+    "set_surface_aperture", "set_variable", "set_vignetting", "set_wavelength",
+    "substitute_glass", "vary",
+    # --- merit authoring: the MERIT is not the design -----------------------------
+    # ``load_merit``/``clear_merit``/``apply_merit_recipe`` replace the ACTIVE merit,
+    # which used to be an objection to carrying the budget. It is not one any more:
+    # the claim was NARROWED to what the record actually is -- a budget DECLARED FOR
+    # THIS DESIGN at ``build_merit`` -- so no artifact anywhere claims the active merit
+    # carries it, and a merit swap cannot falsify a claim nobody makes.
+    "add_math_constraint", "add_operand", "apply_merit_recipe", "build_merit",
+    "clear_merit", "edit_operand", "load_merit", "optimize", "remove_operand",
+})
 
 
 class Dispatcher:
@@ -517,6 +613,14 @@ class Dispatcher:
         if not isinstance(params, dict):  # dispatch backstop: coerce any non-dict (L26)
             params = {}
         with self._lock:
+            # Tier-1: THE EPOCH BUMP, at call ENTRY, BEFORE the handler and before the
+            # unknown-tool / missing-param / dead-channel gates below. Placement is the
+            # whole guarantee: ``load_design``'s ``LoadFile`` destroys the prior design
+            # the moment it is called, so a bump conditioned on the handler RETURNING
+            # would leave a budget armed after a load that threw halfway through. An
+            # unknown tool name is also not in the allow-list and so bumps too -- which
+            # is the fail-closed direction, and costs only a spurious NO_ORACLE.
+            self._bump_design_epoch(tool_name)
             try:
                 spec = self._manifest.get(tool_name)
                 if spec is None:
@@ -569,6 +673,118 @@ class Dispatcher:
                     "error": _safe_error_text(exc),
                     "error_family": error_family,
                 }
+
+    def _bump_design_epoch(self, tool_name):
+        """Retire any declared budget unless ``tool_name`` is identity-PRESERVING.
+
+        Fully guarded: a session that has no ``design_epoch``, or whose attribute write
+        raises, must never break a dispatch.
+
+        **AND A FAILED BUMP FAILS CLOSED.** An earlier cut swallowed the write fault and
+        left the budget armed "for one more call", leaning on the shape stamp as a
+        backstop. a review rejected that and it was right: the shape stamp
+        cannot see a SAME-COUNT replacement, so the swallow inverted the one property
+        layer 1 exists to have -- that its failure direction is a spurious NO_ORACLE and
+        never a stale verdict. Losing a budget costs an unadjudicated finding; keeping one
+        that no longer describes the design costs a CONFIDENT WRONG one, and this whole
+        cycle exists because of the second thing.
+
+        So on a failed increment ``_poison_design_identity`` latches the session unusable,
+        clears the record, and records the fault for disclosure. It still never raises.
+
+        What it PERMITS that the old code forbade: dispatch now WRITES to the
+        session on every call, where it previously only read, and on a write FAULT it
+        writes again (the latch). What it OWNS on every failure path: every write is
+        individually guarded, it touches only session attributes -- no engine call, no
+        lock (it runs under the one dispatch already holds), no envelope -- and the
+        worst reachable outcome is a session with no usable budget, which is the
+        no-oracle path.
+        """
+        if tool_name in IDENTITY_PRESERVING_TOOLS:
+            return
+        session = self._session
+        try:
+            current = getattr(session, "design_epoch", 0)
+            if isinstance(current, bool) or not isinstance(current, int):
+                current = 0
+            session.design_epoch = current + 1
+            return
+        except Exception:  # noqa: BLE001 — never break a dispatch; fail CLOSED instead
+            pass
+        self._poison_design_identity(session, tool_name)
+
+    def _poison_design_identity(self, session, tool_name):
+        """The epoch could not be incremented => the declared budget becomes UNUSABLE.
+
+        Three writes, each independently guarded so one failing does not skip the others,
+        and they are deliberately REDUNDANT:
+
+        1. ``design_epoch_unusable`` -- a LATCH the consuming side checks FIRST
+           (``clearance._applicable_record``). This is the one that holds even if the
+           record itself cannot be cleared.
+        2. ``declared_budget = None`` -- the record is retired at the source.
+        3. ``design_epoch_faults`` -- a BOUNDED list of the tool names whose bump failed,
+           so the failure is DISCLOSED in the clearance envelope rather than only logged.
+           A silent invalidation failure is indistinguishable from a session that never
+           declared a budget, and those two have opposite remedies.
+
+        **THE BREADCRUMB FIRES ONCE, ON THE TRANSITION.** It used to print on EVERY
+        dispatch after the latch, which contradicted this function's own "worst reachable
+        outcome" accounting: the budget dies on the FIRST fault, so every later line is
+        noise on a decision already taken. The latch is read BEFORE it is written, and
+        the warning is emitted only when this call is the one that set it. The one case
+        that still warns repeatedly is a session on which the LATCH WRITE ITSELF fails --
+        and that is correct, because nothing then records that the warning was given.
+
+        Never raises. If every write fails the session is one no attribute assignment
+        works on at all -- in which case ``declared_budget`` could never have been armed
+        either, so there is nothing left to adjudicate wrongly.
+        """
+        already_latched = bool(getattr(session, "design_epoch_unusable", False))
+        try:
+            session.design_epoch_unusable = True
+        except Exception:  # noqa: BLE001 — the record clear below is the second line
+            pass
+        try:
+            session.declared_budget = None
+        except Exception:  # noqa: BLE001 — the latch above is the first line
+            pass
+        try:
+            faults = getattr(session, "design_epoch_faults", None)
+            if not isinstance(faults, list):
+                faults = []
+            if len(faults) < _MAX_EPOCH_FAULTS:   # BOUNDED: a wedged session must not
+                faults.append(tool_name)          # grow a list forever inside a
+            session.design_epoch_faults = faults  # never-raise path
+        except Exception:  # noqa: BLE001 — disclosure is best-effort, the latch is not
+            pass
+        if not already_latched:
+            self._warn_epoch_fault(tool_name)
+
+    def _warn_epoch_fault(self, tool_name):
+        """Log-or-stderr breadcrumb for a failed epoch bump. NEVER raises.
+
+        Mirrors ``_warn_slow_call``: try the logger, else stderr, swallow everything. It
+        takes no lock and touches nothing shared beyond that seam.
+        """
+        msg = ("optivibe: DESIGN-IDENTITY EPOCH could not be incremented; any declared "
+               "clearance budget has been retired (fail-closed).")
+        try:
+            msg = (
+                f"optivibe: DESIGN-IDENTITY EPOCH could not be incremented for "
+                f"tool={tool_name!r}; any declared clearance budget has been retired "
+                f"(fail-closed) — no session-stated limit will be applied again."
+            )
+            logger = self._logger
+            if logger is not None and hasattr(logger, "log"):
+                logger.log(intent="design_epoch_fault", call="dispatch", args=msg)
+                return
+        except Exception:  # noqa: BLE001 — fall through to stderr
+            pass
+        try:
+            print(msg, file=sys.stderr)
+        except Exception:  # noqa: BLE001 — a breadcrumb must never break a dispatch
+            pass
 
     def _invoke(self, spec, params):
         """Run the handler, wrapped in ``logger.record_call`` when available.

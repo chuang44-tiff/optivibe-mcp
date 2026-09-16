@@ -1055,7 +1055,14 @@ def _driven_cells_prescan(system, spec):
                 entry["note"] = ("material flows through substitute_glass, which has no "
                                  "driven-cell guard")
             entries.append(entry)
-            if len(entries) >= _DRIVEN_CELLS_CAP:
+            # ONE PAST THE CAP, DELIBERATELY. Stopping AT the cap made the list length
+            # ambiguous: exactly-cap and more-than-cap both left `len(entries) == cap`,
+            # so `_driven_cells_keys` — which owns the flag and can see nothing but the
+            # length — declared a truncation on a design with exactly 40 driven cells and
+            # nothing omitted. Collecting one extra makes the length DECIDE: `> cap` can
+            # only happen when a (cap+1)th candidate really existed. The extra entry is
+            # sliced back off before it reaches the wire.
+            if len(entries) > _DRIVEN_CELLS_CAP:
                 break
         return entries, False
     except Exception:  # noqa: BLE001 — a scan fault DISCLOSES; it never fails the apply
@@ -1071,8 +1078,14 @@ def _driven_cells_keys(driven_cells, driven_scan_failed):
     try:
         if driven_scan_failed:
             return {"driven_cells": None, "driven_scan_failed": True}
-        out = {"driven_cells": list(driven_cells or [])}
-        if len(out["driven_cells"]) >= _DRIVEN_CELLS_CAP:
+        # `>` NOT `>=`, AND THE SLICE IS WHAT MAKES THAT SOUND. The pre-scan collects one
+        # past the cap (see `_driven_cells_prescan`), so a list longer than the cap is
+        # POSITIVE evidence that a further candidate existed — where `>=` on a
+        # stopped-at-the-cap list was merely evidence that the cap was reached, which is
+        # also true when the design has exactly that many and nothing was dropped.
+        cells = list(driven_cells or [])
+        out = {"driven_cells": cells[:_DRIVEN_CELLS_CAP]}
+        if len(cells) > _DRIVEN_CELLS_CAP:
             out["driven_cells_truncated"] = True
         return out
     except Exception:  # noqa: BLE001 — a disclosure must never break the envelope

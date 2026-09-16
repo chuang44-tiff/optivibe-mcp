@@ -71,6 +71,71 @@ CB_SOLVE_LOSS = "cb_solve_loss"
 #: literal is what stops them drifting apart again, and it is a SERVED string.
 CHANGETYPE_ATTEMPTED = "changetype(surface=%s) — outcome UNKNOWN if this call threw"
 
+#: F-F (0.1.6 PR #8 review batch) — ``add_return_cb``'s ALREADY-CB arm.
+#:
+#: **THIS IS A DISCLOSURE, NOT A GUARD, AND THE DIFFERENCE IS THE POINT.** Nothing here
+#: inspects anything; it is the honest statement that the incumbent was NOT inspected.
+#: The precedent is ``_optimize_common._stamp_prior_solve_unchecked``, which the
+#: four Par/MCE variable tools use for the same reason — including ``set_cb_variable``,
+#: one door over in ``cb_surface.py``, which stamps at its PUBLIC entry. ``add_return_cb``
+#: was the one CB-Par writer with no stamp at all.
+#:
+#: WHAT IS NOT INSPECTED, precisely. On a return surface that is ALREADY a
+#: CoordinateBreak no retype happens, so ``precheck`` above never runs — three verified
+#: sub-claims: the precheck is guarded by
+#: ``if not _cb.is_coordinate_break(return_row):``; ``author_solve`` never looks at the
+#: incumbent; and unlike ``set_cb_variable`` there was no ``prior_solve_not_checked``
+#: stamp. ``add_return_cb`` then OVERWRITES all five Par cells (Par1..Par5) with scale--1
+#: pickups, so an incumbent Par-cell solve is replaced without a word under ``ok: true``.
+#:
+#: **DO NOT "JUST CALL THE EXISTING PRECHECK ON THE OTHER ARM."** It reads
+#: ``_sc.emit_solves_block``, which iterates the FIVE GEOMETRY CELLS only; every CB row
+#: already sets ``par_cell_solves_not_audited`` and ``precheck`` READS THAT KEY AND
+#: DISCARDS IT. There is no Par-cell solve substrate to call, so the "obvious" fix
+#: inspects the wrong cells and reports clean. The real guard is ~20-35 statements, it
+#: breaches ``cb_surface.py``'s 334 ceiling (the module measured 333 when this was
+#: written and 330 after round 2's deletion -- either way ~20-35 does not fit, and the
+#: three statements freed are NOT a budget for it), it reddens the
+#: the roadmap defers it — so it is DEFERRED by the batch's own criteria with that
+#: measurement, and this stamp is NOT a down-payment on it.
+#:
+#: AND IT NAMES NO PRE-FLIGHT REMEDY, DELIBERATELY. The obvious sentence to write here is
+#: "read the row with ``read_surface`` first" — and that door CANNOT SHOW a CB Par solve:
+#: ``emit_solves_block`` emits Par state as the single bare boolean
+#: ``par_cell_solves_not_audited`` and enumerates nothing
+#: further. Serving a remedy with no working door is the
+#: defect this repo prosecutes, so the text says what is UNKNOWABLE today instead of
+#: pointing at a door that would answer "not audited".
+#:
+#: THE TICKETS. No ticket names THIS arm specifically — that is a gap and this comment is
+#: the disclosure of it. The deferral's two halves are owned by
+#: a ticket for the Par-cell solve substrate that a
+#: real guard requires — the same ticket ``set_cb_variable``'s own stamp names, and
+#: a second one covering why a geometry-cell reader cannot
+#: be reused for this question). Both are named in the SERVED string so an agent that
+#: reads only the envelope reaches the right register entry.
+PAR_SOLVE_UNCHECKED = {
+    "par_solve_not_checked": True,
+    "par_solve_reason": (
+        "the return surface was ALREADY a CoordinateBreak, so no retype happened and the "
+        "solve-loss precheck (which runs only on the retype arm) never ran. Its five Par "
+        "cells (Par1-Par5: decenter_x, decenter_y, tilt_x, tilt_y, tilt_z) were NOT "
+        "inspected before this call OVERWROTE all five with scale -1 SurfacePickups, so "
+        "ANY incumbent Par-cell solve was replaced without being reported (whether there "
+        "WAS one is exactly what nothing here measured). THIS IS A "
+        "DISCLOSURE, NOT A GUARD: nothing was checked. The five geometry-cell audit the "
+        "retype arm uses cannot see Par cells at all, and neither can read_surface — a CB "
+        "row reports only the bare par_cell_solves_not_audited flag, so there is no door "
+        "that would have shown you the incumbent either before or after this call. "
+        "The guard needs the Par-cell solve substrate, "
+        "which is also why the existing census is "
+        "blind here. Nor is there a "
+        "general re-author door for a driving Par solve, so "
+        "this envelope states what is unknown rather than naming a recovery that does "
+        "not exist."
+    ),
+}
+
 
 def precheck(system, lde, surface, replace_solve, tool, partial_state_fields,
              audit=None):

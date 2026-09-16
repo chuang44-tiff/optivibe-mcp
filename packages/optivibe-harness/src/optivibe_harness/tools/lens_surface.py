@@ -24,7 +24,8 @@ a FakeLDE/FakeRow double (no backend).
 import math
 
 from .._io import safe_float
-from ..errors import SolveDrivenError, SurfaceWriteError, ToolParamError
+from ..errors import (SolveDrivenError, SolveRefsRefusalError, SurfaceWriteError,
+                      ToolParamError)
 from ..server import ToolSpec
 from . import _asphere_cells as _asph
 from . import _lens_common as _c
@@ -565,8 +566,18 @@ def remove_surface(session, params):
     # The vocabulary is FROZEN and ORDERED in ONE place precisely so a consumer cannot
     # acquire a private copy -- the single-locus rule forbids one module over, and
     # the strict gate is the highest-consequence consumer of it there is.
+    # F-G (0.1.6 PR #8 review batch): the class moved ``ToolParamError`` ->
+    # ``SolveRefsRefusalError`` and NOTHING ELSE did. It is a ``ToolParamError`` SUBCLASS,
+    # so this stays pre-mutation and caller-actionable and every
+    # ``pytest.raises(ToolParamError)`` around this door keeps catching it; only the WIRE
+    # family moves, ``tool_param`` -> ``solve_refs_refused``, because "your params are
+    # malformed" is the wrong machine-readable answer for a refusal the caller ASKED for
+    # over params that are correct. +0 statements, which ``lens_surface.py``'s equality
+    # pin at 253 requires — that pin's docstring
+    # explicitly refuses conversion to an inequality, so a one-statement fix here would
+    # have been a re-baseline, not an edit.
     if refuse and scan["verdict"] != _refs.VERDICTS[0]:
-        raise ToolParamError(_refs.refusal_message(at, scan))
+        raise SolveRefsRefusalError(_refs.refusal_message(at, scan))
 
     removed = lde.RemoveSurfaceAt(at)
     new_count = int(lde.NumberOfSurfaces)

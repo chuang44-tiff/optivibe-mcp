@@ -120,6 +120,42 @@ class ToolParamError(ToolError):
     error_family = "tool_param"
 
 
+class SolveRefsRefusalError(ToolParamError):
+    """``remove_surface``'s opt-in strict refusal: the row is a live solve's SOURCE.
+
+    F-G (0.1.6 PR #8 review batch). ``refuse_on_solve_refs=true`` is a caller-requested
+    SAFETY GATE, and it was raising a bare ``ToolParamError`` — so on the wire it wore
+    ``error_family: "tool_param"``, which means *your parameters are malformed*. Nothing
+    about the parameters is wrong: ``at`` names a real, removable row and the flag is a
+    legal boolean. The parameters are exactly right and the ANSWER is "this removal would
+    destroy a relationship". Every sibling guard already has a dedicated family
+    (``solve_driven``, ``cb_solve_loss``, ``element_solve_loss``); this one did not, so an
+    agent branching on the machine-readable signal could not tell a requested refusal from
+    its own bad call.
+
+    **IT SUBCLASSES ``ToolParamError`` DELIBERATELY, AND THAT IS NOT A COMPROMISE.** The
+    pre-mutation, caller-actionable contract is CORRECT and is inherited unchanged: the
+    refusal happens before ``RemoveSurfaceAt``, the caller asked for it, and the caller can
+    act on it (drop the flag, re-point the solve, or remove a different row). Existing
+    ``pytest.raises(ToolParamError)`` call sites — ``:745, 760,
+    795`` — stay green BY CONSTRUCTION rather than by being rewritten, and any consumer
+    catching ``ToolParamError`` keeps working. What was WRONG is the WIRE FAMILY, which is
+    the machine-readable signal, and that is the only thing this class overrides. Widening
+    the base to ``ToolError`` would have changed a behaviour nobody found a defect in.
+
+    The house pattern is ``SolveDrivenError`` one tier down (a ``SurfaceWriteError``
+    subclass overriding only ``error_family``): no ``__init__``, no dispatch wiring, no new
+    envelope shape.
+
+    THERE IS NO REGISTRY OR SERVED SCHEMA OF ERROR FAMILIES and no test pins the full set
+    by equality (verified, 0.1.6 PR #8 review batch the contract F-G). Do not invent one to
+    "register" this name — the family is the string on the wire, and the only pin that
+    moves is the live one that asserted the old token.
+    """
+
+    error_family = "solve_refs_refused"
+
+
 class SurfaceWriteError(ToolError):
     """A typed LDE/SystemData write did NOT take effect (read-back mismatch).
 
