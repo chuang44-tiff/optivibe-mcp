@@ -3793,7 +3793,7 @@ RENDER_LAYOUT_SPEC = ToolSpec(
         "rim of the body that carries it is drawn flat past its own measured clear "
         "semi-diameter, and that band is SYNTHETIC — a drawing convention, not a "
         "measurement — and is disclosed rather than drawn silently: the figure "
-        "carries one aggregated line naming every affected surface, and "
+        "carries one aggregated line naming every affected cemented join, and "
         "interfaces_extended carries a per-surface own_semi/drawn_to/synthetic_mm "
         "band width for the cemented joins among them (present only when some "
         "interface was extended, and always complete even when the figure's own "
