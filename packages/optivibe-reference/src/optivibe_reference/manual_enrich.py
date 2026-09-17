@@ -34,7 +34,7 @@ MERIT_INVENTORY_PATH = os.path.join(
 
 
 def load_merit_operand_inventory(path=MERIT_INVENTORY_PATH):
-    """Return the merit operand code set (a ``frozenset``) from the tracked inventory.
+    """Return the merit operand code set (a ``frozenset``) from the user-built inventory.
 
     Raises loudly (``OSError`` / ``KeyError`` / ``ValueError``) on a missing or
     malformed file — the caller must never silently fall back to the ungated pairer.
