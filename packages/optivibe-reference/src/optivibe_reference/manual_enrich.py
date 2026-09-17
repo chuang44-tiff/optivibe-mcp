@@ -16,10 +16,38 @@ The pure pairing (``pair_operands``) is fitz-FREE and FAST-testable from synthet
 ``(page, [(x0, line_text), ...])`` fixtures. ``iter_operand_pages`` is the lazy
 fitz extraction over the live PDF.
 """
+import json
+import os
 import re
 import sys
 
 from .manual_build import SECTION_HEADING_RE, normalize, strip_header_footer
+
+# The merit operand INVENTORY (the live-probed ``MeritOperandType`` 438-code set), read
+# from the user-built ``scripts/captures/`` the operand probe writes. ONE path +
+# ONE loader: ``scripts/build_manual_corpus.py`` calls ``load_merit_operand_inventory``,
+# so the glued-code gate in ``pair_operands`` sees the inventory the build was probed from.
+_PKG_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+MERIT_INVENTORY_PATH = os.path.join(
+    _PKG_ROOT, "scripts", "captures", "operand_inventory_438.json"
+)
+
+
+def load_merit_operand_inventory(path=MERIT_INVENTORY_PATH):
+    """Return the merit operand code set (a ``frozenset``) from the user-built inventory.
+
+    Raises loudly (``OSError`` / ``KeyError`` / ``ValueError``) on a missing or
+    malformed file — the caller must never silently fall back to the ungated pairer.
+    """
+    with open(path, encoding="utf-8") as fh:
+        inventory = json.load(fh)
+    codes = frozenset(m["code"] for m in inventory["members"])
+    if len(codes) != inventory["total_members"]:
+        raise ValueError(
+            f"merit inventory {path}: {len(codes)} unique codes != "
+            f"total_members {inventory['total_members']}"
+        )
+    return codes
 
 # Column x0 bands (probe finding 2): code column ≈ 84.7, description ≈ 137.3.
 CODE_X_BAND = (80.0, 100.0)
@@ -28,6 +56,16 @@ CONT_X_BAND = (120.0, 155.0)
 # An operand code: 2-5 uppercase letters/digits, leading letter (e.g. EFFL, REAY,
 # RMSWavefront-style codes are <=4 here; guard rejects prose tokens like "The").
 _CODE_RE = re.compile(r"^[A-Z][A-Z0-9]{1,4}$")
+
+# A code GLUED to its bracketed qualifier. Some operand rows print
+# the code with no space before "(", so PyMuPDF yields ONE word ``CODE(...`` that
+# fails ``_CODE_RE``. Group 1 = the code, group 2 = the "(" remainder (kept as the
+# first description token). Measured on the 2025 R1 PDF: 3 such words in the
+# alphabetical section (DCRV, DSAG, and a second NSDD variant). The shape alone is NOT
+# enough: ordinary continuation text such as ``RMS(value)`` has the
+# same shape, so a glued word opens an entry ONLY when its prefix is in the operand
+# INVENTORY the caller passes as ``valid_codes``.
+_FUSED_CODE_RE = re.compile(r"^([A-Z][A-Z0-9]{1,4})(\(.*)$")
 
 # The alphabetical operand section is "5.2.1.3. Optimization Operands
 # (Alphabetically)". This phrase appears TWICE in the PDF: once in the TOC /
@@ -57,7 +95,9 @@ _END_HEADING_RE = SECTION_HEADING_RE
 _HEADING_X_MAX = 110.0
 
 
-def pair_operands(pages_lines, code_band=CODE_X_BAND, cont_band=CONT_X_BAND):
+def pair_operands(
+    pages_lines, code_band=CODE_X_BAND, cont_band=CONT_X_BAND, valid_codes=None
+):
     """Pair operand codes to their raw description text — PURE (finding-2 rule).
 
     ``pages_lines`` = iterable of ``(page_index, lines)`` where ``lines`` is a
@@ -69,6 +109,17 @@ def pair_operands(pages_lines, code_band=CODE_X_BAND, cont_band=CONT_X_BAND):
     A line in the CODE band whose first token is a valid code OPENS an entry; CONT
     band lines append to the open entry; lines outside both bands are ignored
     (defensive — a header/footer fragment that slipped the y-band).
+
+    A first token that is a code GLUED to its bracketed qualifier (``CODE(...``,
+    ``_FUSED_CODE_RE``) also OPENS an entry for that code, with the ``(...``
+    remainder kept as description text — ONLY when the glued prefix is a member of
+    ``valid_codes`` (the operand inventory; ``None`` = no inventory supplied, so NO
+    glued word ever opens and it stays continuation — fail-closed), and UNLESS the
+    glued code is the entry already open, in which case it is a qualifier variant of
+    that same entry and stays continuation. Without the split, a glued row was
+    appended to the PREVIOUS operand (measured: CVVA absorbed DCRV's own
+    entry, DPHS absorbed DSAG's), and a later shared-table copy printing the code as
+    a separate word then won first-occurrence for DCRV/DSAG.
     """
     entries = {}
     order = []
@@ -87,11 +138,28 @@ def pair_operands(pages_lines, code_band=CODE_X_BAND, cont_band=CONT_X_BAND):
         for x0, text in lines:
             if code_band[0] <= x0 <= code_band[1]:
                 tokens = text.split()
+                code, rest_tokens = None, tokens[1:]
                 if tokens and _CODE_RE.match(tokens[0]):
+                    code = tokens[0]
+                elif tokens:
+                    fused = _FUSED_CODE_RE.match(tokens[0])
+                    # Same-code guard: a glued word for the entry ALREADY open is a
+                    # qualifier variant of it -> continuation (keeps e.g. NSDD whole).
+                    # Inventory gate: a glued word whose prefix is NOT a known operand
+                    # (e.g. ``RMS(value)`` prose) is continuation, never a new entry.
+                    if (
+                        fused
+                        and valid_codes is not None
+                        and fused.group(1) in valid_codes
+                        and (current is None or current["code"] != fused.group(1))
+                    ):
+                        code = fused.group(1)
+                        rest_tokens = [fused.group(2)] + tokens[1:]
+                if code is not None:
                     flush()
-                    rest = " ".join(tokens[1:])
+                    rest = " ".join(rest_tokens)
                     current = {
-                        "code": tokens[0],
+                        "code": code,
                         "page": page_index,
                         "parts": [rest] if rest else [],
                     }

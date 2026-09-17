@@ -26,6 +26,7 @@ import hashlib
 import os
 import re
 import sqlite3
+import sys
 from collections import namedtuple
 
 from .errors import ProvenanceGateError
@@ -35,7 +36,10 @@ from .errors import ProvenanceGateError
 # skip and is asserted by the drift test). v2: heading rule narrowed to R_dotcap
 # (>=1 dot + capitalized title) — the section assignment changed, so every
 # content-addressed chunk_id = sha256(section_path|page|ordinal) shifts.
-BUILDER_VERSION = 2
+# v3: ``manual_chunk_fts`` indexes ``section_path`` as a 2nd column. No
+# chunk changes (chunk_id / checksum are unchanged); the bump exists so a v2 .db
+# (body-only index) is REFUSED at open with a rebuild message, never served degraded.
+BUILDER_VERSION = 3
 SCHEMA_VERSION = 1
 OPTIC_STUDIO_VERSION = "25.1.0"
 
@@ -84,6 +88,29 @@ PROVENANCE_PATH = os.path.join(_REPO_ROOT, "PROVENANCE.md")
 Chunk = namedtuple(
     "Chunk", "chunk_id section_path page ordinal char_len checksum body"
 )
+
+
+# --- citation page ---------------------------------------------------------
+def citation_page(page_index: int) -> int:
+    """0-based PDF page index -> 1-based physical page a citation names.
+
+    The stored ``page`` (corpus DB, manifest, raw captures, the served ``page``
+    field) stays the 0-based PDF page index. A ``manual:p<N>`` citation handle
+    names the 1-based physical page a reader opens, ``N = page_index + 1``.
+    Every citation producer routes through this ONE helper.
+
+    Raises ``ValueError`` for a ``bool``, a non-``int``, or a negative index.
+    """
+    if isinstance(page_index, bool) or not isinstance(page_index, int):
+        raise ValueError(
+            f"page_index must be a non-negative int; got "
+            f"{type(page_index).__name__}"
+        )
+    if page_index < 0:
+        raise ValueError(
+            f"page_index must be a non-negative int; got {page_index}"
+        )
+    return page_index + 1
 
 
 # --- hashing helpers -------------------------------------------------------
@@ -293,9 +320,12 @@ CREATE TABLE manual_chunk (
 _CREATE_CHUNK_INDEX = (
     "CREATE UNIQUE INDEX ux_chunk_key ON manual_chunk(section_path, page, ordinal)"
 )
+# ``body`` MUST stay column 0 (``search_reference`` snippets column 0). ``section_path``
+# is column 1: a heading word is searchable on every chunk of its page,
+# including continuation chunks whose body does not repeat the heading line.
 _CREATE_FTS = """
 CREATE VIRTUAL TABLE manual_chunk_fts
-USING fts5(body, content='manual_chunk', content_rowid='rowid')
+USING fts5(body, section_path, content='manual_chunk', content_rowid='rowid')
 """
 
 
@@ -369,13 +399,30 @@ def _read_meta(conn):
     }
 
 
-def open_manual_corpus(db_path=MANUAL_DB_PATH):
-    """Open the gitignored manual corpus, or return None when absent/partial.
+def _builder_version_matches(meta):
+    """True iff ``meta.builder_version`` equals this code's ``BUILDER_VERSION``.
 
-    Returns a read-only ``sqlite3.Connection`` ONLY when the build is complete and
-    consistent: ``build_complete == 1`` AND ``meta.chunk_count == COUNT(*)``. A
-    missing file, a partial build, or a count mismatch returns ``None`` (→ the
-    Dispatcher answers ``corpus_unavailable``, never serving partial data).
+    The ONE builder-version acceptance predicate, called by BOTH
+    ``open_manual_corpus`` (runtime: a stale build is refused, by owner ruling)
+    and ``_existing_db_matches`` (build time: a stale build is rebuilt). A missing
+    meta row, or a missing / NULL ``builder_version``, counts as a MISMATCH.
+    """
+    if not meta:
+        return False
+    found = meta.get("builder_version")
+    return found is not None and found == BUILDER_VERSION
+
+
+def open_manual_corpus(db_path=MANUAL_DB_PATH):
+    """Open the gitignored manual corpus, or return None when absent/partial/stale.
+
+    Returns a read-only ``sqlite3.Connection`` ONLY when the build is complete,
+    current and consistent: ``build_complete == 1`` AND the builder version matches
+    (``_builder_version_matches``) AND ``meta.chunk_count == COUNT(*)``. A missing
+    file, a partial build, a count mismatch, or a build from another builder version
+    returns ``None`` (→ the Dispatcher answers ``corpus_unavailable``, never serving
+    partial or stale data). A stale build also writes ONE stderr line naming both
+    versions and the rebuild script.
     """
     if not os.path.isfile(db_path):
         return None
@@ -383,6 +430,16 @@ def open_manual_corpus(db_path=MANUAL_DB_PATH):
     meta = _read_meta(conn)
     if meta is None or meta["build_complete"] != 1:
         conn.close()
+        return None
+    if not _builder_version_matches(meta):
+        conn.close()
+        print(
+            f"WARN: manual corpus at {db_path} was built by builder_version "
+            f"{meta.get('builder_version')}, this code needs builder_version "
+            f"{BUILDER_VERSION}; refusing it - rebuild with "
+            "scripts/build_manual_corpus.py",
+            file=sys.stderr,
+        )
         return None
     # The consistency COUNT can itself raise if meta says build_complete=1 but the
     # manual_chunk table is absent ('no such table') — turn that into None too, and
@@ -408,7 +465,7 @@ def _existing_db_matches(db_path, pdf_sha256):
         return (
             meta is not None
             and meta["pdf_sha256"] == pdf_sha256
-            and meta["builder_version"] == BUILDER_VERSION
+            and _builder_version_matches(meta)
         )
     finally:
         conn.close()

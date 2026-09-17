@@ -3396,14 +3396,16 @@ def _write_corpus(path, body):
     without ever exercising the thing it claims to grade."""
     import sqlite3
 
+    from optivibe_reference.manual_build import BUILDER_VERSION
+
     conn = sqlite3.connect(path)
     conn.execute(
         "CREATE TABLE meta (pdf_sha256 TEXT, pdf_page_count INTEGER, chunk_count INTEGER,"
-        " optic_studio_version TEXT, builder_version TEXT, build_complete INTEGER)")
+        " optic_studio_version TEXT, builder_version INTEGER, build_complete INTEGER)")
     conn.execute("CREATE TABLE manual_chunk (id INTEGER PRIMARY KEY, body TEXT)")
     conn.execute("INSERT INTO manual_chunk (id, body) VALUES (1, ?)", (body,))
     conn.execute("INSERT INTO meta VALUES (?, ?, ?, ?, ?, ?)",
-                 ("0" * 64, 1, 1, "2025 R1", "test", 1))
+                 ("0" * 64, 1, 1, "2025 R1", BUILDER_VERSION, 1))
     conn.commit()
     conn.close()
     return path

@@ -8,7 +8,7 @@ Layer 1 (this increment): the ``MeritOperandType`` operand catalog (438 live
 codes, authored/manual descriptions pending, live-probed parameter-cell layout
 battery) + the typed, session-free, never-raise ``lookup_operand`` MCP tool that
 grounds design intent onto a merit-function operand. The catalog is built from a
-committed normalized-LF JSON at runtime; the binary ``.db`` is never committed.
+gitignored, user-built normalized-LF JSON at runtime; the ``.db`` is never committed.
 """
 
-__version__ = "0.1.10"
+__version__ = "0.1.11"

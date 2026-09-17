@@ -249,6 +249,31 @@ _S_AP_INT = (
     "S{k} INTERNAL INTERFACE NOT DRAWN — aperture not measured "
     "(gap_edge_not_measurable)."
 )
+#: The MEASURED/EXTENDED sibling of ``_S_AP_INT``. ONE
+#: aggregated string per figure naming every affected surface, the effective
+#: token and the envelope key that carries the band widths.
+#:
+#: It asserts that the band is a DRAWING CONVENTION and not a measurement, and it
+#: deliberately does NOT claim to be the figure's only synthetic band — other
+#: conventions widen other ink and this string does not speak for them.
+#:
+#: **It says NOTHING about what any vendor's software draws for an internal
+#: cemented interface. That is UNMEASURED**, and no wording here,
+#: in the code around it, or in any test name may imply otherwise.
+_S_AP_INT_EXT = (
+    "S{ks} INTERNAL INTERFACE{s} DRAWN BEYOND MEASURED APERTURE — drawing "
+    "convention (element_outline={token}), not a measurement; band widths in "
+    "interfaces_extended."
+)
+#: RESERVED for the OUTER-CAP extension class.
+#: Deliberately DEFINED-AND-UNUSED: the cap class is not disclosed yet,
+#: and naming the constant here is what stops the next author reaching for
+#: ``_S_AP_INT_EXT`` — which is scoped to cemented JOINS — to cover caps too.
+_S_AP_EXT = (
+    "S{ks} ELEMENT OUTLINE{s} DRAWN BEYOND MEASURED APERTURE — drawing "
+    "convention (element_outline={token}), not a measurement; band widths in "
+    "caps_extended."
+)
 _S_OVERFLOW = "{n} MORE DISCLOSURES NOT SHOWN — full list in the result."
 _S_SAG = (
     "S{k} PROFILE NOT MEASURED — sag inputs unreadable (radius/conic/coefficients)."
@@ -264,6 +289,41 @@ _S_GRP_PLACEHOLDER = (
 _S_GRP_OPEN = (
     "ELEMENT OUTLINE NOT CLOSED — gap_edge_not_measurable: S{k} aperture not "
     "measured."
+)
+#: The THIRD member of the ``_S_GRP_*`` family: a cemented group that declined to
+#: split under ``per_element`` and therefore drew the GROUPED geometry — one body
+#: at the group rim — while the envelope echoes ``per_element`` (external
+#: audit).
+#:
+#: **Why a new string rather than an existing channel.** The adjacent fact is
+#: ``_S_GRP_PLACEHOLDER``, which says a body's height is fabricated; this says
+#: something else — the body's HEIGHT is measured, its PARTITION is not the one
+#: the caller asked for. An all-placeholder group is the case those two coincide
+#: on, and there the shipped placeholder string already carries it, so this string
+#: is NOT emitted for it (that no-op is sanctioned, and the shipped string is its
+#: disclosure). What was missing is the PARTLY-measured group: the same rule grants
+#: the no-op to an all-placeholder group, while the exclusion is a condition on
+#: each PAIR, so a group with one all-placeholder pair beside measured members
+#: also declines — and until this string existed it drew ``grouped`` ink under a
+#: ``per_element`` label with nothing on the figure saying so.
+#:
+#: The fallback itself is CORRECT and is not widened: splitting such a group would
+#: take a pairwise rim from the max of two fabricated heights, which is the
+#: prohibition the exclusion exists to honour. The defect was the silence.
+#:
+#: It says NOTHING about what any vendor's software draws for a cemented group
+#: — only which of OUR two conventions produced OUR ink.
+#: **LENGTH IS A CONTRACT HERE, not a style preference.** The placer requires every box
+#: to lie fully inside the canvas, and the disclosure stack starts at an axes
+#: fraction — so on a FOLDED figure, whose axes are narrow, a long sentence runs
+#: off the right edge. Measured: a first draft naming the blocking pair and
+#: quoting three clauses was 1921 px wide against a 1560 px canvas and reddened
+#: `test_i3_disclosure_boxes_never_overlap_and_stay_on_canvas`. WHICH pair
+#: blocked the partition therefore rides `groups_not_split`, not the figure —
+#: the same division of labour `_S_AP_INT_EXT` has with `interfaces_extended`.
+_S_GRP_NOT_SPLIT = (
+    "S{a}-S{b} DRAWN AS ONE BODY — element_outline={token} not applied here "
+    "(gap_edge_not_measurable); see groups_not_split."
 )
 
 #: The shipped coverage-reason token every aperture-provenance disclosure quotes.
@@ -614,6 +674,39 @@ def _fail(error_family, error, path=None):
     }
 
 
+#: The ``element_outline`` convention vocabulary. These two
+#: literals are the ONLY accepted values -- there is NO case or alias
+#: normalisation, deliberately: a silent fallback on a convention selector is a
+#: silent-wrong, so an unrecognised value is REFUSED rather than coerced.
+_ELEMENT_OUTLINE_VALUES = ("grouped", "per_element")
+#: The DEFAULT convention. Was ``"grouped"``; switched to ``"per_element"`` by
+#: owner ruling. The
+#: ruling's recorded ground is that ``grouped`` draws a vertical at a group rim no
+#: ground surface reaches, and that ``per_element`` fabricates LESS aperture. It is
+#: NOT an edge-thickness claim: no rim in this figure is a manufacturing edge
+#: thickness, and `check_clearance` is unaffected by this constant.
+_ELEMENT_OUTLINE_DEFAULT = "per_element"
+
+
+def _resolve_element_outline(params):
+    """Return the effective ``element_outline`` token, or ``None`` if unrecognised.
+
+    An ABSENT key takes the default. Every other value must be one of the two
+    literals EXACTLY, so ``"Grouped"``, ``"per element"``, ``"grouped "``, ``3``
+    and an explicit ``None`` all return ``None`` and the caller refuses.
+    ``True`` is rejected by the ``isinstance(value, str)`` test, which ``bool``
+    does not satisfy.
+
+    NEVER raises: a non-dict ``params`` is normalised by the caller first.
+    """
+    if "element_outline" not in params:
+        return _ELEMENT_OUTLINE_DEFAULT
+    value = params.get("element_outline")
+    if isinstance(value, str) and value in _ELEMENT_OUTLINE_VALUES:
+        return value
+    return None
+
+
 def _read_all_geometry(lde, n, system=None):
     """Read every surface's raw-float geometry + facts (§0.1, §3.2). NEVER raises.
 
@@ -711,13 +804,47 @@ def _edge_sag(np, rows, i, half_height):
 
 
 def _emit_profile(ax, np, rows, i, half_height, to_plot, *, width, color,
-                  family="profile"):
+                  family="profile", rim_height=None, extensions=None,
+                  truncations=None):
     """Draw ONE surface's own sag profile in plot space; return its points.
 
     Every per-surface artist carries ``gid = "s{i}:{family}"`` so a test can ask
     WHICH surface owns an artist instead of guessing from coordinates — a
     coordinate can legitimately coincide with a fabricated value, so numeric
     equality is not provenance.
+
+    ``rim_height`` extends this profile FLAT from its own
+    aperture edge out to the group rim. **It is NOT a bigger ``half_height``, and
+    the difference is the whole point.** ``half_height`` is the span this function
+    SAMPLES THE CURVE over, so raising it sweeps the curved surface outward and
+    draws a swooping arc through the band the caps close flat across — it looks
+    almost right, it reintroduces the sloped edge the flat-rim rule was built to remove, and
+    no count-, gid- or ``draw_heights``-based test in this repo can see it. The
+    extension is therefore DELEGATED to ``_geom.extend_profile_to_rim``, which
+    appends a vertex at constant local sag.
+
+    **Built in LOCAL space, BEFORE ``to_plot``** — load-bearing on the folded
+    path, where the extension is not axis-aligned in plot coordinates and a
+    plot-space extension would be a horizontal rim in the wrong frame.
+
+    ``extensions``, when given, is the caller's accumulator: on an extension this
+    records ``{surface: (own_semi, drawn_to)}`` in LOCAL radial mm, taken from the
+    ``extend_profile_to_rim`` OUTPUT. It is written ONLY after the artist is
+    actually committed, so a suppressed profile (a degraded ``to_plot``, an empty
+    or single-point mask) records nothing — ink only.
+
+    ``own_semi`` is the surface's MEASURED semi (``half_height``, the one shared
+    ``draw_heights`` map), never the largest surviving SAMPLE.
+    The two differ exactly when the sag mask truncates inside the aperture, and
+    that is the case where the distinction matters: the record's whole job is to
+    say how much of the ink was measured and how much was not.
+
+    ``truncations``, when given, is the caller's set of surfaces whose profile
+    stopped SHORT of their own measured aperture because the sag samples masked
+    out. That band is drawn flat and was never sampled, so it is disclosed — on
+    the shipped ``rim_truncated`` channel, the same concept
+    ``build_group_section`` already reports for a truncated CAP. Written under
+    the same ink-only rule as ``extensions``.
     """
     y = np.linspace(-float(half_height), float(half_height), _N_SAMPLES)
     z, valid = _geom.sag_profile(
@@ -726,11 +853,56 @@ def _emit_profile(ax, np, rows, i, half_height, to_plot, *, width, color,
         norm_radius=rows[i].get("asphere_norm_radius"),
         power=rows[i].get("asphere_power"),
     )
-    pts = []
+    # Mask to the VALID samples in LOCAL space first. The pre-extension sequence
+    # is element-for-element what the shipped loop emitted, so `rim_height=None`
+    # leaves this function's output byte-identical.
+    ys_local = []
+    sags_local = []
     for k in range(len(y)):
         if not bool(valid[k]):
             continue
-        p = to_plot(i, float(y[k]), float(z[k]))
+        ys_local.append(float(y[k]))
+        sags_local.append(float(z[k]))
+
+    record = None
+    truncated = False
+    if rim_height is not None and ys_local:
+        # This is THE SURFACE'S ONE MEASURED SEMI, read from the
+        # shared `draw_heights` map this call is already sampling over — NOT
+        # `max(|ys_local|)`, which is merely the largest SURVIVING sample. The
+        # two coincide on a sphere and diverge when the conic radical masks out
+        # INSIDE the aperture, and publishing the sample artefact put a
+        # sampling-grid number in the one field of the record that must be a
+        # measurement, underneath a string asserting exactly that.
+        own_semi = float(half_height)
+        # Ink drawn flat from the last valid sample out to the measured edge is
+        # a band NOBODY SAMPLED. It is not the synthetic band — that is the part
+        # past `own_semi`, carried by `interfaces_extended` — so it rides the
+        # shipped truncation channel instead of inventing a second vocabulary.
+        if max(abs(v) for v in ys_local) < own_semi:
+            truncated = True
+        y_ext, sag_ext = _geom.extend_profile_to_rim(
+            ys_local, sags_local, rim_height)
+        # The DOCUMENTED identity return (the SAME objects) is the "no extension
+        # needed" signal, and it is the signal the disclosure reads. Comparing
+        # VALUES here would call an equal-semi cap "extended".
+        if y_ext is not ys_local or sag_ext is not sags_local:
+            ys_local = [float(v) for v in y_ext]
+            sags_local = [float(v) for v in sag_ext]
+            drawn_to = max(abs(v) for v in ys_local)
+            # A record ADMITS ink drawn past the MEASUREMENT, so it is published
+            # only when there is such ink. The identity return alone no longer
+            # decides that: a truncating mask ends the profile short of its own
+            # aperture, so a join already AT its group rim still takes an
+            # extension vertex while nothing is drawn past its measured semi.
+            # Recording that would put "DRAWN BEYOND MEASURED APERTURE" — and a
+            # zero-width band — on a surface that was not drawn beyond it.
+            if drawn_to > own_semi:
+                record = (float(own_semi), float(drawn_to))
+
+    pts = []
+    for yy, ss in zip(ys_local, sags_local):
+        p = to_plot(i, yy, ss)
         if p is None:
             return []
         pts.append((float(p[0]), float(p[1])))
@@ -741,6 +913,12 @@ def _emit_profile(ax, np, rows, i, half_height, to_plot, *, width, color,
         color=color, linewidth=width, zorder=3,
     )
     line.set_gid(f"s{i}:{family}")
+    if extensions is not None and record is not None:
+        _record_extension(extensions, i, record[0], record[1])
+    if truncations is not None and truncated:
+        # Same ink-only rule as the extension record: past every early return,
+        # after the artist is committed.
+        truncations.add(int(i))
     return pts
 
 
@@ -757,6 +935,49 @@ def _leader_dot(ax, surface, point, color):
     )
     dot.set_gid(f"s{surface}:leader_dot")
     return dot
+
+
+def _surface_drawn_points(ax, body, surface):
+    """Every point the figure COMMITTED for ``surface``, in PLOT space.
+
+    Read from the INK, never re-derived from the planner: the per-surface artist
+    when one exists (``s{i}:interface`` / ``s{i}:profile``), else the closed body
+    polygon of the group that draws this surface as one of its caps. A surface
+    the figure never stroked yields ``()`` and the caller leaves the placement
+    alone — there is no honest place to move a mark toward ink that does not
+    exist.
+    """
+    gids = (f"s{surface}:interface", f"s{surface}:profile")
+    for line in ax.get_lines():
+        if (line.get_gid() or "") in gids:
+            return [(float(x), float(y))
+                    for x, y in zip(line.get_xdata(), line.get_ydata())]
+    for section in body.get("sections") or ():
+        if int(surface) in tuple(int(s) for s in section.surfaces):
+            return [(float(p[0]), float(p[1])) for p in section.polygon]
+    return []
+
+
+def _snap_to_drawn(point, pts):
+    """``point`` moved to the NEAREST committed vertex (the placement falsifier).
+
+    The dot is placed at the surface's own measured semi paired with the sag of
+    its LAST VALID SAMPLE. On a fully-sampled surface those are the SAME point,
+    so this returns it unchanged at distance 0 and every such figure stays
+    byte-identical. They diverge exactly when the sag mask truncates INSIDE the
+    aperture: the curve stops short, and the naive point then lies on no drawn
+    artist at all — under ``per_element`` it floats in empty space.
+
+    The falsifier rules that the PLACEMENT moves to the nearest drawn
+    vertex. The MEANING is unchanged: the dot still marks where the measured
+    aperture ends. The leader's tip moves WITH the dot, because the dot IS that
+    leader's terminator — leaving the arrow at the floating point would detach
+    the line from the mark it ends in.
+    """
+    if point is None or not pts:
+        return point
+    px, py = float(point[0]), float(point[1])
+    return min(pts, key=lambda q: (q[0] - px) ** 2 + (q[1] - py) ** 2)
 
 
 def _rider_word(surface, stop_index, n, *, at_vertex=False):
@@ -1259,8 +1480,118 @@ def _hide_axes_chrome(ax):
     return ax
 
 
-def _draw_group_bodies(ax, np, rows, groups, rims, apertures, draw_heights, to_plot):
-    """Draw ONE transparent fill + ONE closed stroke per group that has a body.
+def _rim_supersedes(rim, prior):
+    """Should ``rim`` replace ``prior`` as a surface's recorded rim?
+
+    🔴 **THE ONE RULE-BEARING LINE OF THIS CONVENTION.** Under ``per_element`` a
+    SHARED cemented surface belongs to BOTH adjacent elements, so the writer walks
+    over it TWICE. The shipped writer was a plain assignment — LAST-WRITE-WINS —
+    and last-write DIVERGES from the correct union ``max(rim(E_left),
+    rim(E_right))`` on **10 of the 15 shared interfaces in the measured corpus**.
+    The 5 where they coincide are exactly the REVERSED-ordering groups, one of
+    which is the group the original demo showcased: a fixture built on it passes
+    while the rim is wrong nearly everywhere else.
+
+    The rule is ``resolve_group_rims`` rule 1 carried to the writer:
+
+    1. nothing recorded yet -> take it;
+    2. a MEASURED rim always displaces a PLACEHOLDER one — a fabricated height may
+       neither raise a rim nor hold one against a measurement;
+    3. a PLACEHOLDER rim never displaces a MEASURED one;
+    4. between two rims of the SAME basis, the greater ``rim_height`` wins.
+
+    Under ``grouped`` each surface is written exactly once, so this returns True on
+    the first write and the comparison arms are never reached — which is what makes
+    this rule behaviour-neutral for the default convention.
+
+    The union is computed HERE and NOWHERE ELSE: there is no second map.
+    """
+    if prior is None:
+        return True
+    rim_measured = (rim.basis == "measured")
+    prior_measured = (prior.basis == "measured")
+    if rim_measured != prior_measured:
+        return rim_measured
+    return float(rim.rim_height) > float(prior.rim_height)
+
+
+def _element_partition_selection(groups, apertures):
+    """The ``per_element`` partition and ITS rims.
+
+    ``resolve_group_rims(apertures, element_partition(groups))``, applied group by
+    group so that a group which must NOT be split keeps its shipped single body.
+    Returns ``(groups, rims, not_split)``, where ``not_split`` is one
+    ``(members, blocking_pairs)`` entry per group that DECLINED to split while
+    carrying at least one measured member.
+
+    **``not_split`` IS THE DISCLOSURE FEED, and it is
+    the whole of the fix.** A declining group draws the GROUPED geometry — one body
+    at the group rim — while the envelope still echoes ``per_element``. The
+    geometry is right and is deliberately left alone; what was wrong is that
+    nothing said so. Every such group now reaches ``_S_GRP_NOT_SPLIT`` on the
+    figure and ``groups_not_split`` in the envelope.
+
+    **A group with NO measured member is NOT reported here.** It is a sanctioned
+    no-op and its body is already disclosed by the shipped
+    ``_S_GRP_PLACEHOLDER``, which says the height is fabricated; a second string
+    would disclose one body twice and say nothing the first does not. The class
+    that WAS undisclosed is the PARTLY-measured group — matrix row 8 speaks only of
+    the all-placeholder case, while the exclusion below is a condition on each
+    PAIR, so a measured-basis group holding one all-placeholder pair declines too.
+
+    A 2-surface group (a singlet, or a doublet's own halves) is the partition
+    IDENTITY, not a decline: it is already drawn per-element, so it is not
+    reported either.
+
+    **THE ONE EXCLUSION, and it is a designed one.** The behaviour rules make
+    an all-placeholder group a no-op under BOTH conventions, and the stated reason
+    is a prohibition — "no pairwise rims from placeholder heights". Stated
+    precisely, that is a condition on each PAIR, not on the group: a pair with no
+    measured member would take its rim from ``resolve_group_rims`` rule 2, the max
+    of two FABRICATED heights, and then draw a body at it. So a group is
+    partitioned only when EVERY consecutive pair carries at least one measured
+    member; otherwise it is left whole. An all-placeholder group satisfies that
+    test nowhere and so falls out as the no-op the matrix requires.
+
+    **``draw_heights`` is deliberately NOT re-derived here.**
+    ``resolve_group_rims`` returns a height map as well; it
+    is DISCARDED. The one map the drawing code reads stays the caller's, computed
+    once in ``_prepare_draw_geometry``. Only the rims change.
+    """
+    out_groups = []
+    not_split = []
+
+    def _has_measured(indices):
+        return any(0 <= j < len(apertures) and apertures[j].measured
+                   for j in indices)
+
+    for group in groups:
+        members = [int(g) for g in group]
+        pairs = _geom.element_partition([members])
+        blocking = [pair for pair in pairs if not _has_measured(pair)]
+        splits = len(pairs) > 1 and not blocking
+        if splits:
+            out_groups.extend(pairs)
+        else:
+            out_groups.append(members)
+            # The decline is reported ONLY when this group has a measured member
+            # and had more than one element to lose: an all-placeholder group is
+            # matrix row 8's no-op (disclosed by `_S_GRP_PLACEHOLDER`) and a
+            # 2-surface group is the partition identity.
+            if len(pairs) > 1 and _has_measured(members):
+                not_split.append((tuple(members),
+                                  tuple(tuple(int(j) for j in p)
+                                        for p in blocking)))
+    new_rims, _discarded_heights = _geom.resolve_group_rims(apertures, out_groups)
+    return out_groups, new_rims, tuple(not_split)
+
+
+def _draw_group_bodies(ax, np, rows, groups, rims, apertures, draw_heights, to_plot,
+                       *, outline=_ELEMENT_OUTLINE_DEFAULT):
+    """Draw ONE transparent fill + ONE closed stroke per BODY that has one.
+
+    Under ``grouped`` a body is a cemented GROUP; under ``per_element`` it is a
+    single ELEMENT, and a group of ``m`` surfaces yields ``m-1`` of them.
 
     Both consume ``GroupSection.polygon`` — there is no second copy of the
     geometry and no path-local closure, so the stroke can only ever render the
@@ -1272,10 +1603,19 @@ def _draw_group_bodies(ax, np, rows, groups, rims, apertures, draw_heights, to_p
     dashed and grey, so a reader can tell at a glance that its height is not a
     measurement.
     """
+    not_split = ()
+    if outline == "per_element":
+        groups, rims, not_split = _element_partition_selection(groups, apertures)
     state = {
         "grouped": set(), "drawn_caps": set(), "placeholder_members": set(),
         "open_groups": [], "placeholder_groups": [], "rim_truncated": [],
         "rim_by_surface": {}, "points": [], "sections": [], "cap_surfaces": set(),
+        "extensions": {},
+        # The groups that drew GROUPED ink under a `per_element` request.
+        # Empty under `grouped`, where the partition is
+        # never reached and there is nothing to decline — so the default
+        # convention's published envelope is unchanged by this channel.
+        "grouped_fallback": list(not_split),
     }
     for group, rim in zip(groups, rims):
         for g in group:
@@ -1318,11 +1658,177 @@ def _draw_group_bodies(ax, np, rows, groups, rims, apertures, draw_heights, to_p
         state["drawn_caps"].add(int(group[0]))
         state["drawn_caps"].add(int(group[-1]))
         for s in group:
-            state["rim_by_surface"][int(s)] = rim
+            k = int(s)
+            # NOT a plain assignment. A shared surface is written once per
+            # element that contains it, and the union is what the leader arm and
+            # the stamp must read. See `_rim_supersedes`.
+            if _rim_supersedes(rim, state["rim_by_surface"].get(k)):
+                state["rim_by_surface"][k] = rim
+        if outline == "per_element":
+            # Feed (ii) of the extension accumulator. It sits
+            # AFTER the `section is None` continue above and in the same block as
+            # the rim writes, so admission (beta) — INK ONLY — is STRUCTURAL
+            # rather than a second test: a suppressed body cannot reach here.
+            #
+            # `grouped` is deliberately excluded, and the exclusion is a scope
+            # statement rather than an oversight. There the shared join is drawn
+            # by `_emit_profile`, which already records it; the only caps this
+            # would add are a group's OUTER caps, which are the axis-(g) class
+            # the owner ruled OUT of NARROW disclosure. Feeding them would change
+            # the DEFAULT convention's published envelope, which this change
+            # must not do.
+            for j, own_h, rim_h in build.cap_extensions:
+                _record_extension(state["extensions"], j, own_h, rim_h)
         state["points"].extend(zip(zs, ys))
         state["sections"].append(build.section)
     state["rim_truncated"] = sorted(set(state["rim_truncated"]))
     return state
+
+
+def _is_cemented_join(rows, body, i):
+    """Is surface ``i`` a CEMENTED JOIN? A prescription fact about the surface.
+
+    Split out of the shipped ``interior`` predicate, which conflated
+    two different questions: *what kind of surface is this* and *who draws it*.
+    Cemented-ness is a property of the prescription — the convention changes the
+    OUTLINE, never what the surface IS — so the figure's only cue for a cemented
+    join (its leader DOT and flat ``"-"`` arrowstyle) is keyed on THIS, alone.
+
+    Deliberately does NOT ask whether a body already drew the surface; that is
+    ``_drawn_by_a_body``'s question and merging the two is what would drop the dot
+    the moment a convention drew the join as a cap.
+    """
+    try:
+        k = int(i)
+    except (TypeError, ValueError):
+        return False
+    return (k in body["grouped"] and k != 0
+            and _geom.is_cemented_interface(rows, k))
+
+
+def _drawn_by_a_body(body, i):
+    """Is surface ``i`` already carried by a group's ONE closed stroke?
+
+    The other half of the shipped ``interior`` split: membership of
+    ``drawn_caps ∪ placeholder_members``. This decides EMISSION (drawing it again
+    would double-stroke it); it decides nothing about leader STYLE.
+    """
+    try:
+        k = int(i)
+    except (TypeError, ValueError):
+        return False
+    return k in body["drawn_caps"] or k in body["placeholder_members"]
+
+
+def _interface_rim_height(body, outline, i):
+    """The rim height surface ``i``'s profile extends to, or ``None``.
+
+    ONE height source, read through the map that already exists
+    (``rim_by_surface``) — the same expression the leader's ``drawn_edge`` reads,
+    never a second parallel map. ``None`` means "do not extend", and it is the
+    answer for every case that must not extend on THIS path: a non-``grouped``
+    convention, a surface no body covers, and a PLACEHOLDER-basis group.
+
+    **Why ``per_element`` answers ``None`` — the REASON changed at, the
+    behaviour did not.** It is no longer "that convention is inert". Under
+    ``per_element`` a cemented join IS a body cap, so it is ``_drawn_by_a_body``
+    and the emission loop never reaches this function for it at all; the join is
+    extended inside ``build_group_section`` and reported on
+    ``GroupSectionBuild.cap_extensions``. What the ``None`` still buys is the case
+    where that body was SUPPRESSED — there the per-surface fallback does draw the
+    join, and it must draw it at its own semi rather than at a rim no body
+    committed.
+
+    The placeholder exclusion is admission condition (α) and it is load-bearing:
+    an all-placeholder group still reaches the cap loop, so without it a
+    FABRICATED height would be published as a measured ``own_semi`` underneath a
+    string asserting a measured aperture. A placeholder group's honest disclosure
+    is the shipped ``_S_GRP_PLACEHOLDER``.
+
+    Condition (β), INK ONLY, is satisfied structurally rather than by a second
+    test: ``rim_by_surface`` is written only AFTER ``_draw_group_bodies`` clears
+    its ``section is None`` continue, so a suppressed body has no entry here and
+    this returns ``None``.
+    """
+    if outline != "grouped":
+        return None
+    rim = body["rim_by_surface"].get(i)
+    if rim is None or rim.basis != "measured":
+        return None
+    return float(rim.rim_height)
+
+
+def _record_extension(extensions, surface, own_semi, drawn_to):
+    """Accumulate ONE extension event, keyed by SURFACE.
+
+    Never appends, never last-write-wins, never first-write-wins: on a second
+    event for the same surface the record with the GREATER ``drawn_to`` is kept.
+    ``own_semi`` is the surface's one measured semi and so cannot legitimately
+    differ between events; a mismatch is a defect and raises rather than
+    silently publishing one of two disagreeing numbers. The draw path's own
+    ``except BaseException`` converts that into ``ok:false`` / ``render_failed``,
+    so no figure and no ``interfaces_extended`` are published.
+
+    Under ``grouped`` each draw path visits a surface at most once, so the
+    ``prior is not None`` arm below — the coalescing rule AND its raise — runs
+    only under ``per_element``, where a shared cemented interface is a cap of two
+    elements and so produces two events for one surface.
+    """
+    k = int(surface)
+    prior = extensions.get(k)
+    if prior is None:
+        extensions[k] = (float(own_semi), float(drawn_to))
+        return
+    if float(prior[0]) != float(own_semi):
+        raise AssertionError(
+            f"surface {k} reported two different own_semi values "
+            f"({prior[0]} then {own_semi}) — a surface has ONE measured semi, "
+            "so this is a defect, not a coalescing case"
+        )
+    if float(drawn_to) > float(prior[1]):
+        extensions[k] = (float(own_semi), float(drawn_to))
+
+
+def _extension_records(extensions):
+    """The surface-sorted ``interfaces_extended`` entries. ONE per surface.
+
+    ``synthetic_mm`` is computed from the KEPT pair at full precision — never
+    carried alongside it, which is how the three numbers could drift apart.
+    """
+    out = []
+    for k in sorted(extensions):
+        own_semi, drawn_to = extensions[k]
+        out.append({
+            "surface": int(k),
+            "own_semi": float(own_semi),
+            "drawn_to": float(drawn_to),
+            "synthetic_mm": float(drawn_to) - float(own_semi),
+        })
+    return out
+
+
+def _narrow_extension_records(extensions, rows, body):
+    """``interfaces_extended`` under the NARROW disclosure policy.
+
+    The owner ruled NARROW first-hand: the published band covers a
+    surface that is a **cemented JOIN** drawn past its own measured semi, and
+    nothing else. Under ``per_element`` the accumulator legitimately also holds a
+    group's OUTER caps — element ``(a,b)``'s shorter cap is drawn flat out to that
+    element's rim by exactly the same mechanism, on exactly the same ink — so the
+    filter is what keeps them out of the envelope.
+
+    **Filtered HERE, at envelope assembly, never at accumulation.** The reason is not
+    tidiness: a cap event and a join event can land
+    on the SAME surface, and the coalescing rule has to see BOTH to keep the
+    greater ``drawn_to``. Filtering early would drop an event that should have won.
+
+    A no-op under ``grouped``, where only cemented joins are ever recorded.
+
+    ``_S_AP_EXT`` is the constant RESERVED for the outer-cap class should the
+    switch ever be turned on; owns it and nothing here publishes it.
+    """
+    return [e for e in _extension_records(extensions)
+            if _is_cemented_join(rows, body, e["surface"])]
 
 
 def _projection_disclosures(projection, rows):
@@ -1356,13 +1862,86 @@ def _projection_disclosures(projection, rows):
     return lines
 
 
+def _extension_disclosure_string(interfaces_extended, element_outline):
+    """THE ``_S_AP_INT_EXT`` line, or ``None`` when nothing was extended.
+
+    ONE producer with two readers — ``_figure_disclosure_strings`` (which places
+    it) and ``_finish_disclosures`` (which protects it). A second hand-built copy
+    in the protector is exactly how the protected set and the placed string would
+    drift apart, at which point the protection would silently guard a string that
+    is not on the figure.
+    """
+    if not interfaces_extended:
+        return None
+    ks = sorted(int(e["surface"]) for e in interfaces_extended)
+    return _S_AP_INT_EXT.format(
+        ks=", S".join(str(k) for k in ks),
+        s="" if len(ks) == 1 else "S",
+        token=element_outline,
+    )
+
+
+def _not_split_records(grouped_fallback):
+    """The ``groups_not_split`` envelope entries — ONE per DECLINING group.
+
+    The never-truncated half of the disclosure: ``_S_GRP_NOT_SPLIT`` is a
+    figure box and the canvas can run out of room, while this list is always
+    COMPLETE — the same division of labour ``interfaces_extended`` has with its
+    own string.
+
+    ``unmeasured_pairs`` is the REASON, measured rather than asserted: it names
+    the consecutive pairs that carry no measured aperture, which is exactly why
+    the group could not be partitioned without taking a rim from fabricated
+    heights. A reader can check it against ``aperture_not_measured``.
+    """
+    out = []
+    for members, blocking in grouped_fallback or ():
+        out.append({
+            "surfaces": [int(s) for s in members],
+            "unmeasured_pairs": [[int(j) for j in pair] for pair in blocking],
+        })
+    return out
+
+
+def _not_split_disclosure_strings(grouped_fallback, element_outline):
+    """``(first_surface, line)`` per declining group — ONE ``_S_GRP_NOT_SPLIT``.
+
+    The first surface is returned BESIDE the text rather than parsed back out of
+    it: the disclosure stack orders by it, and recovering it from the formatted
+    sentence would make the placement depend on the wording.
+    """
+    lines = []
+    for members, _blocking in grouped_fallback or ():
+        # `_blocking` is deliberately NOT formatted into the sentence — see the
+        # constant's own note on containment. It reaches the caller through
+        # `groups_not_split`, which no canvas can truncate.
+        lines.append((int(members[0]), _S_GRP_NOT_SPLIT.format(
+            a=int(members[0]), b=int(members[-1]), token=element_outline,
+        )))
+    return lines
+
+
 def _figure_disclosure_strings(
     *, rows, folded, projection, config_identity, open_groups,
     placeholder_groups, aperture_not_measured, interfaces_omitted,
-    profile_not_measured,
+    profile_not_measured, interfaces_extended=(), grouped_fallback=(),
+    element_outline=_ELEMENT_OUTLINE_DEFAULT,
 ):
-    """Assemble the figure strings in the fixed precedence order."""
-    lines = list(_projection_disclosures(projection, rows))
+    """Assemble the figure strings in the fixed precedence order.
+
+    ``_S_AP_INT_EXT`` is returned FIRST. The
+    shipped placer seats the first box UNCONDITIONALLY — ``if placed and bottom <
+    floor`` cannot fire on an empty ``placed`` — so "never skipped" costs nothing
+    here. Ordering ALONE is not sufficient, though: it only moves WHICH string is
+    vulnerable to the overflow pop, which is why ``_place_disclosures`` also takes
+    a ``protected`` set.
+    """
+    lines = []
+    extension_line = _extension_disclosure_string(
+        interfaces_extended, element_outline)
+    if extension_line is not None:
+        lines.append(extension_line)
+    lines.extend(_projection_disclosures(projection, rows))
     if folded:
         lines.append(_S_FOLD)
         lines.append(_S_FOLD_CLR)
@@ -1372,15 +1951,33 @@ def _figure_disclosure_strings(
         elif config_identity.count > 1:
             lines.append(_S_CFG.format(k=config_identity.active,
                                        N=config_identity.count))
+    # --- the GROUP-level strings ------------------------------------------------ #
+    # Three families now share this slot, so they are emitted in ASCENDING
+    # FIRST-SURFACE order rather than family by family. The ordering rule has
+    # always SAID "ascending first-surface order"; production satisfied it only by
+    # accident of statement order, and adding a third family is exactly what would
+    # have turned that accident into a contract violation the `_precedence_rank`
+    # oracle can see. Sorting is stable, so two strings about the same first
+    # surface keep their family order.
+    slot4 = list(_not_split_disclosure_strings(grouped_fallback, element_outline))
     placeholder_members = set()
     for group in placeholder_groups:
         placeholder_members.update(group)
-        lines.append(_S_GRP_PLACEHOLDER.format(a=group[0], b=group[-1]))
+        slot4.append((int(group[0]),
+                      _S_GRP_PLACEHOLDER.format(a=group[0], b=group[-1])))
     open_caps = set()
     for caps in open_groups:
         for k in caps:
-            open_caps.add(int(k))
-            lines.append(_S_GRP_OPEN.format(k=k))
+            kk = int(k)
+            # Under `per_element` an unmeasured
+            # SHARED interface opens BOTH adjacent elements, so the same surface
+            # arrives here twice. One surface, one unread aperture, one sentence
+            # — printing it twice would read as two separate problems.
+            if kk in open_caps:
+                continue
+            open_caps.add(kk)
+            slot4.append((kk, _S_GRP_OPEN.format(k=k)))
+    lines.extend(text for _first, text in sorted(slot4, key=lambda kv: kv[0]))
     for k in aperture_not_measured:
         if k in placeholder_members or k in open_caps:
             continue          # already disclosed by its group's own string
@@ -1392,7 +1989,7 @@ def _figure_disclosure_strings(
     return lines
 
 
-def _place_disclosures(fig, ax, strings):
+def _place_disclosures(fig, ax, strings, protected=()):
     """Stack the disclosure boxes top-left, non-overlapping and contained.
 
     Each box is placed below the previous box's MEASURED bounding box plus a fixed
@@ -1401,10 +1998,23 @@ def _place_disclosures(fig, ax, strings):
     point the last drawn slot becomes the overflow line and every remaining box is
     reported in the result instead. Never a refusal, never a silent drop.
 
+    ``protected`` names strings the overflow pop
+    may not evict. The shipped pop takes the LAST PLACED box, so a mandatory
+    string placed first is still evicted the moment the box AFTER it overflows —
+    being first makes it the last placed at exactly that boundary. The pop
+    therefore selects the last placed box NOT in this set.
+
+    **Degenerate case, stated rather than left to be discovered:** if the overflow
+    occurs while only protected boxes are placed, NOTHING is popped, the overflow
+    line is not drawn (there is no slot for it), and ``n_truncated`` still counts
+    every hidden string — so the envelope stays complete even though the canvas
+    cannot say so.
+
     Returns ``(drawn_strings, n_truncated)``.
     """
     if not strings:
         return [], 0
+    protected_set = set(protected)
     try:
         renderer = fig.canvas.get_renderer()
     except Exception:  # noqa: BLE001 — no renderer -> the deterministic step below
@@ -1499,11 +2109,21 @@ def _place_disclosures(fig, ax, strings):
         y_cursor = bottom - gap_axes
     if not overflowed:
         return [t for (_a, t, _y) in placed], 0
+    victim = None
+    for pos in range(len(placed) - 1, -1, -1):
+        if placed[pos][1] not in protected_set:
+            victim = pos
+            break
+    if victim is None:
+        # Only protected boxes were placed. Nothing may be evicted, so no slot
+        # exists for the overflow line — but every withheld string is still
+        # counted, and the result's per-surface lists remain COMPLETE.
+        return [t for (_a, t, _y) in placed], len(strings) - len(placed)
     hidden = len(strings) - (len(placed) - 1)
-    artist, _text, slot = placed.pop()
+    artist, _text, slot = placed.pop(victim)
     artist.remove()
     line = _S_OVERFLOW.format(n=hidden)
-    placed.append((_box(line, slot), line, slot))
+    placed.insert(victim, (_box(line, slot), line, slot))
     return [t for (_a, t, _y) in placed], hidden
 
 
@@ -1652,6 +2272,7 @@ def _draw_scope_footer(fig, ax):
 def _draw(
     plt, np, rows, n, title, stop_index, folded, apertures, rims, draw_heights,
     degraded, ray_data, draw_rays, projection, config_identity,
+    *, outline=_ELEMENT_OUTLINE_DEFAULT,
 ):
     """Draw the UNFOLDED figure and return it. Caller owns closing it in a finally.
 
@@ -1686,23 +2307,41 @@ def _draw(
     groups = _glass_groups(rows, n, optical_indices)
     body = _draw_group_bodies(
         ax, np, rows, groups, rims, apertures, draw_heights, to_plot,
+        outline=outline,
     )
 
     callouts = []          # (surface_index, color)
     interfaces_omitted = []
+    # The EMITTED extensions, keyed by surface. Written by `_emit_profile` from
+    # the `extend_profile_to_rim` OUTPUT in LOCAL space — never from the planner
+    # (`draw_heights` / `rims` / `_prepare_draw_geometry`), which would make the
+    # plan and the figure wrong TOGETHER and agreeing, and never from an artist,
+    # which carries plot-frame ordinates.
+    #
+    # ONE accumulator, and it is SEEDED BY THE BODY PASS. Under `per_element` the
+    # shared join is a body CAP, so `_emit_profile` never sees it and every event
+    # arrives from `GroupSectionBuild.cap_extensions`; under `grouped` the body
+    # pass contributes nothing and `_emit_profile` fills it. Taking the body's
+    # own dict rather than starting a second one is what keeps the coalescing
+    # rule operating over a SINGLE map — two maps merged later would be the
+    # last-write defect again, one layer up.
+    extensions = body["extensions"]
+    # Surfaces stroked flat from their LAST VALID SAMPLE to their own measured
+    # edge, because the sag mask truncated inside the aperture. A separate fact
+    # from the band above, on a separate (and already shipped) channel.
+    truncations = set()
     for i in optical_indices:
         record = apertures[i] if i < len(apertures) else None
         measured = bool(record is not None and record.measured)
-        internal = (
-            i in body["grouped"] and i != 0 and _geom.is_cemented_interface(rows, i)
-        )
-        if i in body["drawn_caps"] or i in body["placeholder_members"]:
+        if _drawn_by_a_body(body, i):
             pass  # the group's ONE closed stroke already carries this surface
-        elif internal:
+        elif _is_cemented_join(rows, body, i):
             if measured:
                 _emit_profile(
                     ax, np, rows, i, draw_heights[i], to_plot,
                     width=_NARROW_LINE_PT, color="black", family="interface",
+                    rim_height=_interface_rim_height(body, outline, i),
+                    extensions=extensions, truncations=truncations,
                 )
             else:
                 # An interface whose aperture was never read is OMITTED, never
@@ -1717,6 +2356,14 @@ def _draw(
         is_stop = (stop_index is not None and i == stop_index)
         callouts.append((i, "red" if is_stop else "black"))
         surface_labels.append(i)
+
+    # An interface whose own sag samples masked out was stroked flat from its
+    # last valid sample to its measured edge. That band was never sampled, so it
+    # joins the SHIPPED truncation channel — the same fact `build_group_section`
+    # already reports for a cap. It is NOT the synthetic band, which stays in
+    # `interfaces_extended`.
+    if truncations:
+        body["rim_truncated"] = sorted(set(body["rim_truncated"]) | truncations)
 
     # --- optical axis + image plane (L5) ---------------------------------- #
     axis_line = ax.axhline(0.0, color="black", linewidth=_NARROW_LINE_PT,
@@ -1807,11 +2454,13 @@ def _draw(
         # touching the outline at the anchor z. The interface leader therefore
         # crosses the outline, which is ordinary practice for a leader pointing at
         # something inside a part.
-        interior = (
-            idx in body["grouped"] and idx != 0
-            and _geom.is_cemented_interface(rows, idx)
-            and idx not in body["drawn_caps"]
-        )
+        #
+        # Keyed on the PRESCRIPTION alone. The DOT is not a boundary
+        # claim: it marks where the MEASURED aperture ends and the synthetic band
+        # begins, so it stays at `draw_heights[idx]` even when the stroke now runs
+        # past it to the rim — which is precisely when a reader most needs to be
+        # told where the measurement stopped.
+        interior = _is_cemented_join(rows, body, idx)
         tip_edge = float(draw_heights[idx]) if interior else drawn_edge
         zc = z_vertex[idx]
         collides = any(abs(zc - pz) < collide_thresh for pz in placed_top_z)
@@ -1835,6 +2484,13 @@ def _draw(
                 else max(highest_top_y, label[1])
             )
             va = "bottom"
+        if interior:
+            # The placement falsifier: the dot must LIE in the drawn point set; on
+            # a truncating conic the own-semi/last-valid-sample pair is on no
+            # artist at all, so the placement — never the meaning — moves to the
+            # nearest committed vertex. A fully-sampled surface snaps to itself
+            # at distance 0, which is what keeps every other figure unchanged.
+            tip = _snap_to_drawn(tip, _surface_drawn_points(ax, body, idx))
         anno = ax.annotate(
             str(idx), xy=tip, xytext=label, ha="center", va=va, fontsize=8,
             color=color, zorder=6,
@@ -1969,6 +2625,8 @@ def _draw(
         config_identity=config_identity, body=body,
         optical_indices=optical_indices, stop_index=stop_index, n=n,
         apertures=apertures, interfaces_omitted=interfaces_omitted,
+        interfaces_extended=_narrow_extension_records(extensions, rows, body),
+        element_outline=outline,
     )
     return fig, surface_labels, stop_label, n_rays_drawn, figure_disclosures
 
@@ -2051,7 +2709,8 @@ def _draw_rays(ax, plt, ray_data, draw_rays):
 
 def _finish_disclosures(fig, ax, *, rows, folded, projection, config_identity,
                         body, optical_indices, stop_index, n, apertures,
-                        interfaces_omitted):
+                        interfaces_omitted, interfaces_extended=(),
+                        element_outline=_ELEMENT_OUTLINE_DEFAULT):
     """Assemble, place and return the figure's disclosure strings + the footer."""
     # Before anything is placed in AXES coordinates, make sure the DATA-space
     # limits actually contain the text already drawn in them.
@@ -2097,8 +2756,21 @@ def _finish_disclosures(fig, ax, *, rows, folded, projection, config_identity,
         aperture_not_measured=aperture_not_measured,
         interfaces_omitted=interfaces_omitted,
         profile_not_measured=profile_not_measured,
+        interfaces_extended=interfaces_extended,
+        # Read off the body state rather than taken as a parameter: the decline
+        # is decided inside `_draw_group_bodies`, and both draw paths already
+        # hand this function that state, so there is no second route by which a
+        # figure could be drawn with a declining group and reach a different
+        # answer here.
+        grouped_fallback=body.get("grouped_fallback") or (),
+        element_outline=element_outline,
     )
-    drawn, truncated = _place_disclosures(fig, ax, strings)
+    # The protected set comes from the SAME producer that built the string, so
+    # the box being guarded and the box on the figure cannot be different text.
+    _extension_line = _extension_disclosure_string(
+        interfaces_extended, element_outline)
+    protected = () if _extension_line is None else (_extension_line,)
+    drawn, truncated = _place_disclosures(fig, ax, strings, protected=protected)
     drawn = list(drawn)
     # The scope footer is EXEMPT from the overflow rule: it is drawn
     # outside the stack, after the truncation decision, because it states
@@ -2116,6 +2788,15 @@ def _finish_disclosures(fig, ax, *, rows, folded, projection, config_identity,
         "profile_not_measured": list(profile_not_measured),
         "rim_truncated": list(body["rim_truncated"]),
         "interfaces_omitted": list(interfaces_omitted),
+        # COMPLETE regardless of what fitted on the canvas. The figure string is
+        # placed FIRST and PROTECTED from the overflow pop, so it is no longer a
+        # string the canvas can take away; the band widths ride this channel
+        # either way, so no reader of the envelope depends on what fitted.
+        "interfaces_extended": [dict(e) for e in interfaces_extended],
+        # COMPLETE for the same reason and by the same rule as the band list: the
+        # figure string can be crowded off the canvas, this cannot (external
+        # audit).
+        "groups_not_split": _not_split_records(body.get("grouped_fallback")),
         "disclosures_truncated": int(truncated),
         "figure_disclosures": list(drawn),
     }
@@ -2125,6 +2806,7 @@ def _finish_disclosures(fig, ax, *, rows, folded, projection, config_identity,
 def _draw_folded_global(
     plt, np, rows, n, title, stop_index, apertures, rims, draw_heights,
     degraded, global_frames, ray_data, draw_rays, projection, config_identity,
+    *, outline=_ELEMENT_OUTLINE_DEFAULT,
 ):
     """Draw a FOLDED system in the GLOBAL frame.
 
@@ -2177,6 +2859,7 @@ def _draw_folded_global(
     groups = _glass_groups(rows, n, optical_indices)
     body = _draw_group_bodies(
         ax, np, rows, groups, rims, apertures, draw_heights, to_plot,
+        outline=outline,
     )
     for gz, gy in body["points"]:
         all_gz.append(gz)
@@ -2184,6 +2867,13 @@ def _draw_folded_global(
 
     callouts = []          # (surface_index, color)
     interfaces_omitted = []
+    # See the unfolded path's note. On a fold this matters MORE, not less: the
+    # extension is built before `to_plot`, so the recorded reach is a LOCAL
+    # radial millimetre value, while the artist's own ordinates are rotated.
+    # Seeded by the body pass — see the unfolded path's note on why it is ONE map.
+    extensions = body["extensions"]
+    # See the unfolded path's note.
+    truncations = set()
     for i in optical_indices:
         frame = _frame(i)
         if frame is None:
@@ -2191,17 +2881,16 @@ def _draw_folded_global(
             continue
         record = apertures[i] if i < len(apertures) else None
         measured = bool(record is not None and record.measured)
-        internal = (
-            i in body["grouped"] and i != 0 and _geom.is_cemented_interface(rows, i)
-        )
         pts = []
-        if i in body["drawn_caps"] or i in body["placeholder_members"]:
+        if _drawn_by_a_body(body, i):
             pass
-        elif internal:
+        elif _is_cemented_join(rows, body, i):
             if measured:
                 pts = _emit_profile(
                     ax, np, rows, i, draw_heights[i], to_plot,
                     width=_NARROW_LINE_PT, color="black", family="interface",
+                    rim_height=_interface_rim_height(body, outline, i),
+                    extensions=extensions, truncations=truncations,
                 )
             else:
                 interfaces_omitted.append(i)
@@ -2216,6 +2905,11 @@ def _draw_folded_global(
         is_stop = (stop_index is not None and i == stop_index)
         callouts.append((i, "red" if is_stop else "black"))
         surface_labels.append(i)
+
+    # See the unfolded path's note: a mask-truncated interface joins the shipped
+    # truncation channel, and is NOT the synthetic band.
+    if truncations:
+        body["rim_truncated"] = sorted(set(body["rim_truncated"]) | truncations)
 
     # --- optical axis + image plane (global frame) ------------------------- #
     axis_line = ax.axhline(0.0, color="black", linewidth=_NARROW_LINE_PT,
@@ -2292,17 +2986,21 @@ def _draw_folded_global(
             else float(draw_heights[idx])
         )
         sag_hi, sag_lo = _edge_sag(np, rows, idx, float(draw_heights[idx]))
-        interior = (
-            idx in body["grouped"] and idx != 0
-            and _geom.is_cemented_interface(rows, idx)
-            and idx not in body["drawn_caps"]
-        )
+        # Keyed on the PRESCRIPTION alone — see the unfolded site's note. Sites 3/4
+        # are NOT twins of 1/2 and this one is edited on its own evidence.
+        interior = _is_cemented_join(rows, body, idx)
         arm = drawn_edge + arrow_len
         tip = to_plot(idx, float(draw_heights[idx]) if interior else drawn_edge,
                       sag_hi)
         label = to_plot(idx, arm, sag_hi)
         if tip is None or label is None:
             continue
+        if interior:
+            # See the unfolded site: the same falsifier, applied here on this
+            # path's own evidence. The snap runs in PLOT space, which on a fold
+            # is the ROTATED frame the artist itself committed — so it follows
+            # the ink rather than an axis-aligned guess about where it went.
+            tip = _snap_to_drawn(tip, _surface_drawn_points(ax, body, idx))
         anno = ax.annotate(
             str(idx), xy=tip, xytext=label, ha="center", va="bottom",
             fontsize=8, color=color, zorder=6,
@@ -2403,6 +3101,8 @@ def _draw_folded_global(
         config_identity=config_identity, body=body,
         optical_indices=optical_indices, stop_index=stop_index, n=n,
         apertures=apertures, interfaces_omitted=interfaces_omitted,
+        interfaces_extended=_narrow_extension_records(extensions, rows, body),
+        element_outline=outline,
     )
     return fig, surface_labels, stop_label, n_rays_drawn, figure_disclosures
 
@@ -2439,6 +3139,23 @@ def render_layout(session, params):
     """
     if not isinstance(params, dict):  # never-raise: None OR a truthy non-dict (§0.8, L26)
         params = {}
+    # element_outline: validated HERE, before ANY engine touch or
+    # file write -- the config resolve immediately below reads `session.system`,
+    # so a refusal living in `_render_layout_at` would already have touched the
+    # engine. No PNG can exist for a refused call.
+    _outline = _resolve_element_outline(params)
+    if _outline is None:
+        return _fail(
+            "render_failed",
+            "element_outline must be one of ['grouped', 'per_element']; got "
+            f"{params.get('element_outline')!r}",
+        )
+    # Write the EFFECTIVE token back onto a COPY of params, so everything
+    # downstream (the drawing decision AND the echo) reads one already-validated
+    # value instead of re-deriving it from the raw input. The copy keeps this
+    # normalisation out of the caller's dict.
+    params = dict(params)
+    params["element_outline"] = _outline
     # resolve the OPTIONAL single-config selector; stamp the title.
     try:
         cfg_idx = _resolve_render_config(session.system, params.get("config"))
@@ -2659,6 +3376,11 @@ def _render_layout_at(session, params):
                 "unreliable)"
             ]
 
+        # The convention token, read ONCE from the params the caller normalised.
+        # `render_layout` has already VALIDATED it and written the effective value
+        # back, so there is no re-derivation here and no branch that could coerce
+        # an unrecognised value to a default.
+        outline = params.get("element_outline", _ELEMENT_OUTLINE_DEFAULT)
         if folded:
             # The global-frame coherent folded figure.
             (fig, surface_labels, stop_label, n_rays_drawn,
@@ -2666,6 +3388,7 @@ def _render_layout_at(session, params):
                 plt, np, rows, n, title, stop_index, apertures, rims,
                 draw_heights, degraded, global_frames, ray_data,
                 effective_draw_rays, projection, config_identity,
+                outline=outline,
             )
         else:
             # The all-refractive UNFOLDED path.
@@ -2673,7 +3396,7 @@ def _render_layout_at(session, params):
              figure_disclosures) = _draw(
                 plt, np, rows, n, title, stop_index, folded, apertures, rims,
                 draw_heights, degraded, ray_data, effective_draw_rays,
-                projection, config_identity,
+                projection, config_identity, outline=outline,
             )
         _layout_meta = dict(getattr(fig, "_optivibe_layout_meta", {}) or {})
 
@@ -2836,8 +3559,9 @@ def _render_layout_at(session, params):
         if rim_truncated:
             named = ", ".join(f"S{k}" for k in rim_truncated)
             notes.append(
-                f"rim truncated at last valid sample on {named} "
-                "(sag invalid at aperture edge)"
+                f"profile truncated at last valid sample on {named} "
+                "(sag invalid at the aperture edge; a group cap or an "
+                "internal interface)"
             )
         if all_zero_semi:
             notes.append("all semi-diameters read 0/non-finite; used h=1.0 fallback")
@@ -2919,6 +3643,17 @@ def _render_layout_at(session, params):
             "stop_label": stop_label,
             "folded": folded,
             "note": note,
+            # element_outline: an IDENTITY key, not a finding key
+            # -- echoed UNCONDITIONALLY on every ok:true envelope, equal to the
+            # EFFECTIVE token, in the same family as `draw_rays` /
+            # `config_evaluated` / `n_surfaces`. An absent key would make
+            # "grouped" and "producer predates the convention" indistinguishable.
+            # Read from the ALREADY-VALIDATED params, never re-derived here. The
+            # old form called the resolver a second time and `or`-coerced its
+            # `None` to "grouped", so an unrecognised value would have been
+            # echoed as a legal one -- contradicting this module's own
+            # no-normalisation rule. One validation, one value, one echo.
+            "element_outline": outline,
             # Additive (non-breaking): the coordinate-break surface indices suppressed
             # from the figure (frame operators, not drawn). Empty for a CB-free system.
             # Kept for back-compat — a SUBSET of scaffold_suppressed (CBs only).
@@ -2984,6 +3719,25 @@ def _render_layout_at(session, params):
         # non-empty (a non-GRIN system stays byte-for-byte unchanged).
         if grin_index_profile_not_drawn:
             _result["grin_index_profile_not_drawn"] = grin_index_profile_not_drawn
+        # The synthetic bands this figure DREW. Emitted only
+        # when non-empty (the GRIN precedent), so a design with no extended
+        # interface keeps a byte-identical envelope. ALWAYS COMPLETE: it carries
+        # every affected surface regardless of what fitted on the canvas. It no
+        # longer carries it "even when the figure string was truncated away" —
+        # that string is placed FIRST and PROTECTED from the overflow pop (see
+        # the producer's own note), so the canvas cannot take it away at all.
+        _interfaces_extended = list(_layout_meta.get("interfaces_extended", []))
+        if _interfaces_extended:
+            _result["interfaces_extended"] = _interfaces_extended
+        # The groups that drew GROUPED ink under a `per_element` request.
+        # Same emission rule as the band list — present
+        # only when non-empty, so every figure whose convention DID apply keeps a
+        # byte-identical envelope, and `grouped` renders never carry it at all.
+        # Without it the envelope echoed `per_element` over grouped ink with no
+        # channel a caller could read the exception from.
+        _groups_not_split = list(_layout_meta.get("groups_not_split", []))
+        if _groups_not_split:
+            _result["groups_not_split"] = _groups_not_split
         return _result
     except BaseException as exc:  # noqa: BLE001 — render never raises into dispatch
         return _fail(
@@ -3012,7 +3766,11 @@ RENDER_LAYOUT_SPEC = ToolSpec(
     handler=render_layout,
     required_params=(),
     param_types={"title": "string", "path": "string", "draw_rays": "boolean",
-                 "config": "number"},
+                 "config": "number",
+                 # element-edge convention selector; the closed
+                 # vocabulary lives in the description prose, NOT in a served
+                 # enum -- see the description and `_resolve_element_outline`.
+                 "element_outline": "string"},
     description=(
         "Draw a real meridional (y-z) optical layout PNG for the user, in an "
         "ISO 10110-inspired visual style (a LOOK borrowed from optical drawing "
@@ -3020,13 +3778,40 @@ RENDER_LAYOUT_SPEC = ToolSpec(
         "conformance claim): equal-aspect (true curvature), cement-aware closed "
         "element outlines with a FLAT rim, two line weights, a patterned optical "
         "axis + image plane, a STOP marker, OUR stamped surface numbers (how the "
-        "user points at a surface), and — unless draw_rays=False — the chief + "
+        "user points at a surface). element_outline selects the element-outline "
+        "convention and takes exactly one of two values: 'per_element' (the "
+        "default) or 'grouped'; any other value — including a differently-cased or "
+        "space-separated spelling — is REFUSED before anything is drawn or "
+        "written, and the effective value is echoed back as element_outline on "
+        "every successful result. Under 'per_element' each ELEMENT of a cemented "
+        "run is closed as its own body out to its own rim, and the shared cemented "
+        "surface is a cap of the two bodies that meet there. Under 'grouped' the "
+        "whole cemented run is closed as ONE body out to the group's rim, so a "
+        "cemented internal interface is drawn flat out to that rim. Both are "
+        "drawing conventions over incomplete part-boundary data and neither is a "
+        "measurement of a part boundary. Under EITHER, a surface shorter than the "
+        "rim of the body that carries it is drawn flat past its own measured clear "
+        "semi-diameter, and that band is SYNTHETIC — a drawing convention, not a "
+        "measurement — and is disclosed rather than drawn silently: the figure "
+        "carries one aggregated line naming every affected cemented join, and "
+        "interfaces_extended carries a per-surface own_semi/drawn_to/synthetic_mm "
+        "band width for the cemented joins among them (present only when some "
+        "interface was extended, and always complete even when the figure's own "
+        "line did not fit on the canvas). Under 'per_element' a cemented run is "
+        "split into its elements only where every consecutive pair has at least "
+        "one MEASURED aperture; a run where some pair has none is drawn as ONE "
+        "body instead, because a rim for that pair could only come from heights "
+        "nobody measured — and that exception is never silent: the figure says so, "
+        "and groups_not_split lists those runs with the pairs that blocked them "
+        "(present only when it happened). And — unless draw_rays=False — the chief + "
         "upper/lower marginal ray of each field, retained on purpose because ray "
         "bending is the strongest cue that a system is sane (one color per field). "
-        "2-D meridional cross-section only — there is no other view. A group's rim "
-        "height is the maximum MEASURED clear semi-diameter over the group: an "
-        "approximation forced by the absence of any part-boundary data, and it is "
-        "not a part dimension. An aperture that could not be read is DISCLOSED "
+        "2-D meridional cross-section only — there is no other view. A body's rim "
+        "height — the body being a cemented GROUP under 'grouped' and a single "
+        "ELEMENT under 'per_element' — is the maximum MEASURED clear semi-diameter "
+        "over that body: an approximation forced by the absence of any "
+        "part-boundary data, and it is not a part dimension. An aperture that "
+        "could not be read is DISCLOSED "
         "(drawn as unknown, never as a number nobody measured), as is a projection "
         "the check cannot vouch for; one active configuration is drawn and labelled. "
         "Returns the saved PNG path plus png_valid/n_fields/n_rays_drawn/n_surfaces/"

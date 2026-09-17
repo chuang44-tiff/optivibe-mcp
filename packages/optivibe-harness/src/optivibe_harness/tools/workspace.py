@@ -2927,6 +2927,11 @@ _FIGURE_ENVELOPE_KEYS = (
     "figure_disclosures",   # what the figure does NOT faithfully depict
     "flags",                # render-time flags (ray-trace degradations, etc.)
     "config_evaluated",     # the multi-config configuration this picture depicts
+    # The element-outline CONVENTION this picture was drawn under. This is the one
+    # path that pairs a .zmx with its reviewable PNG, so it is the one place the
+    # provenance of the drawing convention actually matters: without it a reviewer
+    # scoring the figure cannot tell which outline convention produced the ink.
+    "element_outline",
 )
 
 
@@ -4569,7 +4574,8 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "the record — that picture is scratch and its digest is refused there "
         "(finding_figure_unbound). When a figure was rendered the envelope also carries "
         "that render's own facts about THESE bytes — surface_labels, n_surfaces, "
-        "stop_label, figure_disclosures, flags, config_evaluated — read inside the "
+        "stop_label, figure_disclosures, flags, config_evaluated, element_outline — "
+        "read inside the "
         "same render invocation that wrote them, so a reviewer's finding can be scored "
         "against the picture it was actually made about without pairing this PNG with a "
         "separately dispatched render. Those keys are ABSENT when no figure was "

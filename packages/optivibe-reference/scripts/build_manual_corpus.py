@@ -89,8 +89,14 @@ def _emit_raw(pdf_path):
     §7.2.1.1 pairer -> ``tolerance_raw_descriptions.json`` (a SEPARATE strategy,
     probe FACT 3). NEVER prints the extracted prose — only entry counts.
     """
+    # S-REF-2: the merit operand INVENTORY gates the glued ``CODE(`` split (an entry
+    # opens only when the prefix is a real operand, never on prose like ``RMS(``).
+    # ONE shared loader — no second path/list here.
+    merit_valid_codes = manual_enrich.load_merit_operand_inventory()
     merit_pages = manual_enrich.iter_operand_pages(pdf_path)
-    merit_entries, merit_order = manual_enrich.pair_operands(merit_pages)
+    merit_entries, merit_order = manual_enrich.pair_operands(
+        merit_pages, valid_codes=merit_valid_codes
+    )
     merit_payload = _write_raw(_RAW_EXTRACT_PATH, merit_entries, merit_order)
     print("raw-extract: wrote {} operand entries -> {}".format(
         len(merit_payload), _RAW_EXTRACT_PATH))
