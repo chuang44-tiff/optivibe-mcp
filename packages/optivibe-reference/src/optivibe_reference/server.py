@@ -42,22 +42,40 @@ from .errors import ReferenceLayerError, ToolParamError, UnknownToolError
 # ``_safe_open_catalog`` (which wraps ONLY the ``opener``/``build_db`` call) — the
 # handler-dispatch path is a SEPARATE ``except BaseException`` in ``dispatch`` that
 # still classifies a real handler ``KeyError`` as ``internal`` (never swallowed here).
-# ``open_manual_corpus`` is out of scope for this fold (§4.1 #4).
+# ``open_manual_corpus`` and ``open_glass_catalog`` are now wrapped too:
+# every non-injected OPEN in ``Dispatcher.__init__`` runs through the belt (an
+# absent optional JSON short-circuits to ``None`` with no open at all), which
+# degrades ONE plane to ``None`` when its opener raises one of the LISTED types below
+# (corruption / unreadable file), and the WARN names that plane's own
+# ``*_unavailable`` family. The belt is NOT a catch-all: an opener raising a type
+# OUTSIDE this tuple still propagates out of ``__init__`` BY DESIGN. The one
+# deliberate such raise is a CALLER-CONTRACT refusal, not corruption:
+# ``glass_build.build_glass_db`` raises ``RuntimeError`` when an explicit
+# persistent ``glass_db_path`` already holds a ``glass`` table (the build is
+# one-shot). Production constructs ``Dispatcher()`` with no ``glass_db_path``, so it
+# never reaches that raise. Do NOT add ``RuntimeError`` here: it would also swallow
+# opener programming defects.
 _CATALOG_OPEN_DEGRADE_ERRORS = (
     OSError, sqlite3.Error, json.JSONDecodeError, ValueError,
     KeyError, TypeError, AttributeError,
 )
 
 
-def _safe_open_catalog(opener, *args, _what="catalog"):
+def _safe_open_catalog(opener, *args, _what="catalog",
+                       _family="operand_catalog_unavailable"):
     """Open a catalog via ``opener(*args)``; degrade a corrupt file to ``None``.
 
-    Returns the connection, or ``None`` if ``opener`` raised a scoped corruption
-    error (finding 10 / F2). The degrade reason is written to stderr (never swallowed
+    Returns the connection, or ``None`` if ``opener`` raised one of the scoped
+    corruption / unreadable-file types in ``_CATALOG_OPEN_DEGRADE_ERRORS`` (finding
+    10 / F2). Any OTHER raised type propagates unchanged BY DESIGN — notably a
+    caller-contract refusal such as ``glass_build``'s ``RuntimeError`` (a reused persistent
+    ``glass_db_path``), which is not corruption. The degrade reason is written to stderr (never swallowed
     silently) so a present-but-corrupt catalog is diagnosable; the caller's ``None``
-    conn then answers ``operand_catalog_unavailable`` at dispatch time. The broadened
-    tuple is safe ONLY because this wrapper wraps EXCLUSIVELY the open/build_db call,
-    never handler dispatch (a real handler bug still surfaces via ``dispatch``).
+    conn then answers ``_family`` at dispatch time (``operand_catalog_unavailable``
+    for the merit/tolerance catalogs, ``corpus_unavailable`` for the manual corpus,
+    ``glass_catalog_unavailable`` for the glass catalog). The broadened tuple is safe
+    ONLY because this wrapper wraps EXCLUSIVELY the open/build_db call, never handler
+    dispatch (a real handler bug still surfaces via ``dispatch``).
     """
     try:
         return opener(*args)
@@ -65,7 +83,7 @@ def _safe_open_catalog(opener, *args, _what="catalog"):
         print(
             f"WARN: {_what} present but unreadable "
             f"({type(exc).__name__}: {exc}) — degrading to "
-            "operand_catalog_unavailable",
+            f"{_family}",
             file=sys.stderr,
         )
         return None
@@ -125,7 +143,7 @@ _MULTI_SPEC_MODULES = (
 )
 
 # The ``ToolSpec.kind`` that routes a handler to the gitignored manual-corpus
-# connection (vs. the always-present catalog connection). Every other kind gets
+# connection (vs. the operand / glass catalog connections). Every other kind gets
 # the catalog connection threaded as arg-0.
 _MANUAL_RAG_KIND = "manual_rag"
 
@@ -133,8 +151,9 @@ _MANUAL_RAG_KIND = "manual_rag"
 # DISTINCT keyed table, NOT the operand table). The glass conn is built from the
 # USER-BUILT ``glass_catalog.json`` (scripts/build_glass_catalog.py, derived from
 # the user's licensed install) — like the manual corpus it is OPTIONAL: absent on
-# a fresh clone until the user runs the build, so the conn degrades to None and
-# glass requests answer a typed ``glass_catalog_unavailable`` envelope.
+# a fresh clone until the user runs the build, or present but unreadable, the conn
+# degrades to None and glass requests answer a typed ``glass_catalog_unavailable``
+# envelope.
 _GLASS_KIND = "glass"
 
 # The ``ToolSpec.kind`` for the operand tool. ``domain`` is an ORTHOGONAL runtime
@@ -162,18 +181,33 @@ def load_manifest():
 
 
 class Dispatcher:
-    """Routes a reference tool request to its handler; never raises.
+    """Routes a reference tool request to its handler; ``dispatch()`` never raises.
 
-    SESSION-FREE: the dispatcher opens/holds TWO DB connections — the always-
-    present, committed-JSON-built catalog connection AND an OPTIONAL gitignored
-    manual-corpus connection — and threads the ``spec.kind``-correct one as
-    POSITIONAL arg-0 to every handler (PIN 3). The handler answers from THAT
+    The never-raise contract covers REQUEST DISPATCH only. Construction
+    (``__init__``) can raise by design on a caller-contract refusal (a reused
+    persistent ``glass_db_path``); see below.
+
+    SESSION-FREE: the dispatcher opens/holds FOUR DB connections and threads the
+    correct one as POSITIONAL arg-0 to every handler (PIN 3) — by ``spec.kind``, and
+    for the operand kind by its ``domain`` sub-selector. The handler answers from
     connection, never a module-global (§5).
 
-    The manual corpus may be absent (a fresh clone never ran the build): then
-    ``manual_conn`` is ``None`` and a ``manual_rag`` request returns a structured
-    ``corpus_unavailable`` envelope BEFORE the handler is called (so the handler
-    never sees a ``None`` connection).
+    - merit operand catalog: built from the GITIGNORED, user-built
+      ``operand_catalog.json``; OPTIONAL (absent -> ``None``);
+    - tolerance operand catalog: built from the GITIGNORED, user-built
+      ``tolerance_operand_catalog.json``; OPTIONAL (absent -> ``None``);
+    - manual corpus: the GITIGNORED, locally-built ``.db``; OPTIONAL (its opener
+      returns ``None`` when absent or incomplete);
+    - glass catalog: built from the GITIGNORED, user-built ``glass_catalog.json``;
+      OPTIONAL (absent -> ``None``).
+
+    Every non-injected open runs through ``_safe_open_catalog``, so a present but
+    unreadable file (one of the listed corruption/unreadable error types) degrades
+    that ONE connection to ``None``; a caller-contract refusal outside that set
+    still raises. A ``None`` connection never reaches a handler: dispatch
+    answers ``operand_catalog_unavailable`` (domain-carried) / ``corpus_unavailable``
+    / ``glass_catalog_unavailable`` BEFORE the handler is called, and a generic
+    ``None`` branch covers any other kind.
     """
 
     def __init__(self, manifest=None, db_path=":memory:", conn=None,
@@ -181,8 +215,8 @@ class Dispatcher:
                  glass_conn=None, glass_db_path=None,
                  tolerance_conn=None, tolerance_db_path=None):
         # The catalog connection is the FORWARD analog of the harness session: it
-        # is arg-0 to the operand handlers. Built from committed JSON unless an
-        # explicit connection is injected (tests inject an in-memory build). The
+        # is arg-0 to the operand handlers. Built from the baked catalog JSON unless
+        # an explicit connection is injected (tests inject an in-memory build). The
         # catalog JSON is now gitignored + user-built, so a fresh clone that never
         # ran the vendor-data build has no baked JSON: guard with isfile-else-None
         # (the copy's glass degrade pattern) so __init__ NEVER crashes with a
@@ -211,32 +245,54 @@ class Dispatcher:
         # chunk-count mismatch — so an absent corpus still degrades to
         # ``corpus_unavailable``, never a false positive. Do NOT re-derive that
         # predicate with a local isfile() check.
+        # The opener can still RAISE on a present-but-unreadable file (measured: a
+        # locked db raises sqlite3.OperationalError at connect), so it runs inside
+        # _safe_open_catalog: a raise degrades ONLY this plane to None ->
+        # corpus_unavailable, never crashes __init__.
         if manual_conn is not None:
             self._manual_conn = manual_conn
         elif manual_db_path is not None:
-            self._manual_conn = manual_build.open_manual_corpus(manual_db_path)
+            self._manual_conn = _safe_open_catalog(
+                manual_build.open_manual_corpus, manual_db_path,
+                _what="manual corpus", _family="corpus_unavailable",
+            )
         else:
-            self._manual_conn = manual_build.open_manual_corpus()
+            self._manual_conn = _safe_open_catalog(
+                manual_build.open_manual_corpus,
+                _what="manual corpus", _family="corpus_unavailable",
+            )
         # The glass connection is OPTIONAL (user-built-JSON model, like the
         # gitignored manual corpus): use an injected one, else build from the
         # given .db path, else build from the user-built glass_catalog.json when
         # it exists — else stay None (fresh clone, build_glass_catalog.py not run
-        # yet) so Dispatcher construction survives and the OTHER reference tools
-        # stay alive; glass requests answer glass_catalog_unavailable.
+        # yet). A present-but-unreadable file is caught by the belt, which degrades
+        # ONLY this plane to None, so Dispatcher construction survives and the OTHER
+        # reference tools stay alive; glass requests answer glass_catalog_unavailable.
+        # Not covered BY DESIGN: an explicit persistent glass_db_path that already
+        # holds a glass table raises RuntimeError (a caller-contract refusal;
+        # production never passes glass_db_path).
         if glass_conn is not None:
             self._glass_conn = glass_conn
         elif glass_db_path is not None:
-            self._glass_conn = glass_build.open_glass_catalog(glass_db_path)
+            self._glass_conn = _safe_open_catalog(
+                glass_build.open_glass_catalog, glass_db_path,
+                _what="glass catalog",
+                _family="glass_catalog_unavailable",
+            )
         elif os.path.isfile(glass_build.GLASS_CATALOG_JSON):
-            self._glass_conn = glass_build.open_glass_catalog()
+            self._glass_conn = _safe_open_catalog(
+                glass_build.open_glass_catalog,
+                _what="glass catalog",
+                _family="glass_catalog_unavailable",
+            )
         else:
             self._glass_conn = None
-        # The tolerance connection is OPTIONAL (user-built-JSON model, like the
-        # operand catalog and glass — NOT baked): inject one, else build from the
-        # given .db path, else build from the user-built tolerance_operand_catalog
-        # when it exists — else stay None (fresh clone, build not run) so a missing
-        # baked catalog degrades to domain="tolerance" -> operand_catalog_unavailable
-        # rather than a FileNotFoundError crash in __init__.
+        # The tolerance connection is OPTIONAL: its catalog JSON is gitignored and
+        # user-built, so the build may not exist on this machine. Use an
+        # injected one, else build from the given .db path, else build from the baked
+        # tolerance_operand_catalog.json when it exists. An absent file
+        # -> None; a present but unreadable one -> the _safe_open_catalog belt -> None.
+        # Both answer operand_catalog_unavailable with domain="tolerance" at dispatch.
         if tolerance_conn is not None:
             self._tolerance_conn = tolerance_conn
         elif tolerance_db_path is not None:
@@ -356,7 +412,7 @@ class Dispatcher:
             # past the presence check: ``"name" in "name"`` is a SUBSTRING test that
             # passes, then the handler raises a TypeError that misclassifies as
             # "internal". Reject a non-dict early as a typed tool_param error. Shared
-            # across all three tools (intended).
+            # across all reference tools (intended).
             if not isinstance(params, dict):
                 raise ToolParamError(
                     f"params for {tool_name!r} must be a dict; got "
@@ -382,7 +438,9 @@ class Dispatcher:
                 conn = self._conn_for(spec.kind)
             if spec.kind == _OPERAND_KIND and conn is None:
                 # The baked operand catalog for this domain was never built on this
-                # machine (a fresh clone that never ran the vendor-data build) —
+                # machine (a fresh clone that never ran the vendor-data build), OR it
+                # is present but unreadable and __init__'s belt degraded it to None
+                # (with a stderr WARN) —
                 # answer a structured operand_catalog_unavailable envelope WITHOUT
                 # calling the handler (it must never see a None connection). Shape
                 # parity with corpus_unavailable / glass_catalog_unavailable:
@@ -390,19 +448,24 @@ class Dispatcher:
                 # the domain carried so the caller knows WHICH catalog is missing.
                 result = error_envelope(
                     tool_name, "operand_catalog_unavailable",
-                    f"{operand_domain} operand catalog not built; run "
+                    f"{operand_domain} operand catalog absent or unreadable on "
+                    "this machine (see stderr WARN); build it with "
                     "scripts/build_vendor_data.py (see PROVENANCE.md)",
                     domain=operand_domain,
                 )
             elif spec.kind == _MANUAL_RAG_KIND and conn is None:
-                # The gitignored manual corpus was never built on this machine —
+                # The gitignored manual corpus is absent, incomplete, or unreadable
+                # on this machine (an unreadable one also printed a stderr WARN) —
                 # answer a structured corpus_unavailable envelope WITHOUT calling
                 # the handler (it must never see a None connection). Shape parity
                 # with a handler-returned expected-failure envelope: ok=True at the
                 # dispatch layer, result.ok=False.
                 result = error_envelope(
                     tool_name, "corpus_unavailable",
-                    "manual corpus not built on this machine",
+                    "manual corpus absent, incomplete, unreadable, or built by "
+                    "another builder version on this machine (a stale build also "
+                    "printed a stderr WARN naming both versions); rebuild with "
+                    "scripts/build_manual_corpus.py",
                 )
             elif spec.kind == _GLASS_KIND and conn is None:
                 # The user-built glass catalog was never built on this machine —
@@ -411,7 +474,8 @@ class Dispatcher:
                 # connection).
                 result = error_envelope(
                     tool_name, "glass_catalog_unavailable",
-                    "glass catalog not built on this machine - run "
+                    "glass catalog not built or unreadable on this machine (see stderr "
+                    "WARN) - run "
                     "packages/optivibe-reference/scripts/build_glass_catalog.py "
                     "(reads your licensed install's Glasscat .agf files; see "
                     "PROVENANCE.md)",

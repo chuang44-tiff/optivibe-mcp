@@ -29,6 +29,7 @@ import re
 import sqlite3
 import sys
 
+from . import manual_build
 from .manual_build import normalize as _normalize_text
 
 
@@ -372,7 +373,9 @@ def reshape_raw_descriptions(raw):
     ``{code: {description, citation_handle, description_source}}`` where
     ``description`` is the ``normalize``-cleaned verbatim ``raw_text`` (R1: collapse
     the FACT-4 glyph-spacing whitespace before it reaches the FTS body),
-    ``citation_handle='manual:p{page}'``, ``description_source='manual_verbatim'``.
+    ``citation_handle='manual:p{page+1}'`` (the 1-based physical page via
+    ``manual_build.citation_page``; ``page`` stays 0-based),
+    ``description_source='manual_verbatim'``.
 
     A row with an empty ``raw_text`` OR a missing ``page`` is SKIPPED (a description
     can never land without a page cite — the provenance invariant).
@@ -388,7 +391,7 @@ def reshape_raw_descriptions(raw):
             continue
         out[code] = {
             "description": _normalize_text(raw_text),
-            "citation_handle": "manual:p{}".format(page),
+            "citation_handle": "manual:p{}".format(manual_build.citation_page(page)),
             "description_source": "manual_verbatim",
         }
     return out

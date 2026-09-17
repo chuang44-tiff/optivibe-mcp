@@ -247,6 +247,11 @@
       "units": "inverse_lens_units",
       "units_source": "authored"
     },
+    "DCRV": {
+      "synonyms": "curvature data surface rms pv freeform local radius sampling",
+      "units": "inverse_lens_units",
+      "units_source": "authored"
+    },
     "DENC": {
       "synonyms": "diffraction encircled energy ensquared spot fraction",
       "units": "lens_units",
@@ -313,6 +318,11 @@
     "DPHS": {
       "synonyms": "phase data surface rms pv waves diffractive freeform sampling",
       "units": "waves",
+      "units_source": "authored"
+    },
+    "DSAG": {
+      "synonyms": "sag data surface rms pv freeform height departure sampling",
+      "units": "lens_units",
       "units_source": "authored"
     },
     "DSLP": {

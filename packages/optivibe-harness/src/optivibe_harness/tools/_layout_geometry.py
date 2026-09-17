@@ -862,6 +862,47 @@ def resolve_group_rims(apertures, groups):
     return tuple(rims), draw_heights
 
 
+def element_partition(groups):
+    """Split every group into its consecutive-pair ELEMENTS.
+
+    A cemented run of ``m`` surfaces is ``m-1`` physical elements, each bounded by
+    one consecutive pair ``[g[k], g[k+1]]``. Returns a FLAT list of pairs in group
+    order then member order, so that
+
+        ``resolve_group_rims(apertures, element_partition(groups))``
+
+    yields one rim per ELEMENT and ``build_group_section`` is called once per
+    element — which is the whole of the ``per_element`` convention's geometry.
+    Neither of those two functions is modified to support it.
+
+    **The identity on a 2-surface group.** ``[[a, b]] -> [[a, b]]``, so a singlet
+    (and each corpus doublet's own halves) is a no-op BY CONSTRUCTION rather than
+    by a special case — there is no branch that could get the singlet wrong.
+
+    A group of fewer than two members has no pair to form and is passed through
+    unchanged; dropping it would lose the surface from the caller's grouped-set
+    bookkeeping.
+
+    **A shared surface appears in EXACTLY TWO pairs**, and that duplication is the
+    hazard this convention introduces: any per-surface map the caller writes while
+    walking the partition is written twice for such a surface. Plain assignment
+    there is last-write-wins, which is NOT the union of the two elements' rims.
+    See ``_rim_supersedes`` in ``layout_render``.
+
+    Total: never raises. A non-integer member is passed through as given and is
+    rejected downstream by ``build_group_section``'s own coercion.
+    """
+    parts = []
+    for group in groups:
+        members = list(group)
+        if len(members) < 2:
+            parts.append(members)
+            continue
+        for k in range(len(members) - 1):
+            parts.append([members[k], members[k + 1]])
+    return parts
+
+
 @_dataclass(frozen=True)
 class GroupSection:
     """The ONE closed boundary ring of a cemented group, in PLOT coordinates.
@@ -891,13 +932,39 @@ class GroupSectionBuild:
 
     - ``section``: the closed body, or ``None`` when no closed body exists.
     - ``open_surfaces``: the unmeasured OUTER caps that prevented closure.
-    - ``rim_truncated``: caps whose extension started at the LAST VALID sample
-      because the aperture-edge samples masked out (a steep conic).
+    - ``rim_truncated``: surfaces whose drawn profile started from the LAST
+      VALID sample because the aperture-edge samples masked out (a steep
+      conic). THIS builder puts only group CAPS here — it sees nothing else —
+      but the channel is shared: the render layer routes a mask-truncated
+      INTERNAL INTERFACE onto it too, because it is the same fact about the
+      same ink (flat, unsampled, drawn short of a measured edge). A reader of
+      this field must NOT assume a cap. The field name is shipped vocabulary
+      and is deliberately not renamed; ``build_group_section``'s own callers
+      are the ones that widen what it carries.
+
+    - ``cap_extensions``: the caps this build drew FLAT PAST THEIR OWN MEASURED
+      APERTURE, as ``(surface, own_semi, drawn_to)`` in LOCAL radial millimetres —
+      the frame of the surface's own ``semi_diameter``, taken from the
+      ``extend_profile_to_rim`` OUTPUT before any transform, never from an artist
+      (an artist carries plot-frame ordinates, and on a fold the extension is not
+      axis-aligned there).
+
+      **INK ONLY.** This is non-empty ONLY on the ``section is not None`` return.
+      Every early return leaves it ``()``, deliberately UNLIKE ``rim_truncated``,
+      which is already non-empty beside ``section=None`` on the empty-mask return
+      and must NOT be taken as the template: a record that survived a suppressed
+      body would describe ink the figure never committed.
+
+      **MEASURED ONLY.** An entry is emitted only when the surface's own aperture
+      was measured AND its group's rim basis is ``"measured"``, so a fabricated
+      placeholder height can never be published as an ``own_semi`` underneath a
+      string asserting a measured aperture.
     """
 
     section: "GroupSection | None"
     open_surfaces: "tuple[int, ...]"
     rim_truncated: "tuple[int, ...]"
+    cap_extensions: "tuple[tuple[int, float, float], ...]" = ()
 
 
 # The rim-reach epsilon. **PURELY RELATIVE**: an extension vertex is emitted only
@@ -1069,6 +1136,30 @@ def build_group_section(np, rows, group, apertures, draw_heights, rim, to_plot,
 
         h_rim = float(rim.rim_height)
         truncated = []
+        cap_ext = []
+        # Admission (alpha), the GROUP half: an all-placeholder group still
+        # reaches this loop (its body is drawn so an absent element does not read
+        # as "no lens here") and `extend_profile_to_rim` runs there, on a rim
+        # built from fabricated heights. Nothing it widens may be reported.
+        #
+        # 🔴 WHY THE MUTANT THAT DELETES `measured_basis and` BELOW CANNOT BE
+        # KILLED — corrected here because the reason first recorded was FALSE.
+        # `rim.basis == "placeholder"` is a
+        # statement about ALL members: `resolve_group_rims` sets it only when NO
+        # member is measured, so `records[j].measured` is False for both caps and
+        # the surviving conjunct blocks the event on its own. For any rim that
+        # function produces, the two conjuncts are logically REDUNDANT.
+        #
+        # ~~The earlier reason — "a placeholder group's caps already sit at their
+        # rim, so nothing is extended" — is struck: it is DISPROVED by a 5/9/5
+        # placeholder group, where `h_rim` is 9, both caps sit at 5, and
+        # `extend_profile_to_rim` extends BOTH.~~ The clamp does not equalise
+        # them either; it lowers only heights EXCEEDING the rim.
+        #
+        # The conjunct STAYS. `build_group_section` is public and total, so a rim
+        # not produced by `resolve_group_rims` can reach here with a placeholder
+        # basis and a measured cap, and then it is the only guard there is.
+        measured_basis = (rim.basis == "measured")
         caps = {}
         for j in (front, back):
             h = float(draw_heights.get(j, records[j].height))
@@ -1084,6 +1175,16 @@ def build_group_section(np, rows, group, apertures, draw_heights, rim, to_plot,
             if not bool(valid[0]) or not bool(valid[-1]):
                 truncated.append(j)
             y_ext, sag_ext = extend_profile_to_rim(y_valid, sag_valid, h_rim)
+            # The DOCUMENTED identity return (the SAME objects) is the "no
+            # extension" signal; comparing VALUES here would call an equal-semi
+            # cap extended. `h_rim > h` is the second guard and it is not
+            # redundant: a truncating mask ends the profile short of its own
+            # aperture, so a cap already AT its rim still takes an extension
+            # vertex while nothing is drawn past its MEASUREMENT. Reporting that
+            # would publish a zero-width band under a "drawn beyond" string.
+            if ((y_ext is not y_valid or sag_ext is not sag_valid)
+                    and measured_basis and records[j].measured and h_rim > h):
+                cap_ext.append((int(j), float(h), float(h_rim)))
             caps[j] = (y_valid, sag_valid, y_ext, sag_ext)
 
         pts = []
@@ -1176,6 +1277,7 @@ def build_group_section(np, rows, group, apertures, draw_heights, rim, to_plot,
         )
         return GroupSectionBuild(
             section=section, open_surfaces=(), rim_truncated=tuple(truncated),
+            cap_extensions=tuple(cap_ext),
         )
     except Exception:  # noqa: BLE001 — TOTAL: a degraded input suppresses the body
         return empty
