@@ -5100,8 +5100,9 @@ def promote_best(session, params):
             }
 
         # --- Round 4/5: ownership binding (the dogfood CRIT) -------------------
-        # A seq is a WORKSPACE index (see the module docstring), so the seq-glob above
-        # can hand back ANOTHER design's candidate. Bind it to design_name BEFORE
+        # Designs share one candidates/zmx folder, and a legacy name carries a
+        # workspace-wide number, so the resolver above can hand back ANOTHER design's
+        # candidate. Bind it to design_name BEFORE
         # anything is audited or copied.
         #
         # ONE resolution decides BOTH which file is copied and whose it is (round 5).
@@ -6038,8 +6039,9 @@ PROMOTE_BEST_SPEC = ToolSpec(
         "does NOT mean the geometry is right; clearance_ok:null means the gate could not "
         "CERTIFY clearance (a FOLDED system is one such cause); "
         "clearance_summary.coverage_reason names WHICH. "
-        "LIMITATION: seq is a WORKSPACE index, not a per-design one — all designs in a "
-        "workspace share one candidates tree and one counter. A candidate provably saved "
+        "LIMITATION: all designs in a workspace share one candidates/zmx folder, and a "
+        "historical ('legacy') file name carries a workspace-wide number rather than a "
+        "per-design one. A candidate provably saved "
         "under a different design_name is REFUSED (promote_candidate_owner_mismatch); "
         "candidate_owner discloses whose it is, or null when unrecorded. "
         "clearance_source says WHICH geometry the verdict describes: 'candidate_record' "
