@@ -31,7 +31,6 @@ from dataclasses import asdict
 from .._io import is_finite_number, safe_call, safe_exc, safe_float, safe_repr
 from ..enums import _resolve_enum
 from ..errors import OptimizeError, ToolParamError
-from ..artifact_sink import _safe_name
 from ..server import ToolSpec
 from . import _config_common as _ccfg
 from . import _grin_index_common as _gic  # GRIN — cycle-safe (never imports optimize_run)
@@ -693,43 +692,6 @@ def _auto_normalize(session, params):
     return lens_normalize.normalize_stop(session, normalize_params)
 
 
-def _run_id_param(params):
-    """The caller's ``run_id``, or ``None`` when absent/empty. A bad one -> ``optimize_param``.
-
-    ``run_id`` names the trail DIRECTORY (``<root>/candidates/trail/<run_id>``), and
-    ``ArtifactSink`` joins it with ``os.path.join`` -- so an absolute path (drive, UNC,
-    POSIX) DISCARDS the base and a ``..`` walks out of it. Measured before this door
-    existed: ``run_id="../zmx"`` wrote the trail into ``candidates/zmx`` as ownerless rows
-    that ``promote_best`` then resolved for ANY design name, and an absolute id wrote
-    outside the workspace root.
-
-    REFUSE, NEVER REWRITE -- the same fixed-point rule ``design_name`` follows. A rewritten
-    id would make the echoed ``run_id`` disagree with the directory actually used. A
-    ``_safe_name`` fixed point already excludes every escape shape: ``/``, backslash and ``:``
-    are illegal characters (so absolute, UNC and drive forms change), ``.``/``..`` strip to
-    empty and become ``snapshot``, and a reserved device name gains a prefix. Read EARLY,
-    beside the other gate-before-anything params, so a bad id refuses with ZERO mutation.
-    """
-    if not (isinstance(params, dict) and dict.__contains__(params, "run_id")):
-        return None
-    value = dict.__getitem__(params, "run_id")
-    if value is None or value == "":
-        return None
-    if not isinstance(value, str) or type(value) is not str:
-        raise OptimizeError(
-            f"'run_id' must be a string, not {type(value).__name__}", family="optimize_param")
-    safe = _safe_name(value)
-    if safe != value:
-        raise OptimizeError(
-            f"'run_id' {safe_repr(value)} is not a plain directory name -- it names the trail "
-            f"folder under candidates/trail/, so it may not contain a slash, backslash, colon or other illegal "
-            f"characters, be . or .., end in a dot or space, or be a reserved device name. "
-            f"Nothing was written. Use a plain name such as {safe_repr(safe)}, or omit "
-            f"run_id to get a generated one.",
-            family="optimize_param")
-    return value
-
-
 def _require_pos_int(params, key, default, *, cap=None):
     """Pull an optional positive-int param; reject bool / non-int / <= 0 / > cap.
 
@@ -1068,8 +1030,8 @@ def _optimize_impl(session, params):
     # when absent -> the floored path's box audit still runs (weight-/param-independent).
     grin_dn_max = _grin_dn_max_param(params)
     # The trail-directory name, refused EARLY (zero mutation) if it could escape the
-    # trail folder -- see ``_run_id_param``.
-    run_id_param = _run_id_param(params)
+    # trail folder -- see ``_workspace_paths.trail_run_id``. Generated when absent.
+    run_id = _wsp.trail_run_id(params)
     guard_warning = None
 
     # (1) embed the preflight gate — open NOTHING on a fail. The stop-convention
@@ -1196,7 +1158,7 @@ def _optimize_impl(session, params):
     run_time_m = _require_pos_float(
         params, "run_time_m", _DEFAULT_RUN_TIME_M, cap=_RUN_TIME_M_CAP
     )
-    run_id = run_id_param or f"optimize_{uuid.uuid4().hex[:12]}"  # validated in (0)
+
 
     mfe = system.MFE
     artifact_trail = []

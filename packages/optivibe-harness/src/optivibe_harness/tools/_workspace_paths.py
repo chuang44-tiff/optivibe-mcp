@@ -37,6 +37,11 @@ close it — it makes it fixable in one place instead of four. The two tickets
 remain the record of the unclosed half.
 """
 import os
+import uuid
+
+from .._io import safe_repr
+from ..artifact_sink import _safe_name
+from ..errors import OptimizeError
 
 
 def workspace_root(session):
@@ -123,3 +128,41 @@ def trail_sink(session, run_id):
     """
     from .workspace import _get_trail_sink
     return _get_trail_sink(session, run_id)
+
+
+def trail_run_id(params):
+    """The optimize trail's ``run_id``: the caller's, or a generated one. A bad one -> ``optimize_param``.
+
+    ``run_id`` names the trail DIRECTORY (``<root>/candidates/trail/<run_id>``), and
+    ``ArtifactSink`` joins it with ``os.path.join`` -- so an absolute path (drive, UNC,
+    POSIX) DISCARDS the base and a ``..`` walks out of it. Measured before this door
+    existed: ``run_id="../zmx"`` wrote the trail into ``candidates/zmx`` as ownerless rows
+    that ``promote_best`` then resolved for ANY design name, and an absolute id wrote
+    outside the workspace root.
+
+    REFUSE, NEVER REWRITE -- the same fixed-point rule ``design_name`` follows. A rewritten
+    id would make the echoed ``run_id`` disagree with the directory actually used. A
+    ``_safe_name`` fixed point already excludes every escape shape: ``/``, backslash and ``:``
+    are illegal characters (so absolute, UNC and drive forms change), ``.``/``..`` strip to
+    empty and become ``snapshot``, and a reserved device name gains a prefix. Read EARLY,
+    beside the other gate-before-anything params, so a bad id refuses with ZERO mutation.
+
+    LIVES HERE, not in ``optimize_run``: that module is at its statement band with zero
+    spare, and this is the same question this module answers -- where a run's output lives.
+    """
+    value = dict.get(params, "run_id") if isinstance(params, dict) else None
+    if value is None or value == "":
+        return f"optimize_{uuid.uuid4().hex[:12]}"
+    if not isinstance(value, str) or type(value) is not str:
+        raise OptimizeError(
+            f"'run_id' must be a string, not {type(value).__name__}", family="optimize_param")
+    safe = _safe_name(value)
+    if safe != value:
+        raise OptimizeError(
+            f"'run_id' {safe_repr(value)} is not a plain directory name -- it names the trail "
+            f"folder under candidates/trail/, so it may not contain a slash, backslash, colon or other illegal "
+            f"characters, be . or .., end in a dot or space, or be a reserved device name. "
+            f"Nothing was written. Use a plain name such as {safe_repr(safe)}, or omit "
+            f"run_id to get a generated one.",
+            family="optimize_param")
+    return value
