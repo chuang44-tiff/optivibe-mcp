@@ -3531,7 +3531,13 @@ def _get_trail_sink(session, run_id: str):
     there is no design identity at this seam and none is invented.
 
     NOT cached — a new run means a new directory. Raises up to the caller.
+
+    BACKSTOP: ``optimize`` refuses a non-plain ``run_id`` at its door; this re-asserts it
+    at the join, so no other caller can hand the sink a name that escapes the trail folder
+    (an absolute path discards the base in ``os.path.join``; ``..`` walks out of it).
     """
+    if not isinstance(run_id, str) or _safe_name(run_id) != run_id:
+        raise ValueError("trail run_id %r is not a plain directory name" % (run_id,))
     return ArtifactSink(
         os.path.join(_resolve_root(session)[0], "candidates", "trail"),
         run_id,
