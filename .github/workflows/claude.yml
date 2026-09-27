@@ -36,7 +36,9 @@ jobs:
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
     runs-on: ubuntu-latest
     # Bound a runaway session so a single invocation cannot drain the quota.
-    timeout-minutes: 20
+    # 30, not 20: measured on PR #15 a focused one-area review took 14 minutes plus
+    # setup and a broad one used ~18 of 20 -- a timeout kills the review before it posts.
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: read
@@ -47,7 +49,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          # Full history, so a review can diff against origin/main. With depth 1 there is
+          # no base to compare to, and "read the diff" was the first thing a review tried.
+          fetch-depth: 0
 
       - name: Run Claude Code
         id: claude
@@ -57,7 +61,14 @@ jobs:
 
           # Pin the model — the regenerated template dropped this and would
           # otherwise fall back to the action's default.
-          claude_args: "--model claude-fable-5"
+          # --allowed-tools: READ-ONLY history commands, so a review can see what changed.
+          # Without them the job had only Read/Grep/Glob (+ git write commands), and a
+          # review on PR #15 hit 10 permission denials (the log does not name the tools;
+          # its first step was "read the diff against origin/main", which it could not).
+          # Nothing here can write, push or run the code under review.
+          claude_args: >-
+            --model claude-fable-5
+            --allowed-tools "Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
 
           # This is an optional setting that allows Claude to read CI results on PRs
           additional_permissions: |
