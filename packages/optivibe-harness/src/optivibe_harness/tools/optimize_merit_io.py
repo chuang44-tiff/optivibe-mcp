@@ -1649,7 +1649,12 @@ SERIALIZE_MERIT_SPEC = ToolSpec(
     required_params=(),
     description=(
         "Read the merit function into a portable, Header-keyed recipe dict "
-        "(versioned; BLNK rows skipped). Pure read; never mutates the MFE."
+        "(versioned; BLNK rows skipped). Pure read; never mutates the MFE. "
+        "THE SLICE IS YOURS TO MAKE: this captures ALL non-structural operands "
+        "INCLUDING the wizard's, so appending the UNSLICED recipe onto a fresh wizard "
+        "build DOUBLES the wizard rows. Keep only your tail -- the operands AFTER the "
+        "wizard's block, the rows you authored -- then apply_merit_recipe(mode='append') "
+        "that slice. See build_merit, apply_merit_recipe."
     ),
 )
 

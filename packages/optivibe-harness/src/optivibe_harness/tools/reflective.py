@@ -2357,7 +2357,10 @@ SET_DIFFRACTION_GRATING_SPEC = ToolSpec(
         "reflected leg, as with set_mirror), reflective=False is transmissive (the beam "
         "passes through AND diffracts). Their deviation differs fundamentally, so the tool "
         "will not guess the type — if the spec doesn't state reflective vs transmissive, "
-        "ask the user. Refuses the object and image surfaces. See set_mirror, set_surface."
+        "ask the user. Refuses the object and image surfaces. A grating's diffraction "
+        "angle is DETERMINISTIC given type/order/wavelength/line-density, so compute it "
+        "yourself; there is no angle tool in this manifest. "
+        "See set_mirror, set_surface."
     ),
 )
 

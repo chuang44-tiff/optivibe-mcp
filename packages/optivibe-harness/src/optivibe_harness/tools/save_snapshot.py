@@ -11,9 +11,10 @@ raise, the dispatch envelope stays ``ok=True`` — the agent inspects
 ``result.ok`` (spec §B).
 
 The ``ArtifactSink`` is resolved from the session (``session.artifact_sink``);
-absent an explicitly-wired one, the handler FALLS BACK to the session-default
-workspace sink (``workspace._get_default_sink`` — the SAME ``<root>/candidates/zmx``
-sink ``save_candidate`` uses, so the snapshot shares one manifest/seq). Only if that
+absent an explicitly-wired one, the handler FALLS BACK to the unattributed trail
+sink (``workspace._get_snapshot_sink`` — ``<root>/candidates/trail/snapshots``, NOT
+the owner's ``candidates/zmx`` folder; a checkpoint has no design identity and none
+is invented, so it never consumes a design's candidate index). Only if that
 fallback BUILD itself fails (an unwritable root) does the handler return an
 ``ok=False`` ``workspace_unwritable`` result (still no raise). (persistence-workspace
 D4 — fixes the bug-2 "no artifact_sink wired" dead end.)
@@ -63,9 +64,9 @@ def save_snapshot(session, params):
     # call time); only an unwritable root makes it raise -> workspace_unwritable.
     sink = getattr(session, "artifact_sink", None)
     if sink is None:
-        from .workspace import _get_default_sink
+        from .workspace import _get_snapshot_sink
         try:
-            sink = _get_default_sink(session)
+            sink = _get_snapshot_sink(session)
         except Exception as exc:  # noqa: BLE001 — unwritable root -> enveloped, never raise
             return {
                 "ok": False,
@@ -93,6 +94,9 @@ def save_snapshot(session, params):
         "error": fields["error"],
         # (MCE) disclosure-only: the active config at snapshot time.
         "active_configuration": active_configuration,
+        # WHERE the checkpoint landed. A snapshot is an UNATTRIBUTED scratch
+        # checkpoint and no longer shares the owner's candidates folder.
+        "snapshots_dir": getattr(sink, "run_dir", None),
     }
 
 
@@ -103,6 +107,8 @@ TOOL_SPEC = ToolSpec(
     param_types={"label": "string", "meta": "object"},
     description=(
         "Checkpoint the live optical system to a durable, labelled .zmx snapshot. "
-        "Takes a label; returns the saved path, durability-gated; inspect result.ok."
+        "Takes a label; returns the saved path (and snapshots_dir), durability-gated; "
+        "inspect result.ok. This writes an unattributed scratch checkpoint under "
+        "candidates/trail/snapshots/; save_candidate is what names a design's keeper."
     ),
 )

@@ -25,12 +25,16 @@ against FakeLDE/FakeRow doubles + a real Agg render asserting PNG magic bytes.
 """
 import math
 import os
+import re
 import tempfile
 from dataclasses import dataclass as _dataclass
 from time import perf_counter
 
+from .. import artifact_naming as _naming
+from ..artifact_sink import _ILLEGAL_CHARS as _ILLEGAL_STEM_CHARS
 from ..artifact_sink import _safe_name
 from ..errors import ToolParamError
+from . import _workspace_paths as _wsp  # S-1 — cycle-safe (never imports layout_render)
 from ..server import ToolSpec
 from . import _asphere_cells as _asph
 from . import _config_common as _cfg
@@ -639,14 +643,44 @@ def _import_mpl():
     return plt, np
 
 
-def _resolve_path(session, path):
-    """Resolve the output PNG path: caller-supplied (sanitized stem) or minted.
+_SCRATCH_LAYOUT_RE = re.compile(r"^layout_(\d+)\.png$")
 
-    Mirrors ``capture_graphic._resolve_path``: a supplied ``path`` keeps its dir +
-    extension but the STEM is run through ``_safe_name`` (blocks the ADS ``:``
-    trap). A null ``path`` mints ``layout.png`` under the sink run-dir if wired,
-    else the current dir.
+
+def _scratch_layout_index(name):
+    """The index a minted scratch layout name carries, else ``None``."""
+    match = _SCRATCH_LAYOUT_RE.match(name)
+    return int(match.group(1)) if match else None
+
+
+def _resolve_path(session, path, exact_path=None):
+    """Resolve the output PNG path. Returns ``(path, minted, error)``.
+
+    Three cases:
+
+    * ``exact_path`` — an INTERNAL caller (``save_candidate``) that has already
+      composed the name through the naming authority. The stem is validated for
+      filesystem legality and length and used UNCHANGED: re-sanitising a name that
+      is already canonical is a second resolution of a resolved value, and at a long
+      label it TRUNCATES the picture's stem away from its ``.zmx``.
+    * a user-supplied ``path`` — today's sanitisation, unchanged. The caller asked
+      for that file, so overwrite semantics are unchanged too.
+    * nothing — a SCRATCH figure. It is minted as
+      ``<root>/candidates/scratch/layout_<NNNN>.png`` from the directory LISTING.
+      **If the listing FAILS the tool REFUSES and writes nothing**: a refusal cannot
+      clobber anything, so "an existing figure is never destroyed" holds with no
+      reservation, no descriptor and no cleanup semantics. Falling back to index 1
+      on an unreadable directory is exactly how the ninth render overwrites the
+      first. The bare ``layout.png``-in-CWD branch survives only when NO root
+      resolves at all.
     """
+    if exact_path:
+        stem = os.path.splitext(os.path.basename(exact_path))[0]
+        if (not stem or len(stem) > 255
+                or any(ch in stem for ch in _ILLEGAL_STEM_CHARS)
+                or any(ord(ch) < 32 for ch in stem)):
+            return None, False, (
+                f"the composed figure stem is not a legal filename: {stem!r}")
+        return exact_path, False, None
     if path:
         directory = os.path.dirname(path)
         base = os.path.basename(path)
@@ -654,12 +688,27 @@ def _resolve_path(session, path):
         if not ext:
             ext = ".png"
         safe_stem = _safe_name(stem)
-        return os.path.join(directory, f"{safe_stem}{ext}") if directory else f"{safe_stem}{ext}"
-    sink = getattr(session, "artifact_sink", None)
-    run_dir = getattr(sink, "run_dir", None) if sink is not None else None
-    if run_dir:
-        return os.path.join(run_dir, "layout.png")
-    return "layout.png"
+        resolved = (os.path.join(directory, f"{safe_stem}{ext}")
+                    if directory else f"{safe_stem}{ext}")
+        return resolved, False, None
+    # A resolution FAULT is not permission to use a fixed name. The bare
+    # ``layout.png``-in-CWD branch survives ONLY where no root is cleanly configured
+    # (the documented last resort); where the resolver RAISED, the root is UNKNOWN and
+    # a fixed name would silently overwrite the previous figure -- so this refuses,
+    # through the same channel an unlistable directory already uses.
+    scratch, scratch_fault = _wsp.scratch_dir_state(session)
+    if scratch_fault is not None:
+        return None, False, scratch_fault
+    if not scratch:
+        return "layout.png", False, None
+    index = _naming.next_index_in_dir(scratch, _scratch_layout_index)
+    if index is None:
+        return None, False, (
+            f"the scratch figure directory exists but could not be listed, so a "
+            f"free name cannot be minted and an existing figure could be "
+            f"overwritten: {scratch}. Pass an explicit path, or fix the "
+            f"directory's permissions.")
+    return os.path.join(scratch, f"layout_{index:04d}.png"), True, None
 
 
 def _fail(error_family, error, path=None):
@@ -3107,7 +3156,7 @@ def _draw_folded_global(
     return fig, surface_labels, stop_label, n_rays_drawn, figure_disclosures
 
 
-def render_layout(session, params):
+def render_layout(session, params, *, exact_path=None):
     """Render a meridional layout PNG from surface geometry. NEVER raises.
 
     Returns ``{ok:true, path, size_bytes, surface_labels, stop_label, folded,
@@ -3165,7 +3214,7 @@ def render_layout(session, params):
         return _fail("render_failed", f"could not resolve config: {exc!r}")
 
     if cfg_idx is None:
-        result = _render_layout_at(session, params)
+        result = _render_layout_at(session, params, exact_path=exact_path)
         if isinstance(result, dict) and result.get("ok"):
             try:
                 result.setdefault(
@@ -3179,7 +3228,7 @@ def render_layout(session, params):
     # config). The title stamps [config k] so the figure is unambiguous.
     try:
         with _cfg.with_configuration(session.system, cfg_idx) as ctx:
-            result = _render_layout_at(session, params)
+            result = _render_layout_at(session, params, exact_path=exact_path)
         if isinstance(result, dict) and result.get("ok"):
             result.setdefault("config_evaluated", cfg_idx)
             if not ctx["restore_verified"]:
@@ -3202,7 +3251,7 @@ def _resolve_render_config(system, config):
     return _cfg.resolve_single_config_selector(system, config, "render_layout")
 
 
-def _render_layout_at(session, params):
+def _render_layout_at(session, params, *, exact_path=None):
     """The pure per-config render body (draws at the ACTIVE config). See ``render_layout``.
 
     Takes NO config argument. The title suffix reports the READ-BACK identity
@@ -3222,7 +3271,18 @@ def _render_layout_at(session, params):
     fig = None
     plt = None
     tmp = None
+    minted = False
     try:
+        # WHERE THE FIGURE GOES IS DECIDED FIRST, BEFORE ANY ENGINE READ. A minted
+        # name whose directory cannot be LISTED cannot be proven free, so the call
+        # REFUSES and writes nothing — and it refuses before it has cost a geometry
+        # read, a batch trace or a matplotlib import. A refusal cannot clobber an
+        # existing figure, which is why there is no reservation and no cleanup path.
+        attempted, minted, mint_err = _resolve_path(
+            session, params.get("path"), exact_path=exact_path)
+        if mint_err is not None:
+            return _fail("workspace_unlistable", mint_err)
+
         # Resolve geometry FIRST so an import failure does not depend on the LDE.
         try:
             plt, np = _import_mpl()
@@ -3323,8 +3383,6 @@ def _render_layout_at(session, params):
                 f"{title} [config {config_identity.active} of "
                 f"{config_identity.count}]"
             )
-
-        attempted = _resolve_path(session, params.get("path"))
 
         # --- read the per-field rays (never raises; degrades to geometry-only). --
         # a FOLDED system now draws its ELEMENTS in the GLOBAL
@@ -3638,6 +3696,11 @@ def _render_layout_at(session, params):
         _result = {
             "ok": True,
             "path": attempted,
+            # A6: TRUE when this tool chose the name itself. A minted figure is
+            # SCRATCH — the REVIEWABLE figure is the one save_candidate(render=true)
+            # writes beside its .zmx.
+            "minted": minted,
+            "workspace_root": _wsp.workspace_root(session),
             "size_bytes": size,
             "surface_labels": surface_labels,
             "stop_label": stop_label,
@@ -3772,6 +3835,12 @@ RENDER_LAYOUT_SPEC = ToolSpec(
                  # enum -- see the description and `_resolve_element_outline`.
                  "element_outline": "string"},
     description=(
+        "With no path the figure goes to candidates/scratch/ as a numbered scratch "
+        "file (minted:true) and never overwrites an earlier one; if that directory "
+        "cannot be listed the call REFUSES (workspace_unlistable) and writes nothing, "
+        "because a name it cannot prove is free could destroy an existing figure. A "
+        "REVIEWABLE figure is the one save_candidate(render=true) writes beside its "
+        ".zmx. "
         "Draw a real meridional (y-z) optical layout PNG for the user, in an "
         "ISO 10110-inspired visual style (a LOOK borrowed from optical drawing "
         "practice — this is NOT a standards drawing and nothing here is a "
@@ -3826,12 +3895,24 @@ RENDER_LAYOUT_SPEC = ToolSpec(
         "powerless air dummy/spacer surfaces are suppressed (scaffolding, not "
         "drawn); real optics (glass, mirrors, curved lens-backs), the stop, and the "
         "image are stamped with their true Zemax numbers. Gotcha: this is a "
-        "self-drawn headless figure (native export writes text, not an image) — for "
-        "native fidelity, open the saved .zmx. This PNG is a SCRATCH drawing for your "
+        "self-drawn headless figure — it carries the surface-number stamps and the "
+        "disclosure flags a native export does not; for native fidelity, open the "
+        "saved .zmx. This PNG is a SCRATCH drawing for your "
         "own eyes; it is NOT the reviewable figure — a finding about it cannot be "
         "recorded (record_findings refuses it as finding_figure_unbound). To have a "
         "figure reviewed, call save_candidate first and review ITS paired PNG, which is "
-        "the one png_sha256 binds. See describe_surfaces, fold_beam."
+        "the one png_sha256 binds. "
+        "TALKING ABOUT A SURFACE WITH THE USER: this figure stamps OUR surface numbers "
+        "on it, so the user points at a stamped number to talk about a surface -- keep "
+        "that convention in mind for the rest of the exchange, including turns where no "
+        "tool is open. Pair it with describe_surfaces, which gives the surface-number -> "
+        "role ground-truth table, so number talk is unambiguous. "
+        "BEFORE PRESENTING A MULTI-CONFIG DESIGN: call freeze_semidiameters (so each "
+        "element draws at ONE size across configs -- a physically-correct layout) and "
+        "verify_zoom (which flags a gap declared to zoom that is CONSTANT across "
+        "configs). A zoom rendered without those two draws a picture that is not the "
+        "design. "
+        "See describe_surfaces, fold_beam, freeze_semidiameters, verify_zoom."
     ),
 )
 

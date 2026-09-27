@@ -748,7 +748,36 @@ READ_SURFACE_SPEC = ToolSpec(
     param_types={"surface": "number"},
     description=(
         "Read one surface's fields (radius, thickness, conic, semi-diameter, "
-        "material, comment, stop/object/image flags). Planar -> inf."
+        "material, comment, stop/object/image flags). Planar -> inf. "
+        "SOLVE DISCLOSURE (a driven cell is not a stored number). Non-default solves are "
+        "disclosed per cell under solves.<cell> (radius/thickness/conic/semi_diameter/"
+        "material). An ABSENT solves key means every cell carries its DEFAULT solve -- "
+        "NOT that solves went unchecked. Each entry names the solve TYPE and its FIELD "
+        "NAMES, never values: it tells you a cell is constrained, not what it is "
+        "constrained to. The field names are the ones set_solve takes, one vocabulary in "
+        "both directions. "
+        "WHICH TYPES ARE DRIVING: Fixed, Variable, Automatic and \"None\" are NOT "
+        "driving -- a cell carrying one of those is an ordinary writable number and "
+        "set_surface writes it normally. EVERY OTHER type is driving (SurfacePickup, "
+        "MarginalRayHeight, ChiefRayHeight, ...), so the mere PRESENCE of a cell under "
+        "solves does not mean the cell is unwritable. \"None\" is a REAL solve type "
+        "meaning no solve -- a positive finding, never a failed read; it is suppressed "
+        "like a default, so you will not normally see it, and if you do the cell is "
+        "writable. "
+        "solves_unreadable lists cells whose solve state did not reach you. It has two "
+        "provenances (a cell-read fault, or a whole-block fault) and you cannot tell "
+        "which, so do not infer one. A write to such a cell is REFUSED: an unreadable "
+        "solve is treated as possibly driving, never as absent, and set_surface has NO "
+        "override. "
+        "par_cell_solves_not_audited (a boolean, per surface) = this surface carries "
+        "parameter cells outside those five and their SOLVE STATE was NOT inspected; it "
+        "derives from an independent type read, so it can disagree with the row's own "
+        "type on a degraded read. Do NOT confuse it with remove_surface's "
+        "par_refs_not_audited, which is a LIST answering a different question (was that "
+        "table searched for REFERENCES to the row being removed) -- for a coordinate "
+        "break the two legitimately disagree. mce_overrides_not_audited = multi-"
+        "configuration system, only the CURRENT configuration was read. "
+        "See set_solve, clear_solve, set_surface, describe_surfaces."
     ),
 )
 
@@ -775,7 +804,13 @@ SET_SURFACE_SPEC = ToolSpec(
         "Write surface geometry (radius/thickness/conic/semi_diameter/comment) "
         "with read-back proof. Material is refused -> use substitute_glass. "
         "Surface 0 (OBJECT) accepts thickness only (the object distance); other "
-        "fields on surface 0 are refused."
+        "fields on surface 0 are refused. REFUSES a write to a driven cell before "
+        "mutating anything (error_family solve_driven), naming the cell and its solve "
+        "type; there is NO override, so change the relationship or write a different "
+        "cell. Read solves on read_surface before authoring: the block tells you what "
+        "is already there (the solve TYPE and its FIELD NAMES, never values). Material "
+        "writes flow through substitute_glass and are NOT covered by the solve refusal, "
+        "so a material solve on the cell is not caught here -- read solves first."
     ),
 )
 
@@ -791,7 +826,10 @@ INSERT_SURFACE_SPEC = ToolSpec(
         "of another surface, so no re-authoring is needed after one: measured for "
         "SurfacePickup on the thickness cell and on coordinate-break Par1/Par3, "
         "OpticStudio 2025 R1. Removing the row a pickup names as its SOURCE is the "
-        "case that does destroy it -- see remove_surface."
+        "case that does destroy it -- see remove_surface. A glass-vertex aperture stop "
+        "on the FRONT lens vertex is auto-handled by normalize_stop, which inserts a "
+        "zero-thickness dummy AIR stop ahead of the front glass (the OBJECT gap must be "
+        "air) -- do not hand-build a dummy stop with this tool."
     ),
 )
 
@@ -830,7 +868,11 @@ SET_STOP_SURFACE_SPEC = ToolSpec(
     param_types={"surface": "number"},
     description=(
         "Set the aperture stop to an interior surface (1..N-2) with a read-back "
-        "that catches the silent image-stop no-op."
+        "that catches the silent image-stop no-op. A glass-vertex aperture stop on the "
+        "FRONT lens vertex is auto-handled by normalize_stop, which inserts a "
+        "zero-thickness dummy AIR stop ahead of the front glass (the OBJECT gap must be "
+        "air) -- do not hand-build a dummy stop. optimize/dry_run default-REFUSE a "
+        "glass-vertex stop (require_free_stop=True), so normalize_stop first."
     ),
 )
 

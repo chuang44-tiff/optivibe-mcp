@@ -440,6 +440,7 @@ _MULTI_SPEC_MODULES = (
     # workspace.py, which carries an open size size escalation; the IO half it drives
     # is workspace's, imported and not copied.
     "optivibe_harness.tools.finding_record",     # record_findings
+    "optivibe_harness.tools.analysis_mtf_field",  # render_mtf_vs_field
 )
 
 
@@ -518,6 +519,10 @@ IDENTITY_PRESERVING_TOOLS = frozenset({
     "list_catalogs", "list_glass_catalog", "list_variables", "read_lens_spec",
     "read_surface", "render_layout", "serialize_merit", "surface_count", "trace_rays",
     "verify_beam_path", "verify_collimation", "verify_zoom",
+    # ``render_mtf_vs_field`` opens its OWN FFT MTF window and batch trace and writes
+    # nothing to the design (design read-only) -- the get_mtf /
+    # render_layout precedent.
+    "render_mtf_vs_field",
     # --- workspace reads/saves: they publish the design, they do not change it ----
     "promote_best", "save_candidate", "save_merit", "save_snapshot",
     # ``record_findings`` appends a reviewer's finding row against an ALREADY-SAVED

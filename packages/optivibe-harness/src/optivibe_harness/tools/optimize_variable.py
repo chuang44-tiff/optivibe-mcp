@@ -293,7 +293,13 @@ SET_VARIABLE_SPEC = ToolSpec(
         "REFUSES a cell already driven by a solve (error_family solve_driven): "
         "making it a variable would DELETE that relationship. Read `solves` on "
         "read_surface first; pass replace_solve=true to replace it deliberately "
-        "(the prior solve type is reported back in replaced_solves)."
+        "(the prior solve type is reported back in replaced_solves). "
+        "STARTING OVER: before deliberately re-varying from scratch, call "
+        "clear_all_variables to reset the DOF set to none (or pass "
+        "reset_variables=true to load_design / apply_lens_spec) -- otherwise you "
+        "inherit whatever was already variable. To make MANY cells variable in one "
+        "call, use vary; it applies the same solve_driven refusal per pair. "
+        "See vary, clear_variable, clear_all_variables, set_solve, read_surface."
     ),
 )
 

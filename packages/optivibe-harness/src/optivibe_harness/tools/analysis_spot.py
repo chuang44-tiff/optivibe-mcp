@@ -433,7 +433,13 @@ GET_SPOT_SPEC = ToolSpec(
         "traced_fraction, NEVER a misleading rms:0.0/huge value (the raw reading is "
         "kept in rms_raw). Set per_wave:true for a TRUE per-wavelength RMS (RSCE "
         "operand; RMS-only, no geo). Units: um for a mm lens. For chromatic detail "
-        "also see analyze_axial_color / analyze_wavefront."
+        "also see analyze_axial_color / analyze_wavefront. "
+        "OBSCURED PUPILS: on a system with a central obscuration (a Cassegrain "
+        "secondary shadow) author a CircularObscuration on the obstructing surface "
+        "with set_surface_aperture FIRST, so this number is computed on the TRUE "
+        "obscured pupil, not the full circle (a central CircularObscuration "
+        "min_radius=0, max_radius=R plus an outer CircularAperture forms the "
+        "annulus)."
     ),
 )
 

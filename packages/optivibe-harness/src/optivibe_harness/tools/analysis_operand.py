@@ -475,7 +475,10 @@ GET_OPERAND_SPEC = ToolSpec(
         "operands (RAG*/RAID/RANG) default surf to 0 (the OBJECT) with a disclosure "
         "flag — pass surf= to read a specific surface. The surface actually used is "
         "echoed as surf_defaulted. "
-        "config (None|int|'all') reads the operand at one/every configuration."
+        "config (None|int|'all') reads the operand at one/every configuration. "
+        "BEFORE YOU TRUST AN MTF OPERAND READING: cross-check the operand reading "
+        "against get_mtf at the same field+frequency -- two independent engine paths -- "
+        "and only then treat it as the number."
     ),
 )
 

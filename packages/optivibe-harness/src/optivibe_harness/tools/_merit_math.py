@@ -36,8 +36,12 @@ tool inherits the recipe guards, it does not bypass them).
 Provenance (§10): ZOS-API / ``MeritOperandType`` vocabulary only — the ``Op#`` cell
 Headers + the ``sign_convention`` strings the reference already ships. NO phrase->code
 map: every helper here takes a CODE + an agent-STATED relationship + the agent-READ
-``sign_convention``, never an intent phrase (§0 — the harness physically cannot reach
-the reference DB; grounding is the agent's job).
+``sign_convention``, never an intent phrase (§0 — resolving intent to a code is the
+agent's job). CORRECTED (S-REF-3): this said "the harness physically cannot
+reach the reference DB", which was false — the editable install puts the package in the
+same interpreter, and ``merit_math`` now reads the catalog through ``_grounding`` to
+CHECK the relayed convention. The helpers in THIS module remain reference-free; the
+grounding read lives in the handler, not here.
 """
 
 # --------------------------------------------------------------------------- #

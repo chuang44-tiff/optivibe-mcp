@@ -14,11 +14,16 @@ Folder layout — FLAT-ON-ROOT when
     ├── BEST_<design-name>.png          # its layout figure (atomic; root)
     ├── <relative>.MF                   # merit files resolve under the root
     └── candidates/
-        ├── zmx/
-        │   ├── 0000_<label>.zmx  0001_<label>.zmx  ...
+        ├── zmx/                        # the OWNER'S folder — keepers only
+        │   ├── <design>_001_<label>.zmx  <design>_001_<label>.png
+        │   ├── <design>_002_<label>.zmx  <design>_002_<label>.png
         │   └── manifest.jsonl          # ArtifactSink manifest = THE candidate index
-        └── png/
-            └── 0000_<label>.png  0001_<label>.png  ...
+        ├── trail/                      # forensic, unattributed, never rendered
+        │   ├── <optimize run_id>/0000_pass00_before.zmx  ...
+        │   └── snapshots/0000_<label>.zmx  ...
+        ├── scratch/                    # minted figures with no .zmx beside them
+        │   └── layout_0001.png  ...
+        └── png/                        # LEGACY ONLY — never written for a new save
 
 NO invented ``projects/<name>/`` parent — the candidates / BEST / merit hang
 DIRECTLY off the working folder. (When ``workspace_root`` is UNSET but the LEGACY
@@ -26,14 +31,22 @@ DIRECTLY off the working folder. (When ``workspace_root`` is UNSET but the LEGAC
 preserved unchanged — D2 back-compat.)
 
 ``candidates/zmx`` IS an ``ArtifactSink(base_dir=<root>/candidates, run_id="zmx",
-save_as=session.system.SaveAs)`` so the seq sequencing, durability gate, manifest,
-and collision rules come for free. ``candidates/png`` mirrors the ``{seq:04d}_``
-prefix so ``000N_*.zmx`` <-> ``000N_*.png`` pair.
+save_as=session.system.SaveAs)`` so the durability gate, manifest and collision rules
+come for free. The NAME, however, is the caller's: ``save_candidate`` composes it
+through ``artifact_naming`` and hands it to the sink, and the paired ``.png`` is the
+SIBLING of the ``.zmx`` — same directory, same stem — so the two sit together in the
+owner's folder.
 
-SHARED-SEQ SEMANTICS (D3) — read this before touching promote_best. Two DIFFERENT
-``design_name``s under ONE ``workspace_root`` share the flat ``candidates/`` manifest AND
-ONE seq counter, which ``save_snapshot`` and ``optimize``'s per-pass trail also draw from.
-A seq therefore identifies a WORKSPACE candidate, NOT a design's candidate.
+PER-DESIGN INDEX SEMANTICS — read this before touching promote_best. The envelope key
+is still ``seq`` and its value is now the index WITHIN one ``design_name``: two designs
+in one workspace each start at 001. ``save_snapshot`` and ``optimize``'s per-pass trail
+no longer draw from it at all — they write under ``candidates/trail/``, unattributed,
+and a trail file written after this cycle is not reachable through ``promote_best``.
+That is deliberate: promoting an unowned trail row is the path that published
+unattributed bytes under a ``BEST_`` name. The trail is still loadable by path.
+
+The history the guards below defend against is real and is kept in view: before this
+cycle a seq identified a WORKSPACE candidate, not a design's candidate.
 
 This was previously dismissed as "moot in practice, one design per folder". That is FALSE
 and was falsified twice: 6 of the 14 workspaces under DesignTask/ are multi-design, and the
@@ -68,6 +81,7 @@ import stat
 import tempfile
 
 from .. import _io
+from .. import artifact_naming as _naming
 from ..artifact_sink import ArtifactSink, _safe_name, _sanitize_nonfinite
 from ..errors import ToolParamError
 from ..server import ToolSpec
@@ -959,6 +973,281 @@ _PNG_DIGEST = "png_digest_mismatch"
 _PNG_DIGEST_FAULT = "png_digest_unreadable"
 _PNG_COPY = "png_copy_failed"
 _PNG_UNPROVEN_ZMX = "zmx_identity_unproven"
+#: The candidate's OWN validated record names no picture -- the save that wrote these
+#: bytes measured that it could not prove it produced the file at the sibling path (the
+#: leftover-companion case), and recorded that. Distinct from ``_PNG_NO_PAIR`` ("there is
+#: no picture") and from ``paired_by_seq`` ("no record could bind one"): here a real PNG
+#: IS there and a real record says it is not ours.
+_PNG_RECORD_NAMES_NO_PICTURE = "png_not_vouched_by_record"
+#: The candidate's own provenance could not be READ (the manifest was unreadable and
+#: the name was recovered from a disk scan). Distinct from "no row was ever written":
+#: nothing here establishes either way, and those are different answers.
+_PNG_EVIDENCE_UNREADABLE = "png_candidate_provenance_unreadable"
+
+#: THE EXEMPT SET IS POSITIVE, AND IT IS THE ONLY WAY TO REACH ``paired_by_seq``.
+#:
+#: These two evidence tokens, and only these, POSITIVELY establish that no manifest row
+#: was ever written for this candidate -- ``no_row_for_seq`` (the manifest was read and
+#: holds no row for this number) and ``manifest_absent`` (there is no manifest). In both
+#: the production question is NOT APPLICABLE rather than unanswered, which is what earns
+#: the legacy corpus its picture.
+#:
+#: WHY A SET AND NOT ``!= "manifest_row"`` -- MEASURED by enumerating every
+#: resolver exit that reaches this function, which is what the coordinator asked for and
+#: which found the fifth and sixth instances of this cycle's own class IN THIS FUNCTION:
+#:
+#:   * ``owner_unrecorded`` is a MANIFEST ROW whose owner field is absent (workspace.py
+#:     ``_resolve_candidate`` case 3). A row means a save wrote these bytes, so the
+#:     stated rule withholds -- but the deny-list tested the literal ``"manifest_row"``
+#:     and this token is not it, so it PUBLISHED.
+#:   * ``manifest_unreadable`` reaches the resolved exit (case 4) whenever the disk scan
+#:     finds exactly one hit. The manifest could NOT BE READ, so whether a row exists is
+#:     unknown -- and the deny-list published on it. That is ABSENT-vs-UNREADABLE
+#:     inside the fix written to stop absence being read as permission.
+#:
+#: A deny-list keyed on one token fails OPEN for every token nobody thought of, which is
+#: the shape this repo has a standing lesson about. Inverted: the DEFAULT is withhold,
+#: and a new evidence token cannot acquire a publishing path by being new.
+def _sibling_companion_state(path):
+    """``"png"`` | ``"other"`` | ``"absent"`` | ``"unknown"`` for a companion file.
+
+    ROUND 8 (external). The disclosure that says "a real PNG you did not
+    certify is sitting at the path this envelope names" was reading the sibling
+    through ``os.path.isfile`` and ``_is_png``, and **BOTH of those swallow the very
+    failure the disclosure needs to report**: ``isfile`` returns ``False`` on a failed
+    stat, and ``_is_png`` returns ``False`` on a read failure. So an unreadable
+    companion read as ABSENT, the warning went quiet, and ``png_replaced_existing``'s
+    advertised unknown state became a confident ``False``.
+
+    That is ABSENT conflated with UNREADABLE -- inside a disclosure written in the
+    round that ruled on it. The helpers are not at fault; never-raising is exactly
+    their documented contract, and ``_is_png`` is a GATE (where False-on-fault is the
+    safe direction) while this is a DISCLOSURE (where it is the wrong one). They stay
+    untouched and this asks the question separately.
+
+    ROUND 9 (external, THIRD TIME). The fix replaced one SWALLOWING
+    predicate with another. ``os.path.exists`` is ``genericpath.exists``, whose own
+    body is ``try: os.stat(path) / except (OSError, ValueError): return False`` --
+    so a ``PermissionError`` from ``stat`` NEVER REACHED the handler beneath it and
+    a denied metadata read returned ``"absent"`` again. Four states were reachable
+    and one of them was reached for the wrong reason, which is the same defect
+    wearing a wider vocabulary.
+
+    The observation is therefore ``os.stat`` DIRECTLY, and the split is on the
+    exception TYPE rather than on a truth value:
+
+    * ``FileNotFoundError`` / ``NotADirectoryError`` -> ``"absent"``. These are
+      ESTABLISHED absence: the engine looked and there is nothing at that path (a
+      non-directory component means nothing CAN be there).
+    * any other ``OSError`` -- ``PermissionError``, ``EINVAL`` on an illegal name,
+      an I/O fault -> ``"unknown"``. We could not look. That is NOT absence.
+    * ``TypeError`` / ``ValueError`` (``None``, an embedded NUL) -> ``"unknown"``.
+    * stat succeeded but the CONTENTS will not read -> ``"unknown"``.
+
+    NEVER raises -- an unreadable answer is returned as ``"unknown"``, never thrown.
+    """
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):  # established absence
+        return "absent"
+    except (OSError, TypeError, ValueError):  # noqa: BLE001 — cannot look -> unknown
+        return "unknown"
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(8)
+    except (OSError, TypeError, ValueError):  # noqa: BLE001 — present but unreadable
+        return "unknown"
+    return "png" if head == b"\x89PNG\r\n\x1a\n" else "other"
+
+
+#: THE SUPPORTED CONCURRENCY MODEL FOR ARTIFACT WRITES, DECLARED (round 8).
+#:
+#: **ONE writer per workspace at a time.** Every artifact-writing path in this module
+#: -- and ``layout_render``'s atomic figure write, which has had the same shape since
+#: before this cycle -- assumes that no OTHER process or thread writes into this
+#: workspace's picture directory while a call is in flight.
+#:
+#: WHY THIS IS A DECLARATION AND NOT A GUARANTEE. The render transaction creates a
+#: name with ``tempfile.mkstemp``, closes the descriptor so the renderer can write to
+#: it, gates and digests the bytes, then ``os.replace``s them onto the sibling.
+#: ``mkstemp`` grants exclusive CREATION and nothing beyond it: once the descriptor is
+#: closed the entry is an ordinary file in a listable directory. A second writer that
+#: lists the directory and plants a picture at that name can satisfy the production
+#: predicate, and this call would then bind ``png_sha256`` to the other writer's bytes.
+#: That counterexample is real, it was built by an external reader, and it is
+#: reproduced as a DISCLOSURE row in the adversarial suite rather than left in prose.
+#:
+#: WHY THE MODEL IS DEFENSIBLE RATHER THAN CONVENIENT:
+#:   * OptiVibe is single-seat BY DESIGN -- N=1, one OpticStudio engine, one design at
+#:     a time, calls serialized on that seat. The concurrency this hazard needs is
+#:     outside the shape the product has.
+#:   * THE FOUR FORMS MEASURED ALL FAIL on this platform
+#:     (by a live probe): holding the descriptor excludes no
+#:     other process AND breaks ``os.replace`` (``WinError 32``); a private
+#:     ``mkdtemp`` directory is itself discoverable by listing; an ``st_ino``
+#:     re-check sees delete-and-recreate but not overwrite-in-place.
+#:
+#:     **THAT IS NOT A CLAIM THAT ENFORCEMENT IS UNAVAILABLE, AND AN EARLIER
+#:     REVISION OF THIS BLOCK SAID IT WAS.** Four experiments establish that those
+#:     four forms fail. They do not enumerate the design space. One form is known
+#:     and UNTESTED HERE: Windows ``CreateFile`` offers restrictive sharing modes
+#:     and ``SetFileInformationByHandle(FileRenameInfo)`` renames BY HANDLE, so a
+#:     design could create exclusively, hold a read/write/delete handle, write and
+#:     validate THROUGH it, and rename through it before closing -- never
+#:     reacquiring ownership by pathname. ``fig.savefig`` accepts a binary
+#:     file-like object, so reopening by path is not an unavoidable renderer
+#:     requirement either. That is an API-supported DESIGN INFERENCE, not a
+#:     measurement taken here; it needs implementation and validation before
+#:     anyone may call it available. A cooperative workspace lock is a second
+#:     untested option, and would bind only cooperating writers.
+#:
+#:     So this bullet is EVIDENCE THAT THE CHEAP FORMS DO NOT WORK, not a reason
+#:     the model must be declared. The reason is the bullet above and the one
+#:     below -- single-seat by design, and the established precedent. The decision
+#:     does not depend on the stronger claim, which is why the stronger claim goes.
+#:   * this repo already declares threat models out of scope where it cannot honour
+#:     them (forged manifest rows), and the design already refuses a write
+#:     lock on the same single-seat basis. Declaring is the established answer here,
+#:     not a new one invented for this finding.
+#:
+#: WHAT A READER SHOULD TAKE FROM IT: a picture published by ``save_candidate`` is
+#: this call's under the single-writer model. It is NOT proof against an adversarial
+#: or accidental second writer, and no envelope key should ever be read as claiming
+#: that. If a future change introduces a second writer -- a worker pool, a watcher, a
+#: second MCP serving one workspace -- this assumption is VIOLATED and the production
+#: predicate must be reopened, not merely re-tested.
+#:
+#: Pinned by a test, which fails if the declaration is
+#: removed or if the code stops matching it.
+_SINGLE_WRITER_MODEL = "one writer per workspace; concurrent writers are out of scope"
+
+_LEGACY_EXEMPT_EVIDENCE = frozenset({"no_row_for_seq", "manifest_absent"})
+
+#: The candidate HAS a manifest row -- so a save wrote these bytes -- but no audit
+#: record was ever written for it. The evidence that should exist is MISSING, which is
+#: not the same as never having existed.
+_PNG_RECORD_NOT_WRITTEN = "png_production_record_not_written"
+#: A record exists and NAMES a picture, but carries no readable digest for it -- so the
+#: picture cannot be bound to these bytes. The configuration-restore guard produces
+#: exactly this state (it drops the digest and leaves the filename).
+_PNG_RECORD_NAMES_NO_DIGEST = "png_record_names_no_digest"
+#: The keeper directory could not be LISTED, so "no colliding spelling" was never
+#: established. Distinct from a clear listing, and it REFUSES.
+_KEEPER_DIR_UNLISTABLE = "unlistable"
+
+
+def _png_publication_evidence(rec, src_png, cand_file, candidate_evidence,
+                              name_scheme):
+    """THE ONE RULE FOR PUBLISHING A PICTURE. Returns ``(png_identity, reason)``.
+
+    > **``promote_best`` publishes a picture ONLY on POSITIVE, READABLE evidence that
+      the save which wrote these candidate bytes ALSO produced this picture. UNKNOWN,
+      UNREADABLE and ABSENT all withhold.**
+
+    Exactly one of the pair is not None: an identity token means PUBLISH, a reason means
+    WITHHOLD. The ``.zmx`` is unaffected either way -- withholding a picture is not
+    refusing a promotion, and ``best_png_reason`` is the channel that says which.
+
+    WHY THIS FUNCTION EXISTS (external re-audit; 3 HIGH read as ONE defect). Three
+    publication paths each FAILED OPEN when the evidence they depend on was missing,
+    unreadable, or never written:
+
+      * the audit record could not be written (a transient clearance exception), so
+        promote saw ``no_record`` and fell through to ``paired_by_seq`` -- publishing
+        planted stale bytes under the keeper name with ``ok:true``;
+      * the renderer RAISED rather than returning failure, so ``png_unproven`` kept its
+        initial ``False`` and the row named a picture with no digest -- same fallthrough;
+      * a failed configuration restore removed the DIGEST but left ``png_filename``, so
+        a picture of configuration 2 could publish as configuration 1's -- same
+        fallthrough.
+
+    All three ended at one ``else``, which is why they are not three bugs. **THE CLASS:
+    ABSENCE OF EVIDENCE WAS BEING READ AS PERMISSION.** This repo holds that a spoofable oracle is
+    worse than none; this is its inverse -- absence must ship AS absence, never as
+    consent to publish.
+
+    > **BREAKING, AND DELIBERATE: ``paired_by_seq`` IS NO LONGER A PUBLISHING STATE FOR ANY CANDIDATE THIS CYCLE'S SAVE PATH CAN WRITE.**
+      (the flat form of this sentence was contradicted by the legacy
+      branch below, which does return it. The exemption is now confined to
+      ``name_scheme == "legacy"`` -- the pre-existing corpus -- so the
+      sentence states the scope it actually has instead of a rule the file
+      breaks 40 lines later.)
+      It meant "the pair is the right SEQ" -- evidence of PAIRING BY NAME, never of
+      PRODUCTION. A stale companion left at the sibling path satisfies it perfectly,
+      which is exactly how all three reproductions published planted bytes. It survives
+      only as a WITHHOLDING reason.
+
+      ``_png_blocked_by_identity`` keeps its own deterministic-ABSENT exemption and is
+      NOT changed by this. That rule answers "is the ZMX's identity DISPROVED?", where
+      no evidence means the question is not applicable. This one answers "did this save
+      PRODUCE this picture?", where no evidence means NO. Different questions; the
+      exemption does not transfer.
+
+    ``cand_file`` is accepted and deliberately UNUSED: the digest binds the bytes, and a
+    name check would be weaker evidence sitting beside stronger. It stays in the
+    signature so a future rung can key on the candidate without re-threading callers.
+    """
+    if rec is None:
+        # ABSENT SPLITS IN TWO, and the split is the whole reason the legacy corpus
+        # survives this rule. ``snapshot()`` ALWAYS appends a manifest row, so a
+        # candidate resolved BY A ROW was written by a save -- and if that save left no
+        # audit record, the evidence that should exist is MISSING. That is the
+        # re-audit's Reproduction A exactly: a transient clearance exception stopped the
+        # record validating, promote read ``no_record`` as permission, and planted stale
+        # bytes published under the keeper name.
+        #
+        # A candidate resolved as an ORPHAN has no row at all: no evidence was EVER
+        # written for it, so the production question is NOT APPLICABLE rather than
+        # unanswered. That is the same deterministic-ABSENT exemption
+        # ``_png_blocked_by_identity`` makes on the ``.zmx`` leg, for the same reason,
+        # and ``test_p6`` pins it mutation-proven in the opposite direction: "require a
+        # record for the pair -> the legacy corpus loses its picture -> reddens".
+        #
+        # > **THIS IS THE ONE REMAINING PATH THAT PUBLISHES WITHOUT PRODUCTION
+        #   EVIDENCE**, and it is enumerated rather than buried: a legacy pair is bound
+        #   by NAME alone.
+        #
+        # **THE STATED PRECONDITION WAS FALSE, AND IS CORRECTED HERE RATHER THAN
+        # SUPPLEMENTED.** It read: "``_LEGACY_EXEMPT_EVIDENCE``, a POSITIVE two-token
+        # set that no save can produce". An external reader falsified it by executing
+        # the public handlers: ``ArtifactSink.snapshot()`` can write the ZMX, FAIL to
+        # append its manifest row, and leave the ZMX behind. Promotion then resolves
+        # that file -- a NEW v2 candidate -- as an orphan, and BOTH tokens are
+        # reachable that way (``manifest_absent`` with no manifest, ``no_row_for_seq``
+        # with a readable manifest holding unrelated rows). A stale planted PNG
+        # published under ``ok:true``.
+        #
+        # The tokens were never wrong about what they observe; they were asked the
+        # wrong question. They say "NO ROW EXISTS NOW". The exemption needs "NO SAVE
+        # EVER OCCURRED", and no amount of absent evidence establishes that -- which
+        # is the same class as the three HIGHs above, one channel over.
+        #
+        # SO THE GATE IS A POSITIVE PROPERTY OF THE ARTIFACT ITSELF. ``name_scheme``
+        # is decided by the naming authority from the RESOLVED FILE'S OWN NAME, and a
+        # v2 save cannot produce a legacy name. It is not evidence ABOUT a save that
+        # might be missing; it is a fact about the bytes being promoted. A v2 orphan
+        # -- the auditor's case -- now falls through to the withholding return below.
+        if (candidate_evidence in _LEGACY_EXEMPT_EVIDENCE
+                and name_scheme == "legacy"):
+            return "paired_by_seq", None                # N/A        -> legacy exemption
+        if candidate_evidence == "manifest_unreadable":
+            return None, _PNG_EVIDENCE_UNREADABLE       # UNREADABLE -> withhold
+        return None, _PNG_RECORD_NOT_WRITTEN            # MISSING    -> withhold
+    if rec.get("png_filename") is None:
+        # The save looked at this exact sibling path and RECORDED that it could not
+        # vouch for the picture there.
+        return None, _PNG_RECORD_NAMES_NO_PICTURE       # DECLARED   -> withhold
+    if not _is_hex64(rec.get("png_sha256")):
+        return None, _PNG_RECORD_NAMES_NO_DIGEST        # UNBINDABLE -> withhold
+    # ``_sha256_file`` returns None on ANY read fault and ``None != expected`` is True,
+    # so branch on ``is None`` FIRST: an UNKNOWN is never asserted as a mismatch (the
+    # same distinction the ``.zmx`` leg already makes).
+    actual_png = _sha256_file(src_png)
+    if actual_png is None:
+        return None, _PNG_DIGEST_FAULT                  # UNREADABLE -> withhold
+    if actual_png != rec.get("png_sha256"):
+        return None, _PNG_DIGEST                        # DISPROVED  -> withhold
+    return "digest_proven", None                        # POSITIVE   -> publish
 
 # ``clearance_source`` domain. ``not_evaluated`` is NEW and BREAKING: two exits
 # used to report ``live_session_geometry`` having run NO audit at all.
@@ -2239,10 +2528,23 @@ def _classify_identity(records, state, src_sha, design_name, floors):
         # because a consumer that later reads the failure block must not re-open this
         # exact hole. Both directions fail CLOSED — a conflict yields ``rec = None``, the
         # gate sees no card, and a contracted promote is refused.
+        # ``png_filename`` — THE SAME DEFECT A FOURTH TIME, and this comment predicted
+        # it in these words. Round 4's A1 fix gave the field AUTHORITY: a validated row
+        # naming NO picture now WITHHOLDS the keeper's ``.png``
+        # (``png_not_vouched_by_record``). So two validated rows agreeing on everything
+        # above but differing on ``png_filename`` would again be resolved by
+        # ``matching[-1]`` — by file order — one publishing the picture and the other
+        # withholding it, with ``identity_proven`` true in both. The C1 tripwire caught
+        # it, which is the tripwire doing exactly its job.
+        #
+        # ``.get()``, not a subscript: a legacy row predating the field carries none,
+        # and a subscript would raise KeyError out of a function with no try/except
+        # on the common case.
         return (audit["verdict"], audit.get("scope"),
                 audit["min_air"], audit["min_glass"],
                 rec["png_sha256"], audit["summary"],
-                rec.get("scorecard"), rec.get("scorecard_failure"))
+                rec.get("scorecard"), rec.get("scorecard_failure"),
+                rec.get("png_filename"))
 
     # ``design_name`` AUTHORISES (the ownership clause below rejects on it) but was
     # NOT in the conflict key, so the anti-flip clause could not see two rows that
@@ -2485,6 +2787,18 @@ def _design_name_error(design_name):
     # caller asserted; _safe_name("") -> "snapshot", so check the pre-sanitize stem.
     if design_name.strip() == "":
         return "design_name must be a non-empty string"
+    # THE NUMERIC-FIRST-SEGMENT CLAUSE. A name whose first
+    # underscore segment is all digits would re-enter the LEGACY namespace: design
+    # ``0376`` composes ``0376_001_seed.zmx``, which ``is_legacy_name`` reads as
+    # legacy index 376 — one file answering to two schemes, in both directions.
+    # Measured migration cost: 0 of 66 real design names.
+    if _naming.has_numeric_leading_segment(design_name):
+        return (
+            f"design_name {design_name!r} is not a usable workspace name: its first "
+            f"segment is all digits, which collides with the legacy "
+            f"<NNNN>_<label>.zmx artifact scheme — the same file would answer to two "
+            f"numbering schemes. Prefix or rename it (e.g. 'lens-{design_name}')."
+        )
     safe = _safe_name(design_name)
     if safe != design_name:
         return (
@@ -2548,152 +2862,473 @@ def _max_existing_seq(zmx_dir: str) -> int:
     return max_seq
 
 
-def _resolve_candidate(zmx_dir: str, seq: int, fallback_filename, design_name):
-    """Resolve the candidate that WILL BE COPIED and the owner OF THAT FILE.
+def next_candidate_index(zmx_dir: str, design_name: str) -> int:
+    """The next PER-DESIGN candidate index for ``design_name``. NEVER raises.
 
-    Returns ``(filename, owner, evidence)``. ``filename`` is a BASENAME inside
-    ``zmx_dir`` and is ALWAYS a string (it falls back to the caller's glob hit), so the
-    ownership guard and the copy are about the SAME file BY CONSTRUCTION.
+    ``1 + max`` over TWO sources, or 1 when both are empty:
 
-    ROUND 5 — this is the whole point of the function's shape. Round 4 resolved the two
-    INDEPENDENTLY: the file came from the glob unless the manifest-named file existed,
-    while the owner came from the LAST matching manifest row. When those disagreed the
-    guard judged one file and the executor copied another — a guard/executor
-    acceptance-set divergence that REOPENED the very CRIT the binding closed
-    (measured: an earlier row naming an EXISTING file owned by ``alpha`` plus a later
-    row naming a MISSING file owned by ``beta`` published alpha's bytes as
-    ``BEST_beta.zmx``, with ``force`` False and True alike). ONE resolution, in order:
+    (a) manifest snapshot rows whose ``meta.workspace`` is ``design_name`` and whose
+        recorded filename is NOT a legacy name — for those rows the recorded index IS
+        the per-design index;
+    (b) on-disk basenames for which ``candidate_index_of(name, design_name)`` answers
+        an int — THE SAME predicate the resolver uses, so the counter cannot accept a
+        spelling the resolver rejects or vice versa.
 
-      1. WHICH FILE: the LAST row for this seq whose named file EXISTS on disk; else
-         the caller's glob hit. A row naming a file that is gone cannot decide anything
-         — it is not the artifact.
-      2. WHOSE IT IS: the owners recorded by the rows that name THAT file. Never row
-         order across DIFFERENT files — a duplicate-seq group is decided by the artifact
-         being copied, not by which row happened to be appended last.
+    Legacy rows, trail rows, foreign rows and event rows never advance it.
 
-    ``owner`` is the owner the DECISION rests on: ``design_name`` when a row records it
-    as an owner of this file (a proven match, so an ambiguously-owned file never refuses
-    the design a row vouches for), else the last recorded FOREIGN owner (the disproof),
-    else ``None``. ``None`` is the COMMON case, not the corner case: ``save_snapshot``
-    and ``optimize``'s per-pass trail write rows with no owner.
-
-    ``evidence`` is a frozen token naming WHY: ``"manifest_row"`` / ``"owner_unrecorded"``
-    / ``"no_row_for_seq"`` (no row for this seq NAMES the file being promoted) /
-    ``"manifest_absent"`` / ``"manifest_unreadable"``.
-
-    Tolerant by construction, mirroring ``_max_existing_seq``: a missing manifest, an
-    OSError, a torn tail, or an un-parseable row degrades to "ownership unknown" and
-    NEVER raises. A defect in this reader must not be able to refuse a legitimate
-    promote. (The decode is guarded by ``ValueError`` too — a BINARY manifest raises
-    ``UnicodeDecodeError``, which is a ``ValueError``, NOT an ``OSError``.)
-    ``ArtifactSink.load_manifest`` is deliberately NOT reused: it RAISES on a torn line
-    that is not the final one, so a mid-file corruption would break every promote.
-
-    ``event:"promote"`` rows are SKIPPED — they carry a ``seq`` and a ``design_name`` but
-    describe a promote, not a candidate, and reading one as a snapshot row would let a
-    prior promote authorise the next one.
-
-    ``bool`` is excluded from the seq compare (``True == 1``), the same guard
-    ``_gap_run_complete`` and ``_int_set`` apply — on BOTH sides, since a caller-supplied
-    ``seq=True`` would otherwise match a real row ``seq=1``.
-
-    This is the SINGLE confinement point for a manifest-recorded ``filename``: every name
-    is basename'd HERE, so a row whose ``filename`` is absolute or contains ``..`` can
-    never resolve outside ``zmx_dir``. The caller joins the returned basename directly —
-    do NOT add a second normalisation, or neither site is the authority.
+    Tolerant like ``_max_existing_seq``: a missing or torn manifest, or an ``OSError``
+    on either source, makes THAT source contribute nothing while the other still
+    counts. Nothing resets the counter — a fresh session re-derives from disk, so a
+    design continues past its OWN high-water mark. Inheriting your own design's max is
+    correct; inheriting another design's or the optimizer's is the defect this closes.
     """
-    fallback = (os.path.basename(fallback_filename)
-                if isinstance(fallback_filename, str) else "")
+    best = 0
 
+    # --- source (a): the manifest -------------------------------------------
     manifest_path = os.path.join(zmx_dir, "manifest.jsonl")
-    if not os.path.isfile(manifest_path):
-        return fallback, None, "manifest_absent"
     try:
         with open(manifest_path, "r", encoding="utf-8", newline="") as fh:
             lines = fh.read().split("\n")
     except (OSError, ValueError):
-        # ValueError covers UnicodeDecodeError (a binary/garbage manifest) — it is NOT
-        # an OSError, so an OSError-only guard would let it escape to the caller.
-        return fallback, None, "manifest_unreadable"
-
-    # A caller-supplied non-int / bool seq can match nothing (never raise on it).
-    want = seq if (isinstance(seq, int) and not isinstance(seq, bool)) else None
-
-    rows = []          # [(basename|None, owner|None)] for THIS seq, in file order
-    saw_content = False
-    parsed_any = False
+        lines = []
     for line in lines:
         if not line:
             continue
-        saw_content = True
         try:
             row = json.loads(line)
         except (ValueError, RecursionError):
             continue  # torn / partial / pathological row — skip, never raise
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or "event" in row:
             continue
-        parsed_any = True
-        # Closing the sibling class: a POSITIVE allow-list keyed on KEY
-        # PRESENCE, not on a value. The shipped deny-list (``event == "promote"``) let
-        # EVERY other event row — including this cycle's ``candidate_audit`` — be read
-        # as a candidate row and decide file/ownership. ``row.get("event") is not None``
-        # was rejected too: it admits ``{"event": null}``, so it does not close the
-        # class. [Measured-from-source] ``ArtifactSink.snapshot`` writes NO ``event``
-        # key at all, so key-presence is byte-identical for every existing snapshot row
-        # and is the true "ANY event" rule.
-        if "event" in row:
-            continue  # a row carrying an event KEY is not a candidate row
-        if want is None:
-            continue
-        row_seq = row.get("seq")
-        if isinstance(row_seq, bool) or not isinstance(row_seq, int):
-            continue
-        if row_seq != want:
+        meta = row.get("meta")
+        owner = meta.get(_OWNER_META_KEY) if isinstance(meta, dict) else None
+        if owner != design_name:
             continue
         row_file = row.get("filename")
-        name = (os.path.basename(row_file)
-                if (isinstance(row_file, str) and row_file) else None)
-        meta = row.get("meta")
-        raw_owner = meta.get(_OWNER_META_KEY) if isinstance(meta, dict) else None
-        # A non-str owner is NOT a recorded design_name. Neither is "" / whitespace:
-        # ``_design_name_error`` refuses those before save_candidate can ever write one,
-        # so such a value is corruption, and corruption is not PROOF of a different
-        # owner (— refuse what can be DISPROVED, disclose what cannot be
-        # ESTABLISHED). It therefore degrades to "unrecorded", never to a refusal.
-        rows.append((name, raw_owner if (isinstance(raw_owner, str)
-                                         and raw_owner.strip()) else None))
+        if isinstance(row_file, str) and _naming.is_legacy_name(
+                os.path.basename(row_file)):
+            continue
+        row_index = row.get("seq")
+        if isinstance(row_index, bool) or not isinstance(row_index, int):
+            continue
+        if row_index > best:
+            best = row_index
 
-    if not rows:
-        if saw_content and not parsed_any:
-            # Every row torn / non-dict: the manifest is present but unreadable as a
-            # manifest. Distinct from an EMPTY manifest (-> no_row_for_seq).
-            return fallback, None, "manifest_unreadable"
-        return fallback, None, "no_row_for_seq"
+    # --- source (b): the directory listing, through THE ONE predicate --------
+    try:
+        names = os.listdir(zmx_dir)
+    except OSError:
+        names = []
+    for name in names:
+        found = _naming.candidate_index_of(name, design_name)
+        if isinstance(found, int) and found > best:
+            best = found
 
-    # (1) WHICH FILE will be copied. The manifest names the exact file for this seq, so
-    # it beats sorted(glob(...))[0] — but ONLY when that file is really there. A row
-    # naming a file that is GONE decides nothing (B8), and must not decide OWNERSHIP
-    # either. LAST existing wins (append-only: a later row is the newer truth).
-    chosen = fallback
-    for name, _own in rows:
-        if name and os.path.isfile(os.path.join(zmx_dir, name)):
-            chosen = name
+    return best + 1
 
-    # (2) WHOSE THAT FILE IS — decided by the rows that name IT, never by row order
-    # across different files.
-    naming = [own for name, own in rows if name == chosen]
-    if not naming:
-        # No row for this seq names the artifact being promoted (a crash orphan, or
-        # every row names a missing file). Ownership is UNKNOWN — and unknown ALLOWS
-        # (disprove-and-refuse: a refusal needs a disproof about the file being copied).
-        return chosen, None, "no_row_for_seq"
-    owners = [own for own in naming if own is not None]
-    if not owners:
-        return chosen, None, "owner_unrecorded"
-    # A row vouching for design_name is a PROVEN match; it beats a disagreeing sibling
-    # row, so an ambiguously-owned file never refuses the design a row records.
-    owner = design_name if design_name in owners else owners[-1]
-    return chosen, owner, "manifest_row"
+
+def _resolve_candidate(zmx_dir: str, seq: int, design_name):
+    """Resolve WHICH candidate is promoted at ``(design_name, seq)`` and WHOSE it is.
+
+    Returns a dict ``{"filename", "owner", "evidence", "name_scheme", "png_path",
+    "error_family", "error", "candidates"}``. ``filename`` is a BASENAME inside
+    ``zmx_dir``; ``error_family`` is ``None`` on a resolution and names the refusal
+    otherwise, in which case ``filename`` is ``None`` and NOTHING is published.
+
+    ONE resolver, MANIFEST-FIRST, ORDERED, TOTAL, REFUSING ON AMBIGUITY. It considers
+    only snapshot rows at this index whose named file EXISTS on disk — a row naming a
+    file that is gone decides nothing, which is the shipped rule and the one that
+    stopped a guard judging one file while the executor copied another.
+
+      1. OWN rows present (``meta.workspace == design_name``). Partitioned by scheme:
+         one scheme -> the LAST such row's file. BOTH schemes -> REFUSE
+         ``promote_candidate_ambiguous``: a legacy global-index-N file and a v2
+         index-N file are two different artifacts and no new parameter picks between
+         them.
+      2. No own row but FOREIGN rows -> the last foreign owner is returned as
+         ``owner``; the caller's shipped owner guard refuses it. This is the
+         existing cross-design guard, reached by the same predicate.
+      3. No own, no foreign, UNOWNED rows -> the LAST unowned row's file, ``owner``
+         None. This is today's behaviour for a trail / ``save_snapshot`` row and is
+         kept UNCHANGED so legacy workspaces behave as they do now.
+      4. NO rows at this index (an orphan). **No glob is built** — a glob pattern from
+         a design name would read ``a[bc]`` as a character class and select another
+         design's file. The directory is listed ONCE and both schemes are ALWAYS
+         evaluated, with no ordering between them, through the same
+         ``candidate_index_of`` / ``is_legacy_name`` predicates the counter uses. Two
+         schemes answering, or more than one hit within a scheme, REFUSES. A single v2
+         hit must additionally carry exactly ONE ``_\\d{3,}_`` delimiter
+         (``delimiter_count``) — ``alpha_001_001_x.zmx`` could be ``(alpha, 1,
+         "001_x")`` or ``(alpha_001, 1, "x")``, and with no row nothing can tell them
+         apart, so nothing is published for either claimant. That count is SYNTACTIC
+         and over-refuses; the sound legal-reading enumerator is ticketed and the
+         remedy today is to RE-SAVE, which restores the row.
+
+    ``evidence`` is a frozen token: ``"manifest_row"`` / ``"owner_unrecorded"`` /
+    ``"no_row_for_seq"`` / ``"manifest_absent"`` / ``"manifest_unreadable"``.
+
+    ``png_path`` is the SIBLING of the resolved ``.zmx`` for a v2 name (same folder,
+    same stem) and the same stem under ``candidates/png/`` for a legacy one — the
+    historical location. Never "the first png carrying this number".
+
+    Tolerant by construction, mirroring ``_max_existing_seq``: a missing manifest, an
+    OSError, a torn tail or an un-parseable row degrades to "no rows" and NEVER raises.
+    (The decode is guarded by ``ValueError`` too — a BINARY manifest raises
+    ``UnicodeDecodeError``, which is a ``ValueError``, NOT an ``OSError``.)
+    ``ArtifactSink.load_manifest`` is deliberately NOT reused: it RAISES on a torn line
+    that is not the final one, so a mid-file corruption would break every promote.
+
+    ``event``-carrying rows are SKIPPED by KEY PRESENCE, not by value: a row carrying
+    an ``event`` key is not a candidate row, and ``ArtifactSink.snapshot`` writes no
+    such key at all, so the rule is byte-identical for every existing snapshot row.
+
+    ``bool`` is excluded from the index compare (``True == 1``) on BOTH sides.
+
+    This is the SINGLE confinement point for a manifest-recorded ``filename``: every
+    name is basename'd HERE, so a row whose ``filename`` is absolute or contains ``..``
+    can never resolve outside ``zmx_dir``. The caller joins the returned basename
+    directly — do NOT add a second normalisation, or neither site is the authority.
+
+    A row-bearing file is NEVER attributed by parsing its NAME: attribution rests on
+    the row's ``meta.workspace``, the same trust the shipped CRIT fix rests on. A
+    forged or corrupt row is outside this cycle's threat model exactly as it is outside
+    today's; the existing confinements (basename-only, file-must-exist, bool-excluded
+    index) are kept unchanged.
+    """
+    png_dir = os.path.join(os.path.dirname(zmx_dir), "png")
+
+    def _png_for(name):
+        if _naming.is_legacy_name(name):
+            return _naming.sibling(os.path.join(png_dir, name), ".png")
+        return _naming.sibling(os.path.join(zmx_dir, name), ".png")
+
+    def _resolved(name, owner, evidence):
+        return {
+            "filename": name,
+            "owner": owner,
+            "evidence": evidence,
+            "name_scheme": "legacy" if _naming.is_legacy_name(name) else "v2",
+            "png_path": _png_for(name),
+            "error_family": None,
+            "error": None,
+            "candidates": [name],
+        }
+
+    def _refused(family, error, names, evidence=None):
+        return {
+            "filename": None,
+            "owner": None,
+            # ONE EXIT OVER TWO STATES. ``evidence`` was hardcoded ``None`` here, so a
+            # manifest that could not be READ and a manifest that simply holds no row
+            # for this number produced the SAME refusal -- and their remedies differ
+            # (repair the manifest vs. ask for a number that exists). The RESOLUTION
+            # path has carried ``absent_evidence`` since round 3; the refusal dropped
+            # it on the floor.
+            "evidence": evidence,
+            "name_scheme": None,
+            "png_path": None,
+            "error_family": family,
+            "error": error,
+            "candidates": sorted(names),
+        }
+
+    # A caller-supplied non-int / bool index can match nothing (never raise on it).
+    want = seq if (isinstance(seq, int) and not isinstance(seq, bool)) else None
+
+    manifest_path = os.path.join(zmx_dir, "manifest.jsonl")
+    absent_evidence = "no_row_for_seq"
+    rows = []          # [(basename, owner|None)] for THIS index, in file order
+    if not os.path.isfile(manifest_path):
+        absent_evidence = "manifest_absent"
+    else:
+        try:
+            with open(manifest_path, "r", encoding="utf-8", newline="") as fh:
+                lines = fh.read().split("\n")
+        except (OSError, ValueError):
+            lines = []
+            absent_evidence = "manifest_unreadable"
+        saw_content = False
+        parsed_any = False
+        for line in lines:
+            if not line:
+                continue
+            saw_content = True
+            try:
+                row = json.loads(line)
+            except (ValueError, RecursionError):
+                continue  # torn / partial / pathological row — skip, never raise
+            if not isinstance(row, dict):
+                continue
+            parsed_any = True
+            if "event" in row:
+                continue  # a row carrying an event KEY is not a candidate row
+            if want is None:
+                continue
+            row_index = row.get("seq")
+            if isinstance(row_index, bool) or not isinstance(row_index, int):
+                continue
+            if row_index != want:
+                continue
+            row_file = row.get("filename")
+            name = (os.path.basename(row_file)
+                    if (isinstance(row_file, str) and row_file) else None)
+            # A CANDIDATE IS A LENS FILE. The extension scope belongs HERE, on every
+            # path, because this function is "the SINGLE confinement point for a
+            # manifest-recorded filename" -- adding it at the publish site instead
+            # would make neither site the authority, which is the rule this docstring
+            # already states about basenaming.
+            #
+            # MEASURED: with only the ORPHAN path scoped, a hand-written or corrupt
+            # snapshot row naming ``d_001_seed.png`` still resolved
+            # (``name_scheme='v2'``, no refusal) and ``promote_best`` wrote PNG magic
+            # into ``BEST_d.zmx`` with ``ok:true``. A row naming a non-``.zmx`` decides
+            # nothing, for the same reason a row naming a missing file decides nothing:
+            # it does not identify a candidate.
+            if name is None or not name.endswith(".zmx"):
+                continue  # not a lens file -- it names no candidate
+            if not os.path.isfile(os.path.join(zmx_dir, name)):
+                continue  # a row naming a missing file decides nothing
+            meta = row.get("meta")
+            raw_owner = meta.get(_OWNER_META_KEY) if isinstance(meta, dict) else None
+            # A non-str owner is NOT a recorded design_name, and neither is "" /
+            # whitespace: ``_design_name_error`` refuses those before save_candidate
+            # can write one, so such a value is corruption — and corruption is not
+            # PROOF of a different owner. It degrades to "unrecorded", never a refusal.
+            rows.append((name, raw_owner if (isinstance(raw_owner, str)
+                                             and raw_owner.strip()) else None))
+        if not rows and saw_content and not parsed_any:
+            # Every row torn / non-dict: present, but unreadable AS a manifest.
+            absent_evidence = "manifest_unreadable"
+
+    own = [n for n, o in rows if o == design_name]
+    foreign = [(n, o) for n, o in rows if o is not None and o != design_name]
+    unowned = [n for n, o in rows if o is None]
+
+    # --- 1. own rows -------------------------------------------------------
+    if own:
+        own_legacy = [n for n in own if _naming.is_legacy_name(n)]
+        own_v2 = [n for n in own if not _naming.is_legacy_name(n)]
+        if own_legacy and own_v2:
+            return _refused(
+                "promote_candidate_ambiguous",
+                f"REFUSED: {design_name!r} owns TWO different artifacts numbered "
+                f"{seq} — the legacy workspace-global candidate "
+                f"{sorted(own_legacy)!r} and the per-design one {sorted(own_v2)!r}. "
+                f"A number does not identify one of them and no parameter picks "
+                f"between them. Re-save the legacy one under this design_name to give "
+                f"it a per-design number, then promote THAT number.",
+                own_legacy + own_v2,
+            )
+        return _resolved(own[-1], design_name, "manifest_row")
+
+    # --- 2. foreign rows (the caller's shipped owner guard refuses) ---------
+    if foreign:
+        name, owner = foreign[-1]
+        return _resolved(name, owner, "manifest_row")
+
+    # --- 3. unowned rows (today's behaviour, unchanged) --------------------
+    if unowned:
+        return _resolved(unowned[-1], None, "owner_unrecorded")
+
+    # --- 4. the ORPHAN path: no rows. NO GLOB IS BUILT. --------------------
+    try:
+        names = os.listdir(zmx_dir)
+    except (FileNotFoundError, NotADirectoryError):
+        # ESTABLISHED ABSENCE, not an unreadable read. The directory is
+        # created by the first ``save_candidate``, so THIS IS THE DAY-ONE STATE OF
+        # EVERY NEW WORKSPACE -- and it was being reported as
+        # "the candidates directory could not be listed: FileNotFoundError",
+        # which reads as a permissions or I/O fault and sends the reader to check
+        # the filesystem. There is nothing wrong with the filesystem; there is
+        # nothing saved yet.
+        #
+        # The same cycle that shipped this message fixed this exact distinction
+        # TWICE in ``_sibling_companion_state``, one screen away. A rule applied
+        # to a disclosure and not to the refusal beside it is half a rule.
+        return _refused(
+            "promote_failed",
+            f"no candidate with seq {seq}: this workspace has no candidates "
+            f"directory yet, so nothing has been saved here. Run save_candidate "
+            f"first -- it creates the directory and returns the seq to promote.",
+            [], "no_candidates_directory",
+        )
+    except OSError as exc:
+        # UNREADABLE: the directory is there and we could not look. Unchanged, and
+        # now genuinely distinct from the case above.
+        return _refused(
+            "promote_failed",
+            f"the candidates directory could not be listed: "
+            f"{type(exc).__name__}: {exc}",
+            [],
+        )
+    # ``want is None`` (a bool / non-int index) MATCHES NOTHING. Without this guard
+    # ``candidate_index_of`` returns None for every basename that is not this design's,
+    # and ``None == want`` made EVERY FILE IN THE DIRECTORY a hit for EVERY design:
+    # MEASURED: ``_resolve_candidate(d, True, "designX")`` over a directory
+    # holding a single ``other_001_x.zmx`` RESOLVED that file. The ``want`` line above
+    # already said a non-int index "can match nothing"; the code did not.
+    #
+    # SCOPE, MEASURED RATHER THAN ASSUMED: this is NOT reachable through ``promote_best``
+    # today -- its own gate (``not isinstance(seq, int) or isinstance(seq, bool) or
+    # seq < 0``) refuses first, and a spy MEASURED the resolver reached 0 times for each
+    # of ``True/False/"1"/1.0/None/[1]``. So it is a latent defect behind one gate, not a
+    # live publish path, and the fix is here because THIS function is the one that
+    # documents totality -- not because a shipped caller was exploiting it.
+    if want is None:
+        v2_hits = []
+        legacy_hits = []
+    else:
+        v2_hits = [n for n in names
+                   if _naming.candidate_index_of(n, design_name) == want]
+        # ``.zmx``-SCOPED, symmetrically with ``candidate_index_of`` (whose ``ext``
+        # defaults to "zmx"). ``is_legacy_name`` is a SCHEME predicate and accepts
+        # ``(zmx|png)`` on purpose -- ``_png_for`` and ``name_scheme`` both need it to
+        # -- but a CANDIDATE is a lens file, and without this scope the two schemes are
+        # not extension-symmetric: a legacy-named ``.png`` answered as the candidate and
+        # ``promote_best`` copied PNG bytes over ``BEST_<design>.zmx``, ``ok:true``,
+        # with nothing on the envelope saying the keeper is not a lens file.
+        # NEWLY PERMITTED BY THIS CYCLE, verified against HEAD: the orphan path used to
+        # be ``sorted(glob.glob(os.path.join(zmx_dir, f"{seq:04d}_*.zmx")))`` -- the
+        # rewrite replaced an extension-scoped glob with a scheme predicate and dropped
+        # the scope with it.
+        legacy_hits = [n for n in names
+                       if n.endswith(".zmx")
+                       and _naming.is_legacy_name(n)
+                       and _naming.legacy_index(n) == want]
+    if v2_hits and legacy_hits:
+        return _refused(
+            "promote_candidate_ambiguous",
+            f"REFUSED: number {seq} answers in BOTH naming schemes with no manifest "
+            f"row to say which is meant — per-design {sorted(v2_hits)!r} and legacy "
+            f"{sorted(legacy_hits)!r}. Re-save the one you mean under "
+            f"{design_name!r}, which restores the manifest row, then promote it.",
+            v2_hits + legacy_hits,
+        )
+    hits = v2_hits or legacy_hits
+    if len(hits) > 1:
+        return _refused(
+            "promote_candidate_ambiguous",
+            f"REFUSED: {len(hits)} files answer to number {seq} for "
+            f"{design_name!r} and no manifest row says which is meant: "
+            f"{sorted(hits)!r}. Re-save the one you mean, which restores the row.",
+            hits,
+        )
+    if not hits:
+        # The MESSAGE distinguishes them too, because the reader acts on the message.
+        # An unreadable manifest is not evidence that the candidate is absent -- it is
+        # evidence that nothing here can tell.
+        if absent_evidence == "manifest_unreadable":
+            return _refused(
+                "promote_failed",
+                f"no candidate with seq {seq} could be resolved, and the manifest "
+                f"for {design_name!r} could NOT BE READ -- so this is not proof the "
+                f"candidate is absent, only that nothing here can tell which. Repair "
+                f"or re-create the manifest (re-saving the candidate restores its "
+                f"row), then promote.",
+                [], absent_evidence)
+        # THE TRAIL NAMESPACE, DISCLOSED (pushback item 2b). ``save_snapshot`` and
+        # the ``optimize`` trail write through a FORENSIC sink and return a seq of
+        # their own. Those numbers are not candidate handles, and a reader holding
+        # one previously got a bare "no candidate with seq N" that says nothing
+        # about WHY. Naming it costs a directory listing on a path that is already
+        # refusing.
+        #
+        # DISCLOSURE ONLY -- it does not change the refusal or resolve the trail
+        # row. Whether a trail seq SHOULD be promotable is the open question in
+        #, and a message may not decide
+        # it. NEVER raises: an unreadable trail directory simply adds no sentence.
+        trail_note = ""
+        try:
+            _trail = os.path.join(os.path.dirname(zmx_dir), "trail")
+            for _dirpath, _dirnames, _files in os.walk(_trail):
+                if any(f.endswith(".zmx") and _naming.is_legacy_name(f)
+                       and _naming.legacy_index(f) == want for f in _files):
+                    trail_note = (
+                        f" -- note that a FORENSIC TRAIL snapshot numbered {seq} "
+                        f"does exist under candidates/trail/. Trail seqs are a "
+                        f"SEPARATE numbering from candidates and are not "
+                        f"promote_best handles; promote a seq returned by "
+                        f"save_candidate.")
+                    break
+        except Exception:  # noqa: BLE001 — a disclosure never sinks the refusal
+            trail_note = ""
+        return _refused(
+            "promote_failed", f"no candidate with seq {seq}{trail_note}",
+            [], absent_evidence)
+    name = hits[0]
+    if v2_hits and _naming.delimiter_count(name) != 1:
+        return _refused(
+            "promote_candidate_ambiguous",
+            f"REFUSED: {name!r} has more than one <_NNN_> delimiter, so with no "
+            f"manifest row it reads as more than one (design, number, label) "
+            f"triple and nothing can tell them apart. Nothing is published for any "
+            f"claimant. Re-save it under the design you mean, which restores the "
+            f"manifest row — the row, not the name, is the identity source.",
+            [name],
+        )
+    return _resolved(name, None, absent_evidence)
+
+
+def _keeper_owned_by_another_spelling(design_dir, keeper_name):
+    """The EXACT on-disk spelling of a keeper that COLLIDES with ``keeper_name``, else None.
+
+    ``BEST_alpha.zmx`` and ``BEST_Alpha.zmx`` are the SAME FILE on Windows and on a
+    default macOS volume, and BOTH ``alpha`` and ``Alpha`` are canonical fixed points
+    that ``_design_name_error`` is DESIGNED to admit -- so no door refuses them and,
+    until this fix, nothing warned: the second promote replaced the first design's
+    keeper, returned ``ok:true``, and RENAMED THE DIRECTORY ENTRY, so the first design
+    could not reopen its own keeper by name. ``load_design(best='alpha')`` then answered
+    ``err=None`` with the other design's geometry -- the earlier cross-design promote
+    CRIT, reached through the one normalisation ``_safe_name`` does not perform.
+
+    THE DIRECTORY ENTRY IS THE ORACLE, not ``os.path.exists``: a case-insensitive
+    filesystem reports the colliding path as existing under EITHER spelling, so only the
+    listing says which spelling is really there. An exact match is the design's OWN
+    keeper and is a normal re-promote; a case-insensitive match with a DIFFERENT exact
+    spelling belongs to another design.
+
+    RETURNS ``(state, name)`` -- a TRI-STATE, because two of the three used to be one:
+
+      * ``("collision", <exact spelling>)`` -- another design owns this file;
+      * ``("clear", None)``                 -- listed, and nothing collides;
+      * ``(_KEEPER_DIR_UNLISTABLE, None)``  -- the listing FAILED, so nothing was
+        established either way.
+
+    The shipped version returned ``None`` for BOTH "clear" and "could not list", and the
+    caller read ``None`` as permission. Corrected after the external re-audit
+    reproduced it: deny listing on the keeper directory and the protection evaporates.
+    ABSENT is kept distinct from UNREADABLE -- a directory that does not exist
+    yet is the FIRST promote and is genuinely clear.
+
+    SCOPE, stated: this closes the SILENT half of (the undisclosed clobber)
+    WHEN THE DIRECTORY CAN BE READ, and refuses rather than guessing when it cannot.
+    The earlier wording of this line claimed the first half without the qualifier, and
+    the re-audit was right that it overstated the repair.
+    It does NOT decide 's actual question -- whether two case-variant designs
+    should be able to coexist and under what naming -- which is a contract change with
+    migration consequences for existing workspaces, and which that ticket reserves for a
+    live gate. Admissibility is UNCHANGED here: both names remain legal design names.
+    """
+    try:
+        entries = os.listdir(design_dir)
+    except (FileNotFoundError, NotADirectoryError):
+        # ABSENT, NOT UNREADABLE. A name cannot collide inside a directory that
+        # does not exist, and this is the FIRST promote for a design -- the ordinary
+        # case. Conflating it with the unreadable case below would refuse every one.
+        return "clear", None
+    except OSError:
+        # UNREADABLE. A directory that could not be LISTED is not a directory with no
+        # collision, and the caller must not be allowed to read it as one -- the
+        # external re-audit denied listing on the keeper directory alone (enumeration
+        # and write permissions are distinct; no concurrent writer needed) and watched
+        # the whole protection evaporate into ``ok:true`` with the original keeper
+        # replaced. Absence of evidence is not consent.
+        return _KEEPER_DIR_UNLISTABLE, None
+    folded = os.path.normcase(keeper_name)
+    for entry in entries:
+        if os.path.normcase(entry) == folded and entry != keeper_name:
+            return "collision", entry
+    return "clear", None
 
 
 def _max_ondisk_seq(zmx_dir: str) -> int:
@@ -2730,28 +3365,28 @@ def _max_ondisk_seq(zmx_dir: str) -> int:
 
 
 def _get_sink(session, design_name: str):
-    """Get-or-create the cached inner ``ArtifactSink`` for ``candidates/zmx``.
+    """The sink ``save_candidate`` writes its keeper through. NOT the trail's.
 
-    One sink is cached per ``(session, design_name)`` on
-    ``session._workspace_sinks``. A FRESH design dir constructs the sink normally
-    (collision guard active). An EXISTING design dir (a repeat session) reads the
-    max existing seq from the candidates manifest and constructs with
-    ``start_seq=max+1`` so the second session APPENDS collision-free (§4.5).
+    FLAT layout (``workspace_root`` set): the design dir IS the root, so this is the
+    one ``_get_candidate_sink``. LEGACY layout: the historical per-design
+    ``projects/<name>/candidates/zmx`` dir, cached per ``(session, design_name)``.
+
+    Both construct with ``start_seq=0``. The instance counter is UNUSED — every
+    ``save_candidate`` call supplies its own ``index`` and ``filename`` from
+    ``next_candidate_index`` + ``artifact_naming`` — and an explicit ``start_seq``
+    is what bypasses the sink's non-empty-run_dir collision guard, which a repeat
+    session would otherwise trip.
+
+    ``candidates/png`` is NOT created: a new save's picture is the SIBLING of its
+    ``.zmx``. Existing png directories and their files are left alone.
 
     Raises ``PermissionError``/``OSError`` from ``os.makedirs`` up to the caller,
     which envelopes it as ``workspace_unwritable`` — this helper itself does not
     swallow the unwritable-root case (the caller needs the family).
     """
-    # D4: in the FLAT layout (workspace_root set) the design dir IS the root, so a
-    # candidate sink and the session-default snapshot/optimizer sink point at the SAME
-    # ``<root>/candidates/zmx`` run-dir. Share ONE sink (the default) so save_candidate
-    # + save_snapshot + the optimizer trail share one manifest/seq (D4) — two separate
-    # ArtifactSinks over the same non-empty run-dir would otherwise collide. In the
-    # LEGACY layout the per-design ``projects/<name>/candidates`` dirs are distinct, so
-    # keep the original per-(session, design_name) cache.
     _root, flat = _resolve_root(session)
     if flat:
-        return _get_default_sink(session)
+        return _get_candidate_sink(session)
 
     cache = getattr(session, "_workspace_sinks", None)
     if cache is None:
@@ -2762,86 +3397,170 @@ def _get_sink(session, design_name: str):
 
     design_dir = _design_dir(session, design_name)
     candidates_dir = os.path.join(design_dir, "candidates")
-    zmx_dir = os.path.join(candidates_dir, "zmx")
-    png_dir = os.path.join(candidates_dir, "png")
-    # Create the layout up front (an unwritable root raises here, enveloped by the
-    # caller as ``workspace_unwritable``).
-    os.makedirs(png_dir, exist_ok=True)
-    os.makedirs(zmx_dir, exist_ok=True)
-
-    # Repeat-session append: a non-empty existing zmx run_dir would collide on a
-    # normal construct, so seed start_seq past the existing max. FIX 4: derive the
-    # max over BOTH the manifest AND the actual on-disk 000N_*.zmx files — a crash
-    # that left an orphan .zmx with no manifest row must NOT be silently clobbered
-    # (manifest-only would reseed onto it; append-mode bypasses the collision guard).
-    manifest_max = _max_existing_seq(zmx_dir)
-    ondisk_max = _max_ondisk_seq(zmx_dir)
-    existing_max = max(manifest_max, ondisk_max)
-    start_seq = existing_max + 1 if existing_max >= 0 else None
-
     sink = ArtifactSink(
         candidates_dir,
         "zmx",
         _save_as_seam(session),
         min_snapshot_bytes=256,
-        start_seq=start_seq,
+        start_seq=0,
     )
     cache[design_name] = sink
     return sink
 
 
-def _get_default_sink(session):
-    """Get-or-create the session-default ``candidates/zmx`` ArtifactSink (D4).
+#: The flat-layout sink cache, and the ROOT it was built for. Two attributes that
+#: must move together -- named here so a future rename touches ONE place and the
+#: currency check cannot be left pointing at the old spelling (T1).
+_CANDIDATE_SINK_ATTR = "_candidate_sink"
+_CANDIDATE_SINK_ROOT_ATTR = "_candidate_sink_root"
 
-    The FALLBACK sink ``save_snapshot`` + ``optimize._snapshot`` use when no explicit
-    ``session.artifact_sink`` was wired (bugs 2 & 3): ONE
-    ``ArtifactSink(base_dir=<root>/candidates, run_id="zmx", save_as=<lazy lambda>)``
-    rooted at ``_resolve_root(session)`` — the SAME ``candidates/zmx`` run-dir
-    ``save_candidate`` writes to, so the start-form snapshot + the candidates + the
-    optimizer ``.zmx`` trail share ONE manifest/seq.
 
-    COLD-ENGINE / LAZY-OPEN (the highest-risk seam, D4): construction touches NO
-    engine — only ``os.makedirs`` (via the ArtifactSink ctor). ``session.system`` is
-    NOT dereferenced here; the ``save_as`` is ``lambda p: session.system.SaveAs(p)``
-    resolved at CALL time, so building the default sink on a never-opened session does
-    NOT grab the single (N=1) OpticStudio seat. The sink is cached on
-    ``session._default_sink`` so repeat calls share one manifest/seq.
+def _candidate_sink_if_current(session, root):
+    """The cached flat sink, but ONLY if it was built for ``root``. Else ``None``.
 
-    Repeat-session APPEND (§4.5): like ``_get_sink``, an EXISTING candidates dir seeds
-    ``start_seq`` past the max over BOTH the manifest AND the on-disk ``000N_*.zmx``
-    files so a second session APPENDS collision-free rather than colliding.
+    **THE DEFECT THIS EXISTS TO END (T1, found by the live gate).** The flat cache
+    key was renamed ``_default_sink`` -> ``_candidate_sink``. Every caller of the
+    deleted ``_get_default_sink`` failed LOUDLY at import, which is why the rename
+    was done that way on purpose -- but the INVALIDATORS did not reference the
+    function, they referenced the ATTRIBUTE NAME, so they went on nulling
+    ``session._default_sink``: a name nothing read any more. They failed SILENTLY.
+    Meanwhile ``promote_best`` re-resolves the root every call, so the writer and
+    the reader drifted apart and ``save_candidate`` returned ``ok: true`` with a
+    ``zmx_path`` under a workspace the caller had stopped using.
 
-    Raises ``PermissionError``/``OSError`` from ``os.makedirs`` up to the caller (the
-    callers envelope it as ``workspace_unwritable`` / warn the bug-3 warning only if
-    the sink BUILD itself fails).
+    **So currency is no longer something a caller must REMEMBER to announce.** It is
+    DERIVED here, by comparing the root the sink was built for against the root
+    resolved now. A future rename cannot reintroduce this: there is no invalidator
+    left to forget, and a caller that nulls the old attribute is simply ignored
+    rather than silently believed.
+
+    NEVER raises. An unreadable cache is reported as ``None`` (rebuild), never as a
+    hit -- the safe direction is doing the work twice, not writing to a stale tree.
     """
-    cached = getattr(session, "_default_sink", None)
+    try:
+        sink = getattr(session, _CANDIDATE_SINK_ATTR, None)
+        if sink is None:
+            return None
+        built_for = getattr(session, _CANDIDATE_SINK_ROOT_ATTR, None)
+        return sink if built_for == root else None
+    except Exception:  # noqa: BLE001 — unknown currency is NOT a hit
+        return None
+
+
+def _cached_sink_run_dir(session, design_name):
+    """The run_dir of the sink THIS SAVE WILL WRITE THROUGH, if one is already cached.
+
+    READ-ONLY and NON-MUTATING: it peeks at the two caches ``_get_sink`` consults
+    (``session._candidate_sink`` for the flat layout, ``session._workspace_sinks``
+    keyed by design for the legacy one) and CREATES NOTHING. That is the whole point
+    -- the judgment block is validated PRE-MUTATION, so it may not call ``_get_sink``,
+    which makes directories.
+
+    WHY IT EXISTS (internal finding E). The judgment's ``finding_ids`` were
+    resolved against a directory PREDICTED from ``_design_dir(session, …)``, while the
+    row lands in the sink's ``run_dir``. A cached sink and a re-pointed
+    ``workspace_root`` make those two DIFFERENT directories, and the failure is not
+    merely a wrong lookup -- it produces a FALSE STATEMENT: a finding that really is
+    recorded beside the very bytes being saved is reported as
+    ``judgment.finding_ids names id(s) no recorded finding carries``. The author is
+    told their id points at nothing while it points at something.
+
+    So when the authority is already in hand, READ IT rather than re-derive it. When it
+    is not cached there is nothing to read, the prediction is the best available answer,
+    and the post-``_get_sink`` re-verify is the belt for that case.
+
+    NEVER RAISES: this runs outside every ``try`` in ``save_candidate``.
+    """
+    try:
+        root, flat = _resolve_root(session)
+        # T1: read the sink only when it belongs to the CURRENT root. A stale one
+        # here does not merely mislead -- it produces the exact FALSE STATEMENT
+        # this helper's docstring is about, naming a directory the row will not
+        # land in. Unknown currency reads as no authority, which is the case the
+        # prediction path already handles.
+        sink = (_candidate_sink_if_current(session, root) if flat
+                else (getattr(session, "_workspace_sinks", None) or {}).get(design_name))
+        run_dir = getattr(sink, "run_dir", None) if sink is not None else None
+        return run_dir if isinstance(run_dir, str) else None
+    except Exception:  # noqa: BLE001 — a degraded session yields NO authority, not a raise
+        return None
+
+
+def _get_candidate_sink(session):
+    """The FLAT-layout keeper sink: ``<root>/candidates/zmx``. Cached per session.
+
+    COLD-ENGINE / LAZY-OPEN: construction touches NO engine — only ``os.makedirs``
+    (via the ArtifactSink ctor). ``session.system`` is NOT dereferenced here; the
+    ``save_as`` is ``lambda p: session.system.SaveAs(p)`` resolved at CALL time, so
+    building this sink on a never-opened session does NOT grab the single (N=1)
+    OpticStudio seat.
+
+    ROOT-KEYED SINCE T1. The cache is consulted only after the root is resolved, and
+    a sink built for a DIFFERENT root is not a hit. ``_get_sink`` already resolves
+    the root on every call before delegating here, so this costs attribute reads and
+    a ``join`` -- it is not a new failure mode, and it is the difference between
+    ``save_candidate`` writing where the caller asked and writing where the caller
+    asked several roots ago.
+
+    Raises ``PermissionError``/``OSError`` from ``os.makedirs`` up to the caller.
+    """
+    root, _flat = _resolve_root(session)
+    cached = _candidate_sink_if_current(session, root)
     if cached is not None:
         return cached
-
-    root, _flat = _resolve_root(session)
-    candidates_dir = os.path.join(root, "candidates")
-    zmx_dir = os.path.join(candidates_dir, "zmx")
-    png_dir = os.path.join(candidates_dir, "png")
-    # Construct the layout up front (an unwritable root raises here — the caller
-    # turns the raise into a workspace_unwritable / bug-3 warning). makedirs only:
-    # NO engine touch (the save_as lambda defers session.system to call time).
-    os.makedirs(png_dir, exist_ok=True)
-    os.makedirs(zmx_dir, exist_ok=True)
-
-    manifest_max = _max_existing_seq(zmx_dir)
-    ondisk_max = _max_ondisk_seq(zmx_dir)
-    existing_max = max(manifest_max, ondisk_max)
-    start_seq = existing_max + 1 if existing_max >= 0 else None
-
     sink = ArtifactSink(
-        candidates_dir,
+        os.path.join(root, "candidates"),
         "zmx",
-        _save_as_seam(session),  # lambda p: session.system.SaveAs(p) — deferred (D4)
+        _save_as_seam(session),  # lambda p: session.system.SaveAs(p) — deferred
         min_snapshot_bytes=256,
-        start_seq=start_seq,
+        start_seq=0,
     )
-    session._default_sink = sink
+    setattr(session, _CANDIDATE_SINK_ATTR, sink)
+    # Recorded in the SAME statement group that builds the sink, so the two can
+    # never be written apart -- the failure mode T1 was.
+    setattr(session, _CANDIDATE_SINK_ROOT_ATTR, root)
+    return sink
+
+
+def _get_trail_sink(session, run_id: str):
+    """The optimizer's FORENSIC sink: ``<root>/candidates/trail/<run_id>``.
+
+    Per-run directory, counter from 0 per run, the sink's collision guard ACTIVE (no
+    ``start_seq``) — a fresh ``run_id`` names a fresh directory, so a collision is a
+    real one and is not bypassed. The trail keeps the LEGACY ``NNNN_label`` naming:
+    there is no design identity at this seam and none is invented.
+
+    NOT cached — a new run means a new directory. Raises up to the caller.
+    """
+    return ArtifactSink(
+        os.path.join(_resolve_root(session)[0], "candidates", "trail"),
+        run_id,
+        _save_as_seam(session),
+        min_snapshot_bytes=256,
+    )
+
+
+def _get_snapshot_sink(session):
+    """``save_snapshot``'s sink: ``<root>/candidates/trail/snapshots``. Cached.
+
+    Seeded past its OWN directory's max (the existing FIX-4 posture, applied to this
+    directory only): a crash that left a file with no manifest row must not be
+    clobbered by a later session re-seeding onto it.
+    """
+    cached = getattr(session, "_snapshot_sink", None)
+    if cached is not None:
+        return cached
+    trail_dir = os.path.join(_resolve_root(session)[0], "candidates", "trail")
+    run_dir = os.path.join(trail_dir, "snapshots")
+    existing_max = max(_max_existing_seq(run_dir), _max_ondisk_seq(run_dir))
+    sink = ArtifactSink(
+        trail_dir,
+        "snapshots",
+        _save_as_seam(session),
+        min_snapshot_bytes=256,
+        start_seq=existing_max + 1 if existing_max >= 0 else 0,
+    )
+    session._snapshot_sink = sink
     return sink
 
 
@@ -3006,9 +3725,26 @@ def save_candidate(session, params):
         #   Resolved in a guard because this site is PRE-MUTATION and outside every
         #   `try` in this function: an unresolvable root must not raise out of a tool
         #   that returns envelopes. An unresolved dir answers UNKNOWN, not "no findings".
+        #
+        # READ THE AUTHORITY WHEN IT IS IN HAND (internal finding E).
+        # A sink already cached for this session/design IS the directory the row will
+        # be written to, so its ``run_dir`` is the manifest these ids must resolve
+        # against. Re-deriving the path from the live session instead is the
+        # two-independent-resolutions class -- and here it does not merely mis-look-up,
+        # it makes the tool SAY SOMETHING FALSE: a finding that really is recorded
+        # beside the very bytes being saved is reported as "names id(s) no recorded
+        # finding carries", so the author is told their id points at nothing while it
+        # points at something.
+        #
+        # Falls back to the PREDICTION only when nothing is cached: there is then no
+        # second answer to disagree with, and the re-verify after ``_get_sink`` below
+        # covers a root that moves in between. Still PRE-MUTATION -- the peek reads the
+        # caches and creates nothing.
         try:
-            _judgment_manifest_dir = os.path.join(
-                _design_dir(session, design_name), "candidates", "zmx")
+            _judgment_manifest_dir = _cached_sink_run_dir(session, design_name)
+            if _judgment_manifest_dir is None:
+                _judgment_manifest_dir = os.path.join(
+                    _design_dir(session, design_name), "candidates", "zmx")
         except Exception:  # noqa: BLE001 — an unwritable/unresolvable root is UNKNOWN
             _judgment_manifest_dir = None
         judgment_req, judgment_err, judgment_family = _judgment.normalize_request(
@@ -3044,6 +3780,71 @@ def save_candidate(session, params):
             "png_ok": False,
         }
 
+    # === FINDING E — THE JUDGMENT WAS VALIDATED AGAINST A PREDICTED MANIFEST; PROVE
+    # === THE PREDICTION MATCHED THE AUTHORITY. (internal E, ruled)
+    #
+    # The judgment block is validated ABOVE, before ``_get_sink`` exists, and its
+    # ``finding_ids`` are resolved against a manifest directory PREDICTED from
+    # ``_design_dir(session, …)``. The row it will write goes to the sink's
+    # ``run_dir``. Both derive from ``_resolve_root(session)`` — but they READ IT AT
+    # DIFFERENT TIMES, which is the two-independent-resolutions class this cycle closed
+    # five other instances of. When they disagree the ids were resolved against
+    # manifest A while the row lands in manifest B, so a judgment can CLAIM TO ANSWER A
+    # FINDING THAT DOES NOT EXIST WHERE IT LANDS — silent, and in the direction of a
+    # false record. Refusing unresolvable ids is the resolver's entire purpose, so
+    # letting that through defeats the feature at its own boundary.
+    #
+    # ▶ WHY VALIDATION IS NOT SIMPLY MOVED BELOW ``_get_sink`` — DO NOT "SIMPLIFY" THIS
+    #   BACK. ``_get_sink`` MAKES DIRECTORIES. Validating after it would leave a
+    #   workspace half-built for a call that is going to be refused, and that
+    #   pre-mutation property was ITSELF an audit fix (see the validation site's own
+    #   note). Moving it would trade a silent-wrong for a half-built workspace and
+    #   re-open a closed finding — one audit fix paid for with another.
+    #
+    # SCOPED TO THE MEASURED HARM, AND NO WIDER. It fires only when BOTH sides resolve
+    # to real strings AND they disagree:
+    #   * no judgment supplied -> nothing was resolved, nothing to re-verify;
+    #   * predicted dir is None -> ``_finding_resolver`` ALREADY answers UNKNOWN for
+    #     every id and ``_judgment.normalize_request`` has already refused any judgment
+    #     that names one. Refusing here too would break the case that legitimately
+    #     succeeds today: a judgment carrying NO ids on an unresolvable root.
+    #
+    # REACHABILITY, STATED HONESTLY: the shipped entrypoint pins ``workspace_root`` ONCE
+    # to a plain string at launch (``__main__.py``), so on the shipped path the two
+    # reads cannot disagree and this NEVER fires. It guards a path that exists only
+    # when something has already gone wrong — a session whose root attribute answers
+    # differently on successive reads, or a ``chdir`` under the tier-4 cwd fallback,
+    # both of which were demonstrated against the real handler for the sibling
+    # ``promote_best`` disclosure.
+    #
+    # The family is the EXISTING ``judgment_unresolvable`` rather than a new one: the
+    # condition genuinely is "these ids could not be resolved against the manifest this
+    # row is going into", which is what that family already means.
+    if judgment_req is not None and isinstance(_judgment_manifest_dir, str):
+        _sink_dir = getattr(sink, "run_dir", None)
+        if isinstance(_sink_dir, str) and (
+                os.path.normcase(os.path.abspath(_judgment_manifest_dir))
+                != os.path.normcase(os.path.abspath(_sink_dir))):
+            return {
+                "ok": False,
+                "error_family": "judgment_unresolvable",
+                "error": (
+                    f"REFUSED: the judgment's finding ids were resolved against "
+                    f"{_judgment_manifest_dir!r}, but this save writes its row to "
+                    f"{_sink_dir!r}. The workspace moved between the two reads, so the "
+                    f"ids were checked against a DIFFERENT manifest than the one the "
+                    f"judgment would land in and nothing here can say they resolve "
+                    f"there. Nothing was written. Re-issue the save with a stable "
+                    f"workspace root."),
+                "design_name": design_name,
+                "label": label,
+                "seq": None,
+                "zmx_path": None,
+                "zmx_ok": False,
+                "png_path": None,
+                "png_ok": False,
+            }
+
     # (MCE) Record the active MCE config for the DISCLOSURE (+ manifest
     # meta). NO behavior change, NO data fix — the .zmx round-trips the index for free.
     # This is ALSO the ``before`` half of the
@@ -3051,11 +3852,33 @@ def save_candidate(session, params):
     # below only depicts this design's saved state if the sweep restored it.
     active_before = _active_configuration(session)
 
+    # THE NAME. The index is PER DESIGN and comes from ``next_candidate_index``;
+    # the basename is composed by the ONE naming authority. Both are handed to the
+    # sink TOGETHER (supplying one without the other is a programmer error the sink
+    # raises on — and this call site is inside the caller's existing ``try``).
+    try:
+        candidate_index = next_candidate_index(sink.run_dir, design_name)
+        candidate_filename = _naming.candidate_zmx_name(
+            design_name, candidate_index, label)
+    except Exception as exc:  # noqa: BLE001 — a name we cannot compose is unwritable
+        return {
+            "ok": False,
+            "error_family": "workspace_unwritable",
+            "error": f"{type(exc).__name__}: {exc}",
+            "design_name": design_name,
+            "label": label,
+            "seq": None,
+            "zmx_path": None,
+            "zmx_ok": False,
+            "png_path": None,
+            "png_ok": False,
+        }
+
     # Durable .zmx via the sink (gate + manifest + fsync; never raises).
     snap = sink.snapshot(label, meta={
         "workspace": design_name, "label": label,
         "active_configuration": active_before,
-    })
+    }, index=candidate_index, filename=candidate_filename)
     # NOTE: read the SnapshotResult fields via dataclasses.asdict so the source
     # never forms the dotted ``snap.s e q`` literal the release guard flags as a
     # legacy converter file-extension (it is the dataclass field name) — mirrors
@@ -3065,6 +3888,13 @@ def save_candidate(session, params):
     seq = fields["seq"]
     zmx_ok = bool(fields["ok"])
     zmx_path = fields["path"]
+    index_advanced = bool(fields["index_advanced"])
+    requested_index = fields["requested_index"]
+    # The sink's OWN diagnostic. It was computed and then DROPPED: a save that failed
+    # because every index through the advance bound was occupied returned ``ok:false``
+    # with no ``error`` and no ``error_family`` anywhere on the envelope, so the caller
+    # was told it failed and never told why. Carried to the envelope below.
+    zmx_error = fields["error"]
 
     # Save-time clearance/visual gate (save-clearance-gate §3): WARN-and-surface,
     # NEVER blocks. Audit the live geometry, stamp ADDITIVE keys, and NEVER flip ``ok``
@@ -3115,13 +3945,53 @@ def save_candidate(session, params):
     # ``render=False`` and a raising render both leave it ``{}``, so the envelope gains
     # no key and stays byte-identical to today for those callers.
     _render_keys = {}
-    if render:
-        # Mirror the snapshot's seq prefix so 000N_*.zmx <-> 000N_*.png pair.
-        png_dir = os.path.join(
-            _design_dir(session, design_name), "candidates", "png"
-        )
-        png_filename = f"{seq:04d}_{_safe_name(label)}.png"
-        png_path = os.path.join(png_dir, png_filename)
+    render_reported_path = None
+    render_path_mismatch = False
+    # The render ``except`` below honours the never-raise contract by
+    # swallowing EVERY exception. That is right, and the SILENCE was the defect: a
+    # signature mismatch (a caller without ``exact_path``) arrived as ``png_ok:false``
+    # with the generic "no layout figure was rendered" line, i.e. a green-SHAPED
+    # envelope for something that did not happen. The exception is now DISCLOSED here
+    # and never re-raised, and the ``except`` set is NOT narrowed -- narrowing trades a
+    # silent failure for a raise through a tool that promises never to raise.
+    render_error = None
+    # Bound HERE, on EVERY path, before any branch can read it: render=False, a
+    # refused .zmx and a raising renderer all leave it False.
+    png_unproven = False
+    # AT FUNCTION SCOPE, with every other name the envelope reads unconditionally.
+    # My first cut bound these two inside the ``if render:`` block -- beside
+    # ``png_existed_before``, which is only correct for names the envelope reads
+    # under the same condition. A refused ``.zmx`` skips that block entirely, so the
+    # envelope hit ``UnboundLocalError`` out of a tool documented never to raise:
+    # the ROUND-3 defect, reproduced by the very comment that cites it. The
+    # lesson is not "bind before the try", it is BIND WHERE THE READER READS.
+    png_replaced_existing = False
+    _png_sha_proved = None
+    # *** THE PICTURE IS THE .ZMX'S COMPANION, SO WITH NO .ZMX THERE IS NOTHING FOR IT
+    # *** TO BE A COMPANION OF -- AND THE PATH IT WOULD BE WRITTEN TO IS NOT OURS.
+    #
+    # ``zmx_ok`` is part of the render PREDICATE, not just a flag on the envelope.
+    # When the sink REFUSES (``ok=False, bytes=0``) it still returns ``path`` -- the
+    # last target it tried, which on the collision path is a file that ALREADY EXISTS
+    # and belongs to someone else. Rendering then derived the sibling ``.png`` from
+    # THAT occupied target and overwrote another candidate's picture.
+    #
+    # MEASURED, reproducing an audit finding on a real
+    # filesystem: with both counter sources blind and every target through the
+    # 1,000-advance bound occupied, saving design ``alpha`` label ``001_x`` gave
+    # ``SaveAs calls=0, zmx_ok=False, png_ok=True, seq=1001`` and CHANGED the existing
+    # ``alpha_1001_001_x.png`` -- which under the v2 convention is also design
+    # ``alpha_1001``, index 1, label ``x``. The envelope carried no ``error_family``
+    # and no ``error``: a destroyed artifact, undisclosed, on a call that reports
+    # overall failure.
+    if render and zmx_ok:
+        # THE PICTURE LANDS BESIDE THE .ZMX. It is the SIBLING of the file the sink
+        # actually wrote — same directory, same stem — derived from the ACTUAL saved
+        # path, never recomposed from (index, label). A recomposition is a second
+        # chance to disagree with what is really on disk.
+        expected_png_path = _naming.sibling(zmx_path, ".png")
+        png_dir = os.path.dirname(expected_png_path)
+        png_path = expected_png_path
         # Defensive belt-and-braces makedirs at the issuing save site (the #58
         # "every save site makedirs FIRST" invariant, made literal here). render_layout
         # ALSO makedirs its own dirname (layout_render.py), so this is defense-in-depth,
@@ -3133,17 +4003,227 @@ def save_candidate(session, params):
             os.makedirs(png_dir, exist_ok=True)
         except (OSError, ValueError):
             pass
+        # *** S-3: THE FIGURE IS RENDERED TO A NAME ONLY THIS CALL CREATED. ***
+        #
+        # (This heading used to assert the name was SECRET to this call. It is not:
+        # the entry sits in a shared, listable directory the moment the descriptor
+        # is closed. Creation is what ``mkstemp`` establishes; secrecy is what it
+        # does not. The retired wording is quoted once, in /9 cycle
+        # report -- NOT here, because a guard cannot tell a returning claim from a
+        # note about it. See the ESTABLISHED/ASSUMED block and
+        # ``_SINGLE_WRITER_MODEL``.)
+        #
+        # Rounds 4, 5 and 6 each closed the publication routes they had ENUMERATED,
+        # and each time the next reader found a route through an evidence channel the
+        # enumeration did not model: a deny-list keyed on one token; then two paths
+        # through different channels; then a failed manifest append and an unreadable
+        # pre-render stat. That is the signature of enforcing an invariant through a
+        # PROXY. Every question of the form "what evidence do we have ABOUT whether
+        # this call produced the picture" admits a new evidence channel, and every new
+        # channel is a new way to answer it wrong. A seventh rung would close the
+        # sixth instance and wait for the seventh.
+        #
+        # So the question is RETIRED rather than answered again. The render goes to a
+        # name EXCLUSIVELY CREATED here by ``tempfile.mkstemp``, and only once the
+        # bytes at it are gated and digested are they moved onto the shared sibling
+        # with ``os.replace``. Nothing is inferred from a pre-state, a digest
+        # comparison, or any other fact that can go missing or unreadable.
+        #
+        # *** WHAT IS ESTABLISHED, AND WHAT IS ASSUMED. READ BOTH. ***
+        #
+        # ESTABLISHED: this call CREATED that name. ``mkstemp`` opens ``O_EXCL`` and
+        # retries a collision, so the name was not in use and no crashed leftover is
+        # adopted. Under the supported single-writer model (below) the bytes found
+        # there are therefore this call's.
+        #
+        # ASSUMED, AND IT IS AN ASSUMPTION: that no OTHER writer touches the name
+        # between creation and publication. **An earlier revision asserted that no
+        # other writer could KNOW the name, and derived the provenance from that as
+        # a matter of construction. It was FALSE, and it is corrected rather than
+        # softened.** ``mkstemp`` grants exclusive CREATION, never
+        # continuing ownership: after ``os.close`` the entry sits in a shared, listable
+        # directory, and a second writer does not have to guess it or receive this
+        # local -- it lists the directory. An external reader built exactly that
+        # counterexample: second writer plants a picture at the minted name, this
+        # renderer writes nothing and reports failure, and the statements below then
+        # certify ``png_ok`` and bind ``png_sha256`` TO THE OTHER WRITER'S BYTES.
+        #
+        # WHY THIS IS NOT ENFORCED HERE. Four forms of exclusion were MEASURED on
+        # this platform (by a live probe) and all
+        # four FAIL. Read that as evidence about those four, NOT as a claim that
+        # enforcement is unavailable -- an earlier revision of this comment made
+        # the larger claim and it exceeded the experiments. The untested form, and
+        # why the decision does not rest on any of this, are in
+        # ``_SINGLE_WRITER_MODEL``. The four:
+        #   * holding the ``mkstemp`` descriptor open excludes NOBODY. Measured: a
+        #     separate PROCESS opened the same path for writing and succeeded while
+        #     the descriptor was held.
+        #   * holding it open also BREAKS publication -- ``os.replace`` onto the
+        #     sibling fails ``WinError 32`` while our own handle is open. So that form
+        #     costs the publish and buys no exclusion, simultaneously.
+        #   * a ``mkdtemp`` private DIRECTORY does not remove discovery-by-listing:
+        #     measured, the directory is itself listed in the shared picture folder.
+        #     It costs a second ``listdir``, not the vector. Taking it would add
+        #     machinery implying a guarantee still absent -- the exact class this
+        #     cycle keeps closing.
+        #   * an ``st_ino`` identity re-check detects delete-and-recreate but NOT
+        #     overwrite-in-place (measured, both forms). A detector that catches one
+        #     of two forms is a spoofable oracle, and a spoofable oracle is worse than
+        #     none because it certifies that we checked.
+        #
+        # SO THE MODEL IS DECLARED, and the declaration is the honest half:
+        # see ``_SINGLE_WRITER_MODEL``. This is not a retreat invented to cover a
+        # defect -- ``layout_render``'s own atomic write has had the identical
+        # mint/close/gate/replace window since before this cycle, so the assumption
+        # was already load-bearing. What S-3 added was a SENTENCE claiming more than
+        # the assumption gives, and that sentence is what is being fixed.
+        #
+        # WHAT THIS RETIRES OUTRIGHT, rather than guarding:
+        #   * the pre-render ``isfile``/digest pair. Its unreadable answers WERE the
+        # external finding 2 -- ``os.path.isfile`` returns False when its
+        #     stat raises ``PermissionError``, that False was read as ESTABLISHED
+        #     ABSENCE, and planted bytes were certified ``digest_proven``. There is no
+        #     pre-state left to misread.
+        #   * the acknowledged FALSE NEGATIVE, where a correct re-render that happened
+        #     to be byte-identical to a leftover at the same stem was refused as
+        #     unproven. Nothing is compared against the sibling any more.
+        #
+        # THE RENDERER IS STILL NOT BELIEVED (G15d). A renderer that writes a good
+        # picture and reports failure is still taken at its BYTES; what changed is
+        # only WHERE those bytes have to appear for the claim to be structural.
+        #
+        # FILESYSTEM SEMANTICS STILL FLAGGED FOR THE LIVE GATE: that ``os.replace`` is
+        # atomic over an existing file here, including where the target is open
+        # elsewhere (Windows makes that conditional on sharing mode, not
+        # unconditional). A REFUSED replace already drops this save's production claim
+        # and its digest, so the failure direction is safe -- but a SUCCESSFUL replace
+        # does not make the preceding stat, gate, digest and rename one transaction,
+        # and nothing here claims it does.
+        #
+        # The other caveat this block used to carry -- "``mkstemp`` yields a name no
+        # concurrent writer holds" -- is RETIRED as the wrong question. Exclusive
+        # creation is documented and was independently confirmed; it was never the
+        # missing property. Ownership AFTER creation was, and that is now declared
+        # rather than flagged.
+        _minted_png = None
+        _png_published = False
         try:
-            render_res = render_layout(
-                session,
-                {
-                    "path": png_path,
-                    "title": f"{design_name} [{seq:04d}]",
-                },
-            )
-            png_ok = bool(render_res.get("ok"))
-            # Echo the renderer's actual path (it may sanitize the stem).
-            png_path = render_res.get("path", png_path)
+            _fd, _minted_png = tempfile.mkstemp(
+                suffix=".png", prefix=".optivibe_save_", dir=png_dir)
+            os.close(_fd)
+        except (OSError, ValueError) as exc:  # noqa: BLE001 — never raise
+            _minted_png = None
+            render_error = (f"the private render name could not be minted: "
+                            f"{type(exc).__name__}: {exc}")
+        try:
+            if _minted_png is None:
+                render_res = {"ok": False, "path": None}
+            else:
+                render_res = render_layout(
+                    session,
+                    {
+                        "path": _minted_png,
+                        "title": f"{design_name} [{seq:03d}]",
+                    },
+                    exact_path=_minted_png,
+                )
+            # "IS THERE A REAL PNG HERE" AND "DID THIS CALL PRODUCE IT" COLLAPSE
+            # INTO ONE QUESTION **UNDER THE DECLARED SINGLE-WRITER MODEL**, because
+            # this call CREATED the name. An earlier revision stated the collapse
+            # UNCONDITIONALLY and denied that any second fact remained. Both halves
+            # were FALSE AS STATED: the second fact did not vanish, it became an
+            # ASSUMPTION (no other writer touches the name between creation and
+            # publication). What DID go away is a fact that can be ABSENT or
+            # UNREADABLE -- which is the property S-3 was built for, and it survives
+            # the correction. A violated model makes the reading WRONG, not missing.
+            _png_is_png = bool(_minted_png
+                               and os.path.isfile(_minted_png)
+                               and _is_png(_minted_png))
+            # ONE DIGEST, AND IT IS BOTH THE PROOF AND THE RECORD [S-2] -- taken at
+            # the name this call created, BEFORE the bytes are moved onto the shared
+            # sibling. An earlier revision claimed these bytes were beyond any other
+            # writer's reach. They are not. Nothing PREVENTS a substitution -- the
+            # model DECLARES that none happens. Taking the digest here rather
+            # than after the replace still narrows the window to the render itself,
+            # which is worth doing under the model and is not a guarantee without it.
+            _png_sha_proved = _sha256_file(_minted_png) if _png_is_png else None
+            # A picture that passes the magic gate but will not digest has nothing to
+            # bind, so nothing publishes: UNKNOWN stays unknown, never proof.
+            png_produced_here = bool(_png_is_png and _png_sha_proved is not None)
+            if png_produced_here:
+                # DISCLOSURE ONLY, AND TRI-STATE. Whether a companion was already
+                # there is REPORTED, never relied on -- and an unreadable answer reads
+                # ``None`` (unknown) rather than False, because this is exactly the
+                # stat whose False-on-PermissionError was finding 2. It decides
+                # nothing, which is the only reason it is allowed to be a stat at all.
+                # The ``except`` here could never fire, because
+                # ``os.path.isfile`` swallows the failed stat and returns False. The
+                # key advertised a tri-state and could only ever emit two.
+                _prior = _sibling_companion_state(expected_png_path)
+                png_replaced_existing = (
+                    None if _prior == "unknown" else _prior in ("png", "other"))
+                try:
+                    os.replace(_minted_png, expected_png_path)
+                    _png_published = True
+                except (OSError, ValueError) as exc:  # noqa: BLE001 — never raise
+                    # The proven picture never reached the sibling. This save has NOT
+                    # produced the companion it would otherwise certify, so the digest
+                    # is dropped with the claim.
+                    png_produced_here = False
+                    _png_sha_proved = None
+                    render_error = (
+                        f"the rendered figure could not be published to its sibling "
+                        f"path: {type(exc).__name__}: {exc}")
+            png_ok = bool(_png_is_png and png_produced_here)
+            # ``png_unproven`` IS A DISCLOSURE ABOUT THE SIBLING, AND UNDER S-3 IT HAS
+            # TO BE READ THERE. Before S-3 the render wrote straight to the sibling, so
+            # "a real PNG we did not certify" and "a real PNG at the private name we
+            # could not bind" were the same file. They are not any more: a refused
+            # render now leaves the private name empty while a LEFTOVER can still be
+            # sitting at ``expected_png_path`` -- and the envelope NAMES that path.
+            # Dropping this read would report "no figure" to an owner who has a stale
+            # one on disk at the path we just handed them, which is the silent-wrong
+            # this key exists to prevent.
+            #
+            # THIS IS NOT FINDING 2 RETURNING. That defect was an unreadable stat
+            # feeding ``png_produced_here`` -- absence manufacturing PROOF. This read
+            # feeds only a disclosure, and it can WITHHOLD ``png_path`` but never
+            # publish anything. Publication is decided entirely at the private name.
+            #
+            # UNREADABLE RESOLVES TOWARD DISCLOSURE, and that direction is deliberate:
+            # claiming nothing is there when we could not look is how an owner is sent
+            # hunting for a figure that exists; claiming something is there when it is
+            # not costs a warning and a suppressed path.
+            if png_ok:
+                png_unproven = False
+            else:
+                #, the same defect on the disclosure that matters most: both
+                # readers swallowed the fault, so the ``except`` was unreachable and
+                # an unreadable companion read as ABSENT -- the owner told "no figure"
+                # while one sits at the path the envelope names.
+                #
+                # UNKNOWN RESOLVES TOWARD DISCLOSURE. That direction is the same one
+                # this key already documented: claiming nothing is there when we could
+                # not look sends an owner hunting for a figure that exists; claiming
+                # something is there when it is not costs a warning and a suppressed
+                # path. It can WITHHOLD ``png_path``; it can never publish anything.
+                png_unproven = _sibling_companion_state(expected_png_path) in (
+                    "png", "unknown")
+            # THE MISMATCH CHECK NOW COMPARES AGAINST THE NAME WE ASKED FOR. Under
+            # S-3 that is the minted private path, not the sibling: a renderer that
+            # wrote somewhere else is still disclosed, and comparing against the
+            # sibling here would flag EVERY correct render as a mismatch.
+            reported = render_res.get("path")
+            if isinstance(reported, str) and reported and _minted_png:
+                same = (os.path.normcase(os.path.abspath(reported))
+                        == os.path.normcase(os.path.abspath(_minted_png)))
+                if not same:
+                    render_path_mismatch = True
+                    render_reported_path = reported
+            # ``png_path`` is ALWAYS the expected sibling. The renderer's path is
+            # echoed SEPARATELY when it differs, so the disagreement is visible and
+            # nothing is silently re-pointed at a file this save does not own.
+            png_path = expected_png_path
             # reviewable-figure an earlier cycle -- read off THIS envelope, from THIS invocation, the
             # one that wrote the bytes at ``png_path``. Never a second render (a second
             # render is a different picture), never a re-read of the LDE (that is the
@@ -3162,6 +4242,30 @@ def save_candidate(session, params):
         except Exception as exc:  # noqa: BLE001 — render is a convenience; never raise
             png_ok = False
             png_path = png_path
+            render_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            # THE MINTED NAME WAS CREATED BY THIS CALL, so removing it cannot
+            # destroy an artifact this workspace was keeping. It is removed on EVERY
+            # path that did not publish it: a refused render, a failed magic gate, a
+            # renderer that raised, a digest that would not read, a failed replace.
+            #
+            # It used to say the name is **ONLY** this call's litter. Under the
+            # declared model that holds; outside it, a second writer's bytes could be
+            # sitting there and this removes them. That is the SAFE direction (the
+            # alternative is leaving an unowned file in the picture directory) and it
+            # is stated rather than dressed up as exclusivity.
+            #
+            # THE SHARED SIBLING IS NEVER TOUCHED HERE. The rule that a refusal
+            # must not destroy a leftover companion
+            # (``test_the_leftover_itself_is_never_touched_by_the_refusal``) used
+            # to be an argument about which branch ran; under S-3 it is
+            # STRUCTURAL, because a refusing path never names the sibling at all.
+            if _minted_png and not _png_published:
+                try:
+                    if os.path.isfile(_minted_png):
+                        os.remove(_minted_png)
+                except (OSError, ValueError):  # noqa: BLE001 — cleanup never raises
+                    pass
 
     ok = zmx_ok and ((not render) or png_ok)
 
@@ -3172,10 +4276,16 @@ def save_candidate(session, params):
     # configuration and must not be digest-bindable. ``active_before is not None`` is
     # load-bearing: ``_active_configuration`` returns None on a read fault, and
     # ``None == None`` would otherwise let TWO UNKNOWN READINGS CERTIFY a restoration.
-    # Fail-safe — no ``png_sha256`` just means promote falls back to ``paired_by_seq``
-    # or to no picture. Nothing refuses.
+    # FAIL-SAFE, AND THE CONSEQUENCE IS NOW STRICTER THAN THIS LINE USED TO SAY
+    # (external). It read: "no ``png_sha256`` just means promote falls
+    # back to ``paired_by_seq`` or to no picture." That is FALSE for anything this
+    # save path writes. Round 7 confined the ``paired_by_seq`` exemption to
+    # ``name_scheme == "legacy"``, and every name this writer emits is v2 -- so for a
+    # v2 candidate a withheld digest means promote publishes NO PICTURE, full stop.
+    # The direction is still safe; it is simply firmer than the sentence claimed, and
+    # a reader budgeting on the old fallback would be wrong about what they get.
     png_sha = (
-        _sha256_file(png_path)
+        _png_sha_proved
         if (png_ok and active_before is not None and active_after == active_before)
         else None
     )
@@ -3209,13 +4319,21 @@ def save_candidate(session, params):
     # disclosure about what it recorded. The "only when a parent param was supplied"
     # rule is enforced by POSITION on those two exits and by ``{}`` on this one.
     parent, parent_source, _lineage_key = _declared_parent(params)
+    # ONE resolution of ``zmx_path``'s directory, read by BOTH consumers -- the audit
+    # ladder below and the ``candidates_dir`` disclosure on the envelope. The A1
+    # disclosure keys arrived with their OWN ``os.path.dirname(zmx_path)``,
+    # which was a SECOND independent resolution of the same value: exactly the class
+    # the hoist above exists to close, reintroduced by the key that reports it. Caught
+    # by a test pinning that the audit directory is resolved exactly once.
+    _zmx_dirname = None
+    try:
+        _zmx_dirname = os.path.dirname(zmx_path)
+    except (OSError, ValueError, TypeError):
+        _zmx_dirname = None
     _audit_dir = None
     _write_audit = False
     if zmx_ok and isinstance(zmx_sha, str):
-        try:
-            _audit_dir = os.path.dirname(zmx_path)
-        except (OSError, ValueError, TypeError):
-            _audit_dir = None
+        _audit_dir = _zmx_dirname
 
     # --- the bound scorecard seam --------------------------------
     # The seam sits AFTER the digest and BEFORE the record — the window that is
@@ -3303,8 +4421,19 @@ def save_candidate(session, params):
             design_name=design_name,
             filename=os.path.basename(zmx_path) if isinstance(zmx_path, str) else None,
             zmx_sha256=zmx_sha,
+            # A PICTURE THIS CALL COULD NOT PROVE IT PRODUCED IS NOT THIS CANDIDATE'S
+            # PICTURE, AND THE DURABLE ROW MUST SAY SO.
+            #
+            # ``png_unproven`` was disclosed on the ENVELOPE, which is ephemeral, while
+            # the ROW -- the only thing a later ``promote_best`` can read -- still named
+            # the stale leftover as this candidate's ``png_filename``. That is the fix
+            # stopping one layer above the layer that writes to the owner's disk: the
+            # CLAIM changed (``digest_proven`` -> ``paired_by_seq``) and the published
+            # bytes did not. Naming nothing is the honest row: the file exists, but not
+            # as anything this save can vouch for.
             png_filename=(
-                os.path.basename(png_path) if isinstance(png_path, str) else None
+                os.path.basename(png_path)
+                if (isinstance(png_path, str) and not png_unproven) else None
             ),
             png_sha256=png_sha,
             # The config the ``.zmx`` was SAVED at (the ``before`` read), matching the
@@ -3443,15 +4572,131 @@ def save_candidate(session, params):
         "scorecard": os.path.basename(scorecard_path)
     }
 
+    # A1: the envelope discloses that the label was mangled. The owner's real
+    # ``f/3.77`` label is silently sanitised today and nothing says so.
+    label_sanitized = (isinstance(label, str) and _safe_name(label) != label)
+    _mismatch_keys = (
+        {"error_family": "render_path_mismatch",
+         "render_reported_path": render_reported_path}
+        if render_path_mismatch else {}
+    )
+    # The SINK'S OWN diagnostic, surfaced. Until this fix a ``.zmx`` that could not
+    # be written -- the durability gate, an unwritable root, or every index through the
+    # advance bound occupied -- produced ``ok:false`` with NOTHING on the envelope
+    # saying why: the string was computed inside the sink and dropped at the boundary.
+    # Emitted ONLY when the sink actually failed, so a successful save stays
+    # byte-identical; ``render_path_mismatch`` keeps its ``error_family`` when both
+    # could apply, because a mismatch is about a picture and this is about the .zmx,
+    # and the .zmx failing is the one the caller must act on first.
+    _zmx_error_keys = (
+        {} if (zmx_ok or not isinstance(zmx_error, str) or not zmx_error)
+        else {"error_family": "workspace_unwritable", "error": zmx_error}
+    )
+    # S-1: the fix's OWN new failure mode reproduced the shape the external
+    # audit raised as -- ``ok:false`` with ``error_family`` and ``error`` both
+    # ABSENT, so a caller doing ``if not out["ok"]: out["error_family"]`` gets a
+    # KeyError out of a tool documented never to raise into dispatch. The fix
+    # added ``_zmx_error_keys`` for a SINK failure only, and the picture arm was left in
+    # exactly the state that finding described.
+    #
+    # Emitted ONLY on the unproven-picture arm, and only when the ``.zmx`` itself
+    # succeeded -- a sink failure is the thing the caller must act on first and keeps
+    # its family. Scoped this narrowly ON PURPOSE: ``error_family`` is CONDITIONAL on
+    # this envelope by design (the success path carries none), so making it
+    # unconditional would be a contract change and would break the strict key-set pins
+    # for every caller, not a disclosure fix.
+    _png_unproven_keys = (
+        {"error_family": "png_unproven",
+         "error": (
+             # This used to say the bytes "are unchanged from before the
+             # render". S-3 DELETED the pre-render observation that could
+             # establish that, so the message asserted a comparison the code no
+             # longer makes. It now says only what is known: a companion is at
+             # the path and this call did not produce it.
+             "a picture is present at the expected path but this call did not "
+             "produce it, so it cannot be certified as this candidate's figure "
+             "(it may be a leftover, or unreadable -- both withhold). The .zmx "
+             "was saved; run render_layout to make a figure for it, or remove "
+             "the file at png_path and re-save.")}
+        if (png_unproven and zmx_ok and not _zmx_error_keys and not render_path_mismatch)
+        else {}
+    )
     return {
         "ok": ok,
         "design_name": design_name,
         "label": label,
         "seq": seq,
+        # A1/A4/A5 disclosure: the per-design index, the scheme that named the file,
+        # where it lives, and whether the label or the index had to move.
+        "name_scheme": "v2",
+        # The root THIS SINK IS UNDER, from ``sink.run_dir``, NOT a second
+        # ``_resolve_root(session)``. The sink is CACHED per session: it can have been
+        # built against an earlier root while the session now resolves a different one,
+        # and the disclosure would then name a directory the artifact is NOT in --
+        # MEASURED by an audit with a cached sink under ``old-root``
+        # and ``workspace_root=new-root``. Fifth instance of the
+        # two-independent-resolutions class in this cycle; same fix every time, read
+        # the authority rather than re-derive. ``run_dir`` is
+        # ``<root>/candidates/zmx`` by construction in ``_get_candidate_sink``, so the
+        # root is its grandparent -- and it is the SAME authority ``candidates_dir``
+        # below already reports, so the two can no longer disagree.
+        #
+        # >> THE TWO TOOLS DERIVE THIS KEY DIFFERENTLY, AND THE DIVERGENCE IS
+        # >> DELIBERATE -- disclosed here after the brutal audit (A5) correctly called it
+        # >> undisclosed. ``save_candidate`` reads the SINK IT ACTUALLY WROTE TO (this
+        # >> line). ``promote_best`` re-derives with ``_resolve_root(session)[0]``.
+        # >> This one is the more truthful: it names the root the artifact is IN, and it
+        # >> is the fix. The other is the open half, recorded in
+        # >> a ticket, which also measures why it
+        # >> is not a one-liner -- that read sits on the REFUSAL path, above the point
+        # >> where any sink exists to read, and ``_design_dir`` is layout-dependent
+        # >> (FLAT returns the root itself, LEGACY returns ``<root>/<design>``), so
+        # >> recovering the root from it requires the very re-resolution being removed.
+        # >> **A reader comparing the two keys across tools should expect them to agree
+        # >> and should not assume they must.**
+        "workspace_root": os.path.dirname(os.path.dirname(sink.run_dir)),
+        "candidates_dir": _zmx_dirname,
+        "label_sanitized": label_sanitized,
+        # S-6: a LEGITIMATE label can compose a name that is unpromotable the moment
+        # its manifest row is lost. ``label=<001_x>`` on design ``alpha`` composes
+        # ``alpha_001_001_x.zmx``, whose two ``_NNN_`` delimiters read as more than
+        # one (design, index, label) triple, so the orphan path refuses it FOREVER
+        # (``promote_candidate_ambiguous``). That refusal is correct -- nothing can
+        # tell the triples apart -- but the owner was told nothing at SAVE time, and
+        # ``label_sanitized`` reads False here because the label needed no sanitising.
+        # The row keeps it promotable today; this names what is lost if the row is.
+        # Disclosure only: nothing refuses and the name is unchanged.
+        "label_ambiguous_without_row": (
+            isinstance(zmx_path, str)
+            and _naming.delimiter_count(os.path.basename(zmx_path)) > 1
+        ),
+        # S-3: the picture this save certifies REPLACED one already at the path.
+        # See the note at the proof site -- disclosed, not refused.
+        "png_replaced_existing": png_replaced_existing,
+        "index_advanced": index_advanced,
+        "requested_index": requested_index,
+        # A2: ``SaveAs`` writes a ``.ZDA`` companion beside the ``.zmx``. It is
+        # TRACKED here and NOT removed — deleting engine state is an unmeasured
+        # behaviour change, and its removal is a ticket, not this cycle.
+        "zda_present": (
+            os.path.isfile(_naming.sibling(zmx_path, ".ZDA"))
+            if isinstance(zmx_path, str) else False
+        ),
+        **_mismatch_keys,
+        **_zmx_error_keys,
+        **_png_unproven_keys,
         "zmx_path": zmx_path,
         "zmx_ok": zmx_ok,
         "png_path": png_path,
         "png_ok": png_ok,
+        # The renderer's exception, DISCLOSED. ``None`` on a normal return
+        # (and when ``render=False``, where there was no renderer to raise).
+        "render_error": render_error,
+        # Disclosure: a real PNG IS at the expected path, but this call cannot
+        # show it produced it, so it is not certified. True is the ONLY state in which
+        # ``png_ok`` is False while a valid picture sits at ``png_path`` -- without
+        # this key that combination is indistinguishable from "nothing was rendered".
+        "png_unproven": png_unproven,
         # (MCE) disclosure-only: the active config at save time (null on a
         # read fault). The .zmx round-trips the index; this is honesty, not load-bearing.
         "active_configuration": active_before,
@@ -3742,24 +4987,111 @@ def promote_best(session, params):
 
         design_dir = _design_dir(session, design_name)
         zmx_dir = os.path.join(design_dir, "candidates", "zmx")
-        png_dir = os.path.join(design_dir, "candidates", "png")
-        safe_design = _safe_name(design_name)
 
-        # Glob the seq'd .zmx candidate.
-        zmx_matches = sorted(glob.glob(os.path.join(zmx_dir, f"{seq:04d}_*.zmx")))
-        if not zmx_matches:
+        # ONE resolver decides WHICH file and WHOSE it is. NO GLOB IS BUILT FROM A
+        # DESIGN NAME — ``_safe_name`` admits ``[`` and ``]``, so ``glob("a[bc]_001_*")``
+        # would match ``ab_001_seed.zmx`` and NOT its own file.
+        resolution = _resolve_candidate(zmx_dir, seq, design_name)
+        if resolution["error_family"] is not None:
             return {
                 "ok": False,
-                "error_family": "promote_failed",
-                "error": f"no candidate with seq {seq}",
+                "error_family": resolution["error_family"],
+                "error": resolution["error"],
+                "candidates": resolution["candidates"],
+                # S-4, SECOND LAYER. Carrying ``evidence`` on the resolver's refusal
+                # is only half the fix: the envelope is what a caller reads, and it
+                # dropped the key here. The message already distinguishes the two
+                # cases in prose; this is the MACHINE-READABLE half, so a caller can
+                # branch on "the manifest could not be read" without parsing English.
+                "evidence": resolution["evidence"],
                 "design_name": design_name,
                 "seq": seq,
                 "best_zmx": None,
                 "best_png": None,
                 "png_promoted": False,
+                # MEASURED, and it CAN diverge -- this is a SIXTH instance
+                # of the two-independent-resolutions class, left in place DELIBERATELY
+                # because it is outside this cycle's charter (see the report; a ticket
+                # is owed and no ``TICKET-`` token is written here until it exists).
+                #
+                # ``promote_best`` resolves the root TWICE: once inside ``_design_dir``
+                # to build ``zmx_dir``, and again here for the disclosure.
+                # ``_resolve_root`` is a pure read, but it is not a read of a STABLE
+                # value. Two divergences were demonstrated against the real handler,
+                # both on a SUCCESSFUL promote (``ok:true``):
+                #   (A) tier 4 (no workspace_root, no projects_root, no sink) resolves
+                #       through ``os.getcwd()``. A ``chdir`` between the two calls made
+                #       the envelope report ``<away>/projects`` while the keeper was
+                #       published under ``<home>/projects/d``.
+                #   (B) a session whose root attribute answers differently on
+                #       successive reads published under root A and reported root B.
+                # BOTH ARE LATENT behind the shipped entrypoint, which pins
+                # ``workspace_root`` ONCE to a plain string at launch
+                # (``__main__.py``: ``os.environ.get("OPTIVIBE_WORKSPACE_ROOT") or
+                # os.getcwd()``), so no shipped caller reaches either today. That is why
+                # this is a ticket and not a fix -- unlike ``save_candidate``'s cached
+                # sink, which an audit reached and which IS fixed.
+                "workspace_root": _resolve_root(session)[0],
                 **_pre_fork_identity_keys(),
             }
-        best_zmx = os.path.join(design_dir, f"BEST_{safe_design}.zmx")
+        best_zmx = os.path.join(design_dir, _naming.best_zmx_name(design_name))
+
+        # THE KEEPER HAS NO EXISTENCE BELT AND THE CANDIDATE DOES. ``save_candidate``'s
+        # sink advances the index rather than write through a name already on disk
+        # (G16a/G16b), and that belt is measured to hold across the Windows case alias.
+        # The keeper had nothing equivalent, so the one artifact the owner is told to
+        # trust was the one artifact another design could silently replace.
+        #
+        # Refusing rather than advancing, because a design has exactly ONE keeper: there
+        # is no next index to move to, and publishing under a THIRD spelling would be a
+        # naming decision this refusal deliberately does not make.
+        _keeper_state, _collision = _keeper_owned_by_another_spelling(
+            design_dir, os.path.basename(best_zmx))
+        if _keeper_state == _KEEPER_DIR_UNLISTABLE:
+            # UNKNOWN OWNERSHIP REFUSES. Consistent with the ``workspace_unlistable``
+            # family already shipped in ``render_layout`` / ``capture_graphic`` for
+            # exactly this reason: a directory that cannot be listed cannot be shown to
+            # be free of a colliding spelling, and publishing over it would be the
+            # silent clobber this guard exists to stop.
+            return {
+                "ok": False,
+                "error_family": "workspace_unlistable",
+                "error": (
+                    f"REFUSED: the keeper directory {design_dir!r} could not be LISTED, "
+                    f"so it cannot be shown that no other design already owns "
+                    f"{os.path.basename(best_zmx)!r} under a different spelling. On a "
+                    f"case-insensitive filesystem those are the SAME FILE, so promoting "
+                    f"could replace another design's keeper. Nothing was published. Fix "
+                    f"the directory's permissions and promote again."),
+                "design_name": design_name,
+                "seq": seq,
+                "best_zmx": None,
+                "best_png": None,
+                "png_promoted": False,
+                "workspace_root": _resolve_root(session)[0],
+                **_pre_fork_identity_keys(),
+            }
+        if _collision is not None:
+            return {
+                "ok": False,
+                "error_family": "promote_keeper_name_collision",
+                "error": (
+                    f"REFUSED: the keeper {os.path.basename(best_zmx)!r} for design "
+                    f"{design_name!r} collides with {_collision!r}, which is already on "
+                    f"disk under a different spelling. On this filesystem those are the "
+                    f"SAME FILE, so publishing would replace another design's keeper "
+                    f"and rename its directory entry -- and that design could no longer "
+                    f"open its own keeper by name. Both spellings are legal design "
+                    f"names; what is refused is the overwrite. Rename one design, or "
+                    f"promote it in a workspace of its own."),
+                "design_name": design_name,
+                "seq": seq,
+                "best_zmx": None,
+                "best_png": None,
+                "png_promoted": False,
+                "workspace_root": _resolve_root(session)[0],
+                **_pre_fork_identity_keys(),
+            }
 
         # --- Round 4/5: ownership binding (the dogfood CRIT) -------------------
         # A seq is a WORKSPACE index (see the module docstring), so the seq-glob above
@@ -3772,8 +5104,10 @@ def promote_best(session, params):
         # is exactly what reopened the CRIT. ``cand_file`` is a basename confined to
         # zmx_dir by _resolve_candidate (the single normalisation point); do not
         # re-normalise it here or neither site is the authority.
-        cand_file, cand_owner, owner_evidence = _resolve_candidate(
-            zmx_dir, seq, os.path.basename(zmx_matches[0]), design_name)
+        cand_file = resolution["filename"]
+        cand_owner = resolution["owner"]
+        owner_evidence = resolution["evidence"]
+        cand_name_scheme = resolution["name_scheme"]
         src_zmx = os.path.join(zmx_dir, cand_file)
         if cand_owner is not None and cand_owner != design_name:
             # DISPROVE-and-refuse: refuse ONLY a PROVEN mismatch. An unrecorded owner
@@ -4290,7 +5624,7 @@ def promote_best(session, params):
         # wrote beside this .zmx in the same call." It does NOT claim the picture depicts
         # the audited geometry — under the save-time reorder the render runs OUTSIDE
         # the audit window.
-        best_png = os.path.join(design_dir, f"BEST_{safe_design}.png")
+        best_png = os.path.join(design_dir, _naming.best_png_name(design_name))
         png_promoted = False
         png_source = None
         src_png = None
@@ -4302,36 +5636,30 @@ def promote_best(session, params):
         if _png_blocked_by_identity(identity):
             best_png_reason = _PNG_UNPROVEN_ZMX
         else:
-            png_matches = sorted(glob.glob(os.path.join(png_dir, f"{seq:04d}_*.png")))
-            src_png = png_matches[0] if png_matches else None
+            # THE SIBLING, never "the first png carrying this number". For a v2
+            # name that is the file beside the ``.zmx``; for a legacy name it is the
+            # same stem under ``candidates/png/`` — its historical location. The
+            # resolver computed it from the file it resolved, so the picture cannot
+            # belong to a different candidate than the bytes being promoted.
+            _sibling_png = resolution["png_path"]
+            src_png = (_sibling_png
+                       if (isinstance(_sibling_png, str)
+                           and os.path.isfile(_sibling_png))
+                       else None)
             if src_png is None:
                 best_png_reason = _PNG_NO_PAIR
             elif not _is_png(src_png):
                 best_png_reason = _PNG_NOT_PNG
             else:
-                # Bind by digest when the usable record carries one. ``.get`` here
-                # AND the row validator's key requirement are a DELIBERATE
-                # defence-in-depth PAIR.
-                expected_png = rec.get("png_sha256") if rec is not None else None
-                if _is_hex64(expected_png):
-                    # ``_sha256_file`` returns None on ANY read fault, and
-                    # ``None != expected`` is True — so the shipped single compare
-                    # reported ``png_digest_mismatch`` ("the bytes DIFFER") when the
-                    # truth was "could not READ". Branch on ``is None`` FIRST: an
-                    # UNKNOWN is never asserted as a mismatch (the same distinction the
-                    # ``.zmx`` leg already makes).
-                    actual_png = _sha256_file(src_png)
-                    if actual_png is None:
-                        best_png_reason = _PNG_DIGEST_FAULT
-                    elif actual_png != expected_png:
-                        best_png_reason = _PNG_DIGEST
-                    else:
-                        png_identity = "digest_proven"
-                else:
-                    # No digest to bind against — no usable record, or the record
-                    # could not bind the picture. The pair is still the RIGHT seq; say
-                    # only that.
-                    png_identity = "paired_by_seq"
+                # THE ONE RULE, CONSUMED. Every publication decision for
+                # the picture is made by ``_png_publication_evidence`` and
+                # nowhere else, so a new evidence state cannot acquire a
+                # publishing fallthrough by default. The three re-audit HIGHs
+                # were three routes into ONE ``else``; there is no longer an
+                # ``else`` to route into.
+                png_identity, best_png_reason = _png_publication_evidence(
+                    rec, src_png, cand_file, owner_evidence,
+                    cand_name_scheme)
                 if best_png_reason is None:
                     try:
                         _atomic_copy(src_png, best_png)
@@ -4437,6 +5765,39 @@ def promote_best(session, params):
             # the artifact. This key names the artifact. It was already present on the
             # owner-mismatch refusal; the asymmetry was the defect.
             "candidate_file": cand_file,
+            # WHICH naming scheme the resolved artifact carries: "v2" for a
+            # per-design ``<design>_<NNN>_<label>.zmx``, "legacy" for a
+            # workspace-global ``<NNNN>_<label>.zmx``. Disclosure only.
+            "name_scheme": cand_name_scheme,
+            # MEASURED, and it CAN diverge -- this is a SIXTH instance
+            # of the two-independent-resolutions class, left in place DELIBERATELY
+            # because it is outside this cycle's charter (see the report; a ticket
+            # is owed and no ``TICKET-`` token is written here until it exists).
+            #
+            # ``promote_best`` resolves the root TWICE: once inside ``_design_dir``
+            # to build ``zmx_dir``, and again here for the disclosure.
+            # ``_resolve_root`` is a pure read, but it is not a read of a STABLE
+            # value. Two divergences were demonstrated against the real handler,
+            # both on a SUCCESSFUL promote (``ok:true``):
+            #   (A) tier 4 (no workspace_root, no projects_root, no sink) resolves
+            #       through ``os.getcwd()``. A ``chdir`` between the two calls made
+            #       the envelope report ``<away>/projects`` while the keeper was
+            #       published under ``<home>/projects/d``.
+            #   (B) a session whose root attribute answers differently on
+            #       successive reads published under root A and reported root B.
+            # BOTH ARE LATENT behind the shipped entrypoint, which pins
+            # ``workspace_root`` ONCE to a plain string at launch
+            # (``__main__.py``: ``os.environ.get("OPTIVIBE_WORKSPACE_ROOT") or
+            # os.getcwd()``), so no shipped caller reaches either today. That is why
+            # this is a ticket and not a fix -- unlike ``save_candidate``'s cached
+            # sink, which an audit reached and which IS fixed.
+            #
+            # >> AND THIS IS THE OTHER HALF OF THE DIVERGENCE A5 NAMED: the sibling key
+            # >> on ``save_candidate`` is derived from the SINK
+            # >> (``dirname(dirname(sink.run_dir))``) rather than from a second
+            # >> resolution. The two can disagree, the sink-read is the truthful one,
+            # >> and closing this side is the filed ticket's work rather than a comment's.
+            "workspace_root": _resolve_root(session)[0],
             # Where the promoted PICTURE came from. The domain is now
             # "candidate_pair" | null — "live_session_render" is UNREACHABLE.
             "best_png_source": png_source,
@@ -4557,9 +5918,22 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "judgment": "object",
     },
     description=(
-        "Snapshot the live system as a durable project candidate .zmx (+ paired "
-        "layout .png) under projects/<design>/candidates/; NEVER raises — inspect "
-        "result.ok. Runs a save-time clearance/visual gate over EVERY configuration: "
+        "Snapshot the live system as a durable candidate .zmx with its layout .png "
+        "BESIDE IT, both named <design-name>_<NNN>_<label>, under "
+        "<workspace root>/candidates/zmx/; NEVER raises — inspect result.ok. "
+        "<NNN> counts PER DESIGN from 001, so a second design in the same workspace "
+        "also starts at 001; the envelope key seq carries that per-design index and "
+        "name_scheme reads 'v2'. label defaults to the literal 'candidate' and is "
+        "sanitized for the filesystem — label_sanitized:true says yours was changed. "
+        "The workspace root is set ONCE at MCP launch from OPTIVIBE_WORKSPACE_ROOT "
+        "(else the launch cwd) and is echoed as workspace_root; no tool takes a path "
+        "argument. SaveAs also writes a .ZDA companion beside the .zmx — that is the "
+        "engine's own state file, it is tracked as zda_present and is not removed. "
+        "index_advanced:true (normally false) says the name this save asked for was "
+        "already on disk and the index was advanced rather than the bytes overwritten. "
+        "The optimizer's per-pass trail and save_snapshot's checkpoints do NOT land "
+        "here — they go to candidates/trail/, unattributed, so they never consume a "
+        "design's candidate number. Runs a save-time clearance/visual gate over EVERY configuration: "
         "WARNS (never blocks) when the geometry is manufacturably thin (clearance_ok:"
         "false + clearance_warning, tunable via min_air/min_glass), or clearance_ok:null "
         "when the gate could not CERTIFY clearance (a FOLDED system is one such cause; "
@@ -4601,7 +5975,11 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "malformed judgment REFUSES the save with zero mutation (judgment_param) rather "
         "than being dropped, so you are never left believing you recorded a reason you "
         "did not. judgment_receipt is read BACK from disk with the digest re-checked, so "
-        "it reports what is actually recorded against these exact bytes."
+        "it reports what is actually recorded against these exact bytes. "
+        "Reuse ONE design_name for a given design so its candidates share one trail -- "
+        "a new name starts a new per-design counter and a separate trail. This door and "
+        "promote_best persist designs into a per-design project workspace for the user "
+        "to review; that folder, not this envelope, is how the design reaches them."
     ),
 )
 
@@ -4623,8 +6001,17 @@ PROMOTE_BEST_SPEC = ToolSpec(
         "judgment": "object",
     },
     description=(
-        "Atomically promote a caller-asserted candidate seq to the project root "
+        "Atomically promote a caller-asserted candidate seq to the workspace root "
         "BEST_<design>.{zmx,png} (copy, not move; trail intact); NEVER raises. "
+        "seq is the PER-DESIGN index save_candidate returned, not a workspace-global "
+        "counter; name_scheme echoes whether the resolved file is a per-design ('v2') "
+        "or a historical workspace-global ('legacy') name. When a number cannot be "
+        "resolved to exactly ONE artifact it REFUSES with promote_candidate_ambiguous "
+        "and lists the candidates rather than guessing — that happens when this design "
+        "owns both a legacy and a per-design file at the number, or when no manifest "
+        "row exists and more than one file on disk answers to it. The remedy is to "
+        "re-save the one you mean under this design_name, which restores the manifest "
+        "row; the row, not the name, is what identifies a candidate. "
         "REFUSES a manufacturably-thin design at the keeper boundary "
         "(promote_clearance_violation) or one whose clearance could not be audited "
         "(promote_clearance_indeterminate) — the gate audits the LIVE session "
@@ -4662,6 +6049,9 @@ PROMOTE_BEST_SPEC = ToolSpec(
         "not usable). "
         "A picture is published only when it can be bound to the promoted .zmx "
         "(png_identity / best_png_reason say which); the render param is INERT. "
+        "This door and save_candidate persist designs into a per-design project "
+        "workspace for the user to review; that folder, not this envelope, is how the "
+        "design reaches them. "
         "See check_clearance, render_layout."
     ),
 )

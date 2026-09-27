@@ -395,7 +395,10 @@ SUBSTITUTE_GLASS_SPEC = ToolSpec(
         "(auto_loaded_catalog / also_available_in / auto_load_ambiguous), then "
         "authored in one call. Pass 'AIR' or '' to clear the surface back to air "
         "(cementing reversible in place). Gotcha: the API accepts a bad/unknown "
-        "glass SILENTLY — trust the read-back, not the clean call."
+        "glass SILENTLY — trust the read-back, not the clean call. Material writes "
+        "flow through THIS door and are NOT covered by the solve refusal that guards "
+        "set_surface, so a material cell already driven by a solve is not caught here "
+        "-- read solves on read_surface first."
     ),
 )
 

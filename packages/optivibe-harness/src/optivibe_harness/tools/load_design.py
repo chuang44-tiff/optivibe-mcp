@@ -135,11 +135,17 @@ def _resolve_design_path(session, params):
                 "load_design", "load_param",
                 f"'best' must be a non-empty design name, got {best!r}",
             )
-        from ..artifact_sink import _safe_name
-        from .workspace import _resolve_root
+        from .. import artifact_naming as _naming
+        from .workspace import _design_name_error, _resolve_root
+        # A non-canonical spelling is REFUSED through the SHARED door rather than
+        # resolved to a different file: two spellings that sanitize to one stem name
+        # the same bytes but are different contract subjects.
+        name_err = _design_name_error(best)
+        if name_err is not None:
+            return None, _ac.error_envelope("load_design", "load_param", name_err)
         root, _flat = _resolve_root(session)
         resolved = os.path.normpath(
-            os.path.join(root, f"BEST_{_safe_name(best)}.zmx")
+            os.path.join(root, _naming.best_zmx_name(best))
         )
         return resolved, None
 

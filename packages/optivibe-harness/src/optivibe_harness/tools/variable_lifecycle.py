@@ -341,7 +341,11 @@ VARY_SPEC = ToolSpec(
         "cell is already driven by a solve is REFUSED with family solve_driven "
         "(varying it would DELETE that relationship) while the other pairs still "
         "apply; pass replace_solve=true to replace them deliberately — each is then "
-        "listed in replaced_solves with its prior solve type."
+        "listed in replaced_solves with its prior solve type. "
+        "STARTING OVER: before deliberately re-varying from scratch, call "
+        "clear_all_variables to reset the DOF set to none (or pass "
+        "reset_variables=true to load_design / apply_lens_spec) -- otherwise you "
+        "inherit whatever was already variable."
     ),
 )
 

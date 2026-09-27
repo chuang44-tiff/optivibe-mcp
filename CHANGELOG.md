@@ -2,12 +2,34 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.1.11`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.1.12`). Each tag points at the merge
 commit that published that version, and every tag was verified against the four version
 literals in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.12] — 2026-09-26
+
+- **`render_mtf_vs_field`** — MTF plotted against real image height, tangential and sagittal,
+  one curve per frequency: the way lens manufacturers publish it. A reference curve set can be
+  overlaid for visual context; no comparison is computed.
+- Saved candidates are named for their design (`<design>_NNN_<label>.zmx`), and the layout
+  picture is saved beside each one.
+- The server instructions now fit the 2,048-character limit Claude Code applies to them. Rules
+  that no longer fit moved into the descriptions of the tools they govern, so what the server
+  sends and what an agent receives are the same text.
+- `add_math_constraint` checks an operand's sign convention against the reference layer before
+  authoring it.
+- The engine-session ledger records which MCP client started each engine.
+- `render_layout` no longer tells agents that the native export writes text; it writes real
+  PNGs.
+- `build_operand_semantics.py` writes 1-based manual page citations, matching the rest of the
+  reference layer.
+- New dependency floor: `matplotlib>=3.6`.
+- **Known limitation:** the workspace root is fixed when the server starts
+  (`OPTIVIBE_WORKSPACE_ROOT`, or the launch directory). Changing it requires restarting the MCP
+  server.
 
 ## [0.1.11] — 2026-09-17
 
@@ -75,6 +97,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Initial public release of optivibe-mcp.
 
+[0.1.12]: ../../compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/chuang44-tiff/optivibe-mcp/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/chuang44-tiff/optivibe-mcp/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/chuang44-tiff/optivibe-mcp/compare/v0.1.8...v0.1.9

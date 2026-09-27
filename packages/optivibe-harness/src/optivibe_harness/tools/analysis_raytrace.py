@@ -296,7 +296,11 @@ TRACE_RAYS_SPEC = ToolSpec(
         "WAVEFRONT ERROR in WAVES use opd_mode='CurrentAndChief' (self-references "
         "the chief; lone-ray-safe; the chief ray reads 0.0). opd_mode='Current' is "
         "the ray's RAW ABSOLUTE OPL in waves (state-dependent, NOT chief-referenced, "
-        "NOT a wavefront error). For RMS wavefront use analyze_wavefront (RWCE/RWRE)."
+        "NOT a wavefront error). For RMS wavefront use analyze_wavefront (RWCE/RWRE). "
+        "VERIFYING A FLAT AXIAL GRIN: use opd_mode='Current', convert with "
+        "abs(opd)*lambda_um*1e-3 to mm, and read the result differenced vs a homogeneous "
+        "control -- an absolute OPL on its own proves nothing about the gradient. Read "
+        "the radial index field with analyze_grin_profile."
     ),
 )
 

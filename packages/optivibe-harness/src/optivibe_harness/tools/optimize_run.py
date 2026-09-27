@@ -35,6 +35,7 @@ from ..server import ToolSpec
 from . import _config_common as _ccfg
 from . import _grin_index_common as _gic  # GRIN — cycle-safe (never imports optimize_run)
 from . import _optimize_common as _oc
+from . import _workspace_paths as _wsp  # S-1 — cycle-safe (never imports optimize_run)
 from . import analysis_spot  # cycle-safe (analysis_spot never imports optimize_run)
 from . import clearance  # cycle-safe (clearance never imports optimize_run)
 
@@ -203,6 +204,7 @@ def dry_run(session, params):
         "merit_spans_configs": span["merit_spans_configs"],
         "n_configs": span["n_configs"],
         "configs_covered": span["configs_covered"],
+        "merit_scalar_multi_config": span["merit_scalar_multi_config"],
     }
     if span["warning"] is not None:
         result["warning"] = span["warning"]
@@ -245,6 +247,15 @@ def _config_span_disclosure(system):
         "merit_spans_configs": merit_spans_configs,
         "n_configs": n_configs,
         "configs_covered": covered,
+        # ADDITIVE: on a MULTI-config system the SCALAR
+        # merit is an RMS over every config, so it DILUTES one broken config across
+        # all operands and a low merit can hide a bad position. True says exactly
+        # that the scalar is a multi-config aggregate -- it is NOT a finding and NOT
+        # a claim that any config is bad. Grade per-config with the config="all"
+        # graders. False on a single-config system, where the scalar is the whole
+        # story. The prose that used to carry this reached no agent (it was past the
+        # client instruction cap); this key is the carrier.
+        "merit_scalar_multi_config": n_configs > 1,
         "warning": warning,
     }
 
@@ -855,39 +866,44 @@ def _ckpt_reap(path):
         pass
 
 
-def _resolve_sink(session):
+def _resolve_sink(session, run_id):
     """Resolve the optimizer's artifact sink (persistence-workspace). NEVER raises.
 
     Prefer an explicitly-wired ``session.artifact_sink`` (back-compat); else FALL BACK
-    to the session-default workspace sink (``workspace._get_default_sink`` — the SAME
-    ``<root>/candidates/zmx`` sink ``save_candidate`` uses, so the ``pass00_before`` /
-    ``passNN_after`` ``.zmx`` trail shares one manifest/seq). The fallback BUILD touches
-    makedirs only (NO engine — its save_as defers ``session.system`` to call time);
-    only an unwritable root makes it raise -> we degrade to ``None`` (the caller emits
-    the warning ONLY in that case); the trail now always lands.
+    to a PER-RUN FORENSIC sink under ``<root>/candidates/trail/<run_id>``. The trail
+    no longer writes into the owner's ``candidates/zmx`` folder and no longer consumes
+    a design's candidate index: a per-pass snapshot has no design identity, so none is
+    invented. Counter from 0 per run, collision guard ACTIVE.
+
+    The fallback BUILD touches makedirs only (NO engine — its save_as defers
+    ``session.system`` to call time); only an unwritable root makes it raise -> we
+    degrade to ``None`` (the caller emits the bug-3 warning ONLY in that case).
+
+    Resolved ONCE and THREADED, never re-resolved per snapshot: three independent
+    resolutions of one run's sink is three chances to disagree about where the trail
+    lives, and with a per-run directory a second resolution would trip the collision
+    guard on its own run's directory.
     """
     sink = getattr(session, "artifact_sink", None)
     if sink is not None:
         return sink
-    from .workspace import _get_default_sink
     try:
-        return _get_default_sink(session)
+        return _wsp.trail_sink(session, run_id)
     except Exception:  # noqa: BLE001 — unwritable root -> no sink; caller warns
         return None
 
 
-def _snapshot(session, label, meta, trail):
+def _snapshot(session, label, meta, trail, sink):
     """Take one artifact snapshot, append its trail row; NEVER raises (decoupled).
 
     Reads the ``SnapshotResult`` via ``dataclasses.asdict`` so the source never
     forms the dotted ``result.<the snapshot-index field>`` literal the release guard
     guard flags as a legacy converter file-extension. Resolves the sink via
-    ``_resolve_sink`` (explicit -> session-default workspace sink fallback); a
+    ``_resolve_sink``, resolved ONCE per run by the caller and THREADED in; a
     sink that is STILL None (the workspace-root unwritable case) yields no row here
     (the caller emits the warning once, up front). Returns the row dict (or ``None``
     when no sink), so the caller can detect a failed snapshot.
     """
-    sink = _resolve_sink(session)
     if sink is None:
         return None
     # boundary guard: the spec mandates snapshot() NEVER aborts optimize. The
@@ -1148,7 +1164,8 @@ def _optimize_impl(session, params):
     # falls back to the session-default workspace sink when no explicit one is wired.
     # The bug-3 warning fires ONLY when even that fallback build fails (an unwritable
     # workspace root), not merely because session.artifact_sink was unset.
-    if _resolve_sink(session) is None:
+    sink = _resolve_sink(session, run_id)
+    if sink is None:
         warning = (
             "could not build an artifact sink (workspace root unwritable?); "
             ".zmx trail not captured"
@@ -1160,6 +1177,7 @@ def _optimize_impl(session, params):
         "pass00_before",
         {"run_id": run_id, "pass": 0, "cycles": cycles, "algorithm": algorithm_token},
         artifact_trail,
+        sink,
     )
     if before_row is not None and not before_row["ok"]:
         # F-E (round 5) — MERGE, never overwrite. Every other merge site in this module
@@ -1178,16 +1196,31 @@ def _optimize_impl(session, params):
         # runs. The test is right. The two halves are MUTUALLY EXCLUSIVE on that input,
         # not simultaneous.
         #
-        # ROUND-7 — SO WHY KEEP THE MERGE? Because "unreachable today" rests on an
-        # unstated premise: that ``_resolve_sink`` is DETERMINISTIC across one
-        # ``optimize()`` call. It is called THREE times per call (here, and once inside
-        # each ``_snapshot``), and its fallback does filesystem work (``makedirs``) under
-        # a bare ``except``. If the FIRST call fails and a later one succeeds -- a root
-        # created mid-run, a transient permission or disk condition -- the sink warning
-        # IS set and a later snapshot CAN produce a failing row, both halves populate,
-        # and the merge is load-bearing rather than dead. The premise is not enforced
-        # anywhere, so it is stated here rather than assumed: the merge stays, and it
-        # stays for a reason that survives the test that falsified the old one.
+        # THE EARLIER ESCAPE HATCH IS NOW STRUCTURALLY CLOSED, AND THE VERDICT ON
+        # THE ``:1201`` MERGE IS **DEAD**, not "unknown". This paragraph replaces an earlier one,
+        # which is RETIRED rather than edited, because the fact it rested on is gone.
+        #
+        # That one kept the merge alive on a NON-DETERMINISM window: ``_resolve_sink`` was
+        # called THREE times per ``optimize()`` (here, and once inside each
+        # ``_snapshot``), so a first call could fail while a later one succeeded and both
+        # halves would populate. Axis A3 resolved the sink ONCE and THREADED it: measured
+        # on this revision, ``_resolve_sink`` has exactly ONE ``ast.Call`` site in this module
+        # (line 1158) and ``_snapshot`` takes ``sink`` as a PARAMETER and never calls the
+        # resolver. **There is no later call to disagree with the first.**
+        #
+        # So the two halves are mutually exclusive BY CONSTRUCTION, on one resolution:
+        # ``sink is None`` sets the warning above and ``_snapshot`` returns ``None`` on
+        # its first statement (``if sink is None: return None``), so ``before_row is
+        # None`` and this branch cannot run; ``sink is not None`` leaves the warning
+        # channel empty here. That is a stronger statement than the earlier "unreachable under
+        # a deterministic resolver" — the resolver is no longer ASKED twice, so its
+        # determinism is not a premise at all.
+        #
+        # **THE MERGE STAYS, and the reason is now the only reason left:** it costs
+        # nothing and it is the correct shape if ``warning`` ever gains a SECOND source
+        # before this line. That residual premise — "``warning`` has no other source at
+        # this point" — is the one thing still unenforced, and it is what
+        # ``test_fe_the_pass00_site_cannot_clobber_the_sink_warning_TODAY`` pins.
         warning = _merge_warning(
             warning, f"pass00_before snapshot failed: {before_row.get('error')}"
         )
@@ -1205,6 +1238,7 @@ def _optimize_impl(session, params):
             cycles=cycles,
             run_id=run_id,
             artifact_trail=artifact_trail,
+            sink=sink,
             guard_warning=guard_warning,
             warning=warning,
             variables=variables,
@@ -1311,6 +1345,7 @@ def _optimize_impl(session, params):
                     "algorithm": algorithm_token,
                 },
                 artifact_trail,
+                sink,
             )
             if after_row is not None and not after_row["ok"]:
                 # F-E class (round 5) — MERGE. This ran inside the pass loop, so the bare
@@ -1457,12 +1492,19 @@ def _optimize_impl(session, params):
         "variables_count": variables,
         "passes": passes_run,
         "run_id": run_id,
+        # WHERE the forensic trail landed. It is a per-run directory under
+        # candidates/trail/ and is NOT the owner's candidates/zmx folder: a
+        # per-pass snapshot has no design identity, so it names no design and
+        # consumes no design's candidate index.
+        "artifacts_dir": getattr(sink, "run_dir", None),
+        "workspace_root": _wsp.workspace_root(session),
         "merit_desync": bool(desync),
         "mfe_merit_before": safe_float(merit_before),
         "merit_readback_disagreement": bool(disagreement),
         "merit_spans_configs": span["merit_spans_configs"],
         "n_configs": span["n_configs"],
         "configs_covered": span["configs_covered"],
+        "merit_scalar_multi_config": span["merit_scalar_multi_config"],
         "readback": {
             "opt_current": safe_float(merit_after),
             "mfe_recalc": safe_float(mfe_recalc),
@@ -1501,7 +1543,7 @@ def _optimize_impl(session, params):
 
 def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, run_id,
                           artifact_trail, guard_warning, warning, variables, wall_start,
-                          nudge_disclosure=None, grin_dn_max=None,
+                          sink=None, nudge_disclosure=None, grin_dn_max=None,
                           negative_weight_scan=None):
     """The Hammer (global-search) fork of ``optimize`` (§2.4/§2.5).
 
@@ -1695,6 +1737,7 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
             "run_time_m": safe_float(run_time_m),
         },
         artifact_trail,
+        sink,
     )
 
     # (PARALLEL tail — CALL the same leaf helpers, NO DLS refactor.)
@@ -1794,12 +1837,19 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
         "variables_count": variables,
         "passes": 1,
         "run_id": run_id,
+        # WHERE the forensic trail landed. It is a per-run directory under
+        # candidates/trail/ and is NOT the owner's candidates/zmx folder: a
+        # per-pass snapshot has no design identity, so it names no design and
+        # consumes no design's candidate index.
+        "artifacts_dir": getattr(sink, "run_dir", None),
+        "workspace_root": _wsp.workspace_root(session),
         "merit_desync": False,
         "mfe_merit_before": safe_float(merit_before),
         "merit_readback_disagreement": bool(disagreement),
         "merit_spans_configs": span["merit_spans_configs"],
         "n_configs": span["n_configs"],
         "configs_covered": span["configs_covered"],
+        "merit_scalar_multi_config": span["merit_scalar_multi_config"],
         "note": (
             "Hammer is wall-time bounded (run_time_m); cycles/max_passes are not used."
         ),
@@ -3942,6 +3992,11 @@ OPTIMIZE_SPEC = ToolSpec(
         "Run a bounded local optimization (the closed loop): preflight, run cycles, "
         "and classify the merit verdict (improved/stable/diverged) from the "
         "optimizer's own initial-vs-current pair, so a no-op never reads as improved. "
+        "Each pass saves a file into a PER-RUN directory under "
+        "candidates/trail/<run_id>/ (echoed as artifacts_dir) — NOT in "
+        "candidates/zmx/, so it never consumes a design's candidate number and never "
+        "appears among its keepers; the file count there is 1 + n_passes. "
+        "save_candidate is what names a design's keeper. "
         "verdict has 7 values: improved, stable, diverged, improved_unphysical, "
         "improved_unverified, stable_unphysical, stable_unverified. improved means the "
         "merit FELL; stable means it did NOT move outside tolerance (an exact no-op or a "
@@ -3995,6 +4050,18 @@ OPTIMIZE_SPEC = ToolSpec(
         "exceeds this cap. The floored path (build_merit(grin_dn_max=Δ)) needs NO param here — "
         "its per-point box is audited automatically (grin_index_box_violated_warning); pass "
         "grin_dn_max at optimize only for the no-floor spread check. n<1 is always flagged. "
+        "WORKFLOW, the part no other door can tell you because you are already here. "
+        "PREFLIGHT before you run: set variables (set_variable) plus a merit function, "
+        "then dry_run to confirm readiness WITHOUT opening the optimizer. Before you "
+        "optimize, save_snapshot (or save_candidate) the START form -- the per-pass "
+        "files this tool captures are not that, so the start form is yours to keep. "
+        "After each accepted optimize, save_candidate the result; once you have a "
+        "keeper, promote_best it. "
+        "merit_scalar_multi_config:true says the scalar merit is an RMS over MORE THAN "
+        "ONE configuration, so it dilutes one broken config across all operands and a "
+        "low merit can hide a bad position -- read PER-CONFIG performance with the "
+        "config=\"all\" graders (get_first_order, analyze_strehl, analyze_wavefront, "
+        "check_clearance) rather than accepting the scalar as proof. "
         "See dry_run, normalize_stop, build_merit, save_candidate."
     ),
 )
