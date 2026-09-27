@@ -48,7 +48,13 @@ class SaveAsFn(Protocol):
 
 @dataclass(frozen=True)
 class SnapshotResult:
-    """Outcome of one ``snapshot`` call."""
+    """Outcome of one ``snapshot`` call.
+
+    ``index_advanced`` / ``requested_index`` disclose the pre-write existence check
+    having fired: the target the caller asked for was already on disk, so the index
+    was advanced rather than the bytes overwritten. On the nominal path they read
+    ``False`` / the index that was used.
+    """
 
     ok: bool
     path: str
@@ -56,6 +62,8 @@ class SnapshotResult:
     seq: int
     label: str
     error: Optional[str] = None
+    index_advanced: bool = False
+    requested_index: Optional[int] = None
 
 
 def _safe_name(label: str) -> str:
@@ -199,11 +207,64 @@ class ArtifactSink:
         finally:
             _io.FSYNC_ENABLED = prev
 
-    def snapshot(self, label: str, meta: Optional[dict] = None) -> SnapshotResult:
+    #: Bound on the pre-write existence-check advance loop. A thousand consecutive
+    #: occupied names is not a collision any more, it is a broken workspace.
+    _MAX_INDEX_ADVANCE = 1000
+
+    def _compose(self, label, index, filename, design_name):
+        """The name for ``index`` under this call's scheme. ONE composer per scheme.
+
+        With no caller-supplied name this is the legacy trail scheme and ``index`` is
+        the instance counter. With one, it is the v2 candidate scheme and the design
+        part is recovered EXACTLY — never by pattern-matching the index token, which
+        is ambiguous for a design whose own name ends in a delimiter.
+        """
+        from . import artifact_naming
+        if filename is None:
+            return artifact_naming.trail_name(index, label)
+        return artifact_naming.candidate_zmx_name(design_name, index, label)
+
+    @staticmethod
+    def _design_part(filename, index, label):
+        """The design prefix of a v2 basename, or ``None`` when it is not one.
+
+        Recovered by stripping the SUFFIX the composer built from values this call
+        already holds (``index`` and ``label``), so it is exact where a search for
+        the index token is not: for design ``alpha`` with label ``001_x`` and for
+        design ``alpha_001`` with label ``x`` the basename is the same string, and
+        only the known label tells them apart.
+        """
+        from . import artifact_naming
+        suffix = (
+            f"_{int(index):0{artifact_naming.CANDIDATE_INDEX_DIGITS}d}"
+            f"_{_safe_name(label)}.zmx"
+        )
+        if not filename.endswith(suffix):
+            return None
+        return filename[: len(filename) - len(suffix)]
+
+    def snapshot(self, label: str, meta: Optional[dict] = None, *,
+                 index: Optional[int] = None,
+                 filename: Optional[str] = None) -> SnapshotResult:
         """Take one snapshot. ALWAYS appends a manifest row. NEVER raises.
 
-        Builds ``f"{seq:04d}_{_safe_name(label)}.zmx"``, calls ``save_as`` on the
-        target, then applies the durability gate (``isfile AND getsize >= min``).
+        With ``index`` and ``filename`` BOTH ``None`` this is byte-identical to what
+        it has always done: the instance counter names the file and is advanced.
+        With BOTH supplied the caller owns the name — ``os.path.basename(filename)``
+        is written into ``run_dir``, the recorded index is ``index``, and the instance
+        counter is NOT touched. Exactly one supplied is a programmer error and raises
+        ``ValueError`` (the call site is inside ``save_candidate``'s existing ``try``).
+
+        **Pre-write existence check, on BOTH paths.** If the target already exists the
+        index is advanced, the name recomposed, and the write retried (bounded by
+        ``_MAX_INDEX_ADVANCE``; past that the result is ``ok=False``). ``SaveAs``
+        silently overwrites and the durability gate would then pass on someone else's
+        bytes, which is the silent-overwrite class this closes. It is a BELT: when the
+        caller's counter could see every file for this design the computed target does
+        not exist and this never fires.
+
+        Builds the name, calls ``save_as`` on the target, then applies the durability
+        gate (``isfile AND getsize >= min``).
         A pass yields ``ok=True``; a failure or exception yields ``ok=False`` with
         an ``error`` string. The manifest row is written in both cases. If the
         manifest append itself fails, the audit row is lost: ``snapshot()`` still
@@ -211,13 +272,94 @@ class ArtifactSink:
         ``error="manifest_write_failed: ..."``, increments ``dropped_rows``, and
         routes a note to the logger/stderr so the caller can never miss it.
         """
-        seq = self._seq
-        filename = f"{seq:04d}_{_safe_name(label)}.zmx"
+        caller_named = filename is not None
+        if caller_named != (index is not None):
+            raise ValueError(
+                "snapshot(index=, filename=) must be supplied TOGETHER or not at all"
+            )
+
+        design_part = None
+        if caller_named:
+            filename = os.path.basename(filename)
+            design_part = self._design_part(filename, index, label)
+            seq = index
+        else:
+            seq = self._seq
+            filename = self._compose(label, seq, None, None)
+
+        requested_index = seq
+        index_advanced = False
+        error = None
+        # DECOMPOSABILITY IS A PRECONDITION, NOT A COLLISION HANDLER. Until this fix the
+        # ``design_part is None`` refusal lived ONLY inside the advance loop below, so a
+        # caller-supplied basename that does not carry its own
+        # ``_{index:0Nd}_{label}.zmx`` suffix was ACCEPTED whenever the target happened
+        # to be FREE. MEASURED by an audit:
+        # ``snapshot("x", index=1, filename="not_our_convention.zmx")`` called
+        # ``SaveAs`` and returned ``ok=True, error=None``. The naming contract is that such a
+        # name cannot be DECOMPOSED and is refused rather than guessed at -- a property
+        # of the name, not of what else is on disk. Checked here, before anything is
+        # written, so the guarantee no longer depends on a collision to fire.
+        # ``save_candidate`` always composes through ``candidate_zmx_name``, so this
+        # refuses a FUTURE caller, never today's.
+        # ``not design_part``, NOT ``is None`` [S-5]. The strip yields the EMPTY
+        # STRING for a name like ``_001_x.zmx``: it DOES carry the suffix, so the
+        # ``is None`` form accepted it and returned ``ok=True``. But the design it
+        # decomposes to is the empty string, which ``_design_name_error`` refuses, so
+        # no design can ever own that file -- a name nothing can promote, written and
+        # certified. Same class as, one value over.
+        if caller_named and not design_part:
+            error = ("filename does not carry its own index suffix: "
+                     f"{filename!r} cannot be decomposed into (design, index, label), "
+                     f"so a free index cannot be recomposed for it")
+        # Pre-write existence check. A name already on disk is never written through:
+        # advance the index and recompose. Recomposition needs the design part, so a
+        # caller-supplied name this call cannot decompose refuses instead of guessing.
+        attempts = 0
+        while error is None and os.path.exists(os.path.join(self.run_dir, filename)):
+            if attempts >= self._MAX_INDEX_ADVANCE or (
+                    caller_named and not design_part):
+                error = (
+                    f"target exists and no free index was found within "
+                    f"{self._MAX_INDEX_ADVANCE} advances: {filename}"
+                )
+                break
+            attempts += 1
+            seq += 1
+            index_advanced = True
+            filename = self._compose(label, seq, filename if caller_named else None,
+                                     design_part)
+
         target = os.path.join(self.run_dir, filename)
 
         ok = False
         size = 0
-        error = None
+
+        if error is not None:
+            row = {
+                "schema_version": MANIFEST_SCHEMA_VERSION,
+                "run_id": self.run_id,
+                "seq": seq,
+                "ts": _io.utc_now_iso(),
+                "label": label,
+                "filename": filename,
+                "bytes": 0,
+                "ok": False,
+                "error": error,
+                "meta": meta,
+                "index_advanced": index_advanced,
+                "requested_index": requested_index,
+            }
+            try:
+                self._write_manifest_row(row)
+            except Exception:  # noqa: BLE001 — never raise out of snapshot
+                self.dropped_rows += 1
+            if not caller_named:
+                self._seq = seq
+            return SnapshotResult(
+                ok=False, path=target, bytes=0, seq=seq, label=label, error=error,
+                index_advanced=index_advanced, requested_index=requested_index,
+            )
 
         try:
             self.save_as(target)
@@ -250,6 +392,8 @@ class ArtifactSink:
             "ok": ok,
             "error": error,
             "meta": meta,
+            "index_advanced": index_advanced,
+            "requested_index": requested_index,
         }
         try:
             self._write_manifest_row(row)
@@ -275,9 +419,13 @@ class ArtifactSink:
                 except Exception:  # noqa: BLE001 — never let the note raise
                     pass
 
-        self._seq += 1
+        if not caller_named:
+            # The advance loop may have moved PAST the instance counter; the counter
+            # follows the name that was actually written, never the one that was not.
+            self._seq = seq + 1
         return SnapshotResult(
-            ok=ok, path=target, bytes=size, seq=seq, label=label, error=error
+            ok=ok, path=target, bytes=size, seq=seq, label=label, error=error,
+            index_advanced=index_advanced, requested_index=requested_index,
         )
 
     def load_manifest(self) -> list:

@@ -71,7 +71,7 @@ import os
 import sys
 
 from ._stdio_log import _LOG_FILENAME, _open_log_fd
-from .composite import CompositeDispatcher
+from .composite import compose_dispatchers
 from .lazy import LazyHarnessDispatcher
 from .server import _safe_error_text
 from .server_mcp import build_composite_mcp_server
@@ -414,7 +414,8 @@ def main():
         # disk. Accepted consequence: a slow REFERENCE-tool call before any engine-open is
         # not breadcrumb-logged (the breadcrumb log exists for the ENGINE hang, which is
         # post-activation). ``workspace_root`` is pinned above so the activation can place
-        # the file in the workspace.
+        # the file in the workspace. Reference dispatches are logged only through the
+        # already-active logger (axis 11); see composite.LoggedReferenceDispatcher.
 
         harness = _build_harness_dispatcher(
             session, call_warn_threshold_s=call_warn_threshold_s
@@ -428,13 +429,7 @@ def main():
             )
             return 2
 
-        pairs = []
-        if harness is not None:
-            pairs.append(("harness", harness))
-        if reference is not None:
-            pairs.append(("reference", reference))
-
-        composite = CompositeDispatcher(pairs)
+        composite = compose_dispatchers(harness, reference, session)
         _serve(composite, pipe_in_fd, pipe_out_fd)
         return 0
     finally:

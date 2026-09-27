@@ -438,7 +438,10 @@ SET_FIELD_SPEC = ToolSpec(
         "in place (e.g. a weight only), pass 'index' with any of x/y/weight — "
         "this PRESERVES the field's vignetting (a replace-all zeroes it). Resolve "
         "the field type (angle vs object/image height) from intent; a wrong member "
-        "is loud-rejected. 'field_type' is required except for an in-place edit."
+        "is loud-rejected. 'field_type' is required except for an in-place edit. "
+        "CONSTANT-IMAGE-HEIGHT ZOOMS: prefer a ParaxialImageHeight field type -- it is "
+        "constant across configurations -- over per-config field angles, which have to "
+        "be re-derived per config and drift apart."
     ),
 )
 

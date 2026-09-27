@@ -25,6 +25,17 @@ route-by-name; the only NEW mechanisms it adds are:
 ``mcp`` is NOT imported here (the MCP adapter lives in ``server_mcp.py`` and
 imports ``mcp`` lazily). ``dispatch`` NEVER raises out to the caller.
 
+``LoggedReferenceDispatcher`` and ``compose_dispatchers`` add REFERENCE-dispatch
+visibility to the ledger without weakening the lazy-boot lock. AXIS 11 (a settled
+design decision) is the obligation: a reference-only
+session must still leave NOTHING on disk, so the wrapper only ever READS an
+already-installed logger — it can never create one, never activate logging, and
+never open the engine. ``compose_dispatchers`` is THE production composition, so a
+guard can compose through the same path ``main()`` does. The resulting
+reference-dispatch count is structurally partial; the partial-denominator statement
+lives in ONE place — ``interaction_log.COVERAGE_NOTE`` and its module docstring —
+and is not restated here.
+
 Live ZOS-API integration: the composite routes a real ``get_system_info`` (harness
 + live session) AND a real ``lookup_glass`` (reference + DB conn) through the SAME
 composite in the live integration test.
@@ -136,3 +147,143 @@ class CompositeDispatcher:
                 "error": _safe_error_text(exc),
                 "error_family": "internal",
             }
+
+
+class LoggedReferenceDispatcher:
+    """Log each dispatch of a wrapped (reference) dispatcher through an ALREADY-ACTIVE logger.
+
+    AXIS 11 (owner-reaffirmed): this class NEVER creates an
+    ``InteractionLog``, NEVER calls ``LazyHarnessDispatcher._activate_logging()``, never
+    touches fd 1/2, never opens the engine, never imports ``mcp``. ``logger_provider`` is a
+    zero-arg callable returning a logger-or-None, called PER DISPATCH (it is never cached);
+    when it returns None the wrapper is a pure pass-through and NOTHING is written. The
+    wrapper holds no attribute naming the session; it holds ONLY the callable -- which, in
+    the production composition, is a closure whose cell DOES retain the session. The claim
+    "the wrapper cannot reach the session" is WITHDRAWN and is not asserted anywhere: a
+    security boundary against Python introspection is not a goal of this cycle.
+
+    The wrapped object is consumed through the two-method duck-type ``composite.py`` already
+    relies on (``list_tools`` / ``dispatch``). The reference package is not imported,
+    subclassed or inspected. No ``__getattr__`` delegation. No counter, no once-only
+    state, no breadcrumb: the wrapper is STATELESS beyond its three ctor attributes.
+
+    OUTCOME GUARANTEE, stated as the narrower TRUE claim: for every dispatch on which the
+    logging layer raises nothing or raises only ``Exception`` subclasses, (i) the inner is
+    invoked EXACTLY ONCE, and (ii) the wrapper's outcome is the unwrapped dispatcher's BY
+    IDENTITY -- the same returned object (``is``), or the same raised exception instance
+    (``is``, any ``BaseException``). ``__traceback__`` and ``__context__`` are NOT part of
+    the claim: a re-raise adds a frame, and a replaced-then-recovered exception carries the
+    logging fault as its ``__context__`` (informative, not a difference in outcome).
+
+    DELIMITED, not covered: a ``BaseException`` (``KeyboardInterrupt`` / ``SystemExit``)
+    that ORIGINATES in the logging layer -- in ``record_call`` / ``log()`` / ``_exc_to_dict``,
+    during entry or exit -- propagates through the wrapper, exactly as it propagates through
+    ``log()``, ``_activate_logging`` and every other never-raise net in this repo. That
+    asymmetry is DELIBERATE and repo-wide (a deliberate abort is never swallowed), and this
+    wrapper does not widen its ``except`` to ``BaseException`` to buy identity there,
+    because doing so would swallow an abort. In that case the inner has still run AT MOST
+    ONCE (never twice); the answer is lost to the abort, as it would be anywhere else.
+    """
+
+    def __init__(self, inner, logger_provider, *, arg0_label: str = "conn"):
+        self._inner = inner
+        self._logger_provider = logger_provider
+        self._arg0_label = arg0_label
+
+    @property
+    def inner(self):
+        """The wrapped dispatcher (read-only accessor; there is no ``__getattr__``)."""
+        return self._inner
+
+    def list_tools(self):
+        """Return ``inner.list_tools()`` verbatim. NEVER logs (advertising is not a call)."""
+        return self._inner.list_tools()
+
+    def dispatch(self, tool_name, params):
+        """Dispatch through the inner, logging ONE row iff a logger is already installed.
+
+        Completion is tracked by FLAGS, never by the returned value: "the inner returned"
+        is ``invoked and inner_exc is None``, so no comparison against ``envelope`` exists
+        and an inner returning ANY object -- a sentinel, ``None``, a non-dict -- has that
+        object returned by identity. The inner's exception is captured at the point it is
+        raised, so whatever ``record_call`` does on exit (re-raise it, REPLACE it because
+        ``_exc_to_dict``'s ``str(e)`` raised, or an injected manager SUPPRESSING it) the
+        wrapper re-raises the ORIGINAL instance.
+
+        A non-str / unhashable ``tool_name`` reaches only the ``intent`` f-string and the
+        inner; neither raises on it, so the wrapper's answer equals the unwrapped
+        dispatcher's. (``CompositeDispatcher.dispatch`` envelopes those as ``internal``
+        before any sub-dispatcher sees them; direct callers can still get here.)
+        """
+        try:
+            logger = self._logger_provider()
+        except Exception:  # noqa: BLE001 - a broken provider degrades to pass-through
+            logger = None
+        if logger is None:
+            # Nothing written, nothing counted, nothing remembered (axis 11).
+            return self._inner.dispatch(tool_name, params)
+
+        invoked, envelope, inner_exc = False, None, None
+        try:
+            with logger.record_call(
+                intent=f"dispatch {tool_name}",
+                call=f"{tool_name}({self._arg0_label}, params)",
+                args=params,
+            ) as holder:
+                invoked = True  # set BEFORE the call: no path can reach a 2nd inner call
+                try:
+                    envelope = self._inner.dispatch(tool_name, params)
+                except BaseException as exc:  # noqa: BLE001 - capture the ORIGINAL instance
+                    inner_exc = exc
+                    raise
+                holder["result"] = envelope
+        except Exception:  # noqa: BLE001 - a logging-layer fault, or the inner's own raise
+            if inner_exc is not None:
+                raise inner_exc  # the inner's ORIGINAL exception, by identity
+            if not invoked:
+                # The logging layer failed BEFORE the inner ran -> exactly one inner call.
+                return self._inner.dispatch(tool_name, params)
+            # invoked and no inner exception => the inner RETURNED; the logging layer failed
+            # on exit. The answer stands: fall through.
+        if inner_exc is not None:
+            # The context manager SUPPRESSED the inner's raise -- the unwrapped dispatcher
+            # would have raised, so the wrapper raises that same instance.
+            raise inner_exc
+        return envelope
+
+
+def compose_dispatchers(harness, reference, session):
+    """THE production composition. ``main()`` calls this and nothing else composes.
+
+    Builds ``[("harness", harness), ("reference", LoggedReferenceDispatcher(reference,
+    logger_provider))]`` omitting a ``None`` entry, where ``logger_provider`` is
+    ``lambda: getattr(session, "_logger", None)`` -- the shipped idiom (``server.py:567``,
+    ``lazy.py:232``) as a PURE READ. It can never activate anything, and because it reads
+    ``session._logger`` on EVERY dispatch it can never cache a stale logger.
+
+    WHICH CONDITION GATES A REFERENCE ROW: "``logger_provider()`` returns a logger" -- i.e.
+    ``session._logger`` holds an INSTALLED ``InteractionLog`` -- and NOTHING weaker. Neither
+    "a dispatchable harness call was made" nor "``_activate_logging()`` RAN" is sufficient:
+    the activation flag is set in a ``finally`` EVEN WHEN activation failed, so an
+    activation that raises before logger construction leaves ``_logger`` None, never
+    retries, and makes every later dispatch -- harness and reference alike -- a silent
+    pass-through for the process lifetime. No retry and no durability feature is added here.
+
+    File EXISTENCE is a CONSEQUENCE, not the gate: a filesystem-existence check is
+    explicitly REJECTED (it would make the wrapper depend on disk state and drop rows after
+    an operator deletion). A reference row can therefore legitimately be ``seq 0`` of a
+    freshly created JSONL -- after a harness call whose ``open()`` failed, or after the file
+    was deleted. Neither breaches axis 11: a dispatchable harness call occurred in both.
+
+    Returns a ``CompositeDispatcher``; raises ``CompositionCollisionError`` exactly as
+    before. This function exists so a guard can compose through the SAME path production
+    uses (OF-1) -- the three existing lazy-boot guards compose the BARE reference dispatcher
+    by hand and cannot see a change in the shipped composition.
+    """
+    logger_provider = lambda: getattr(session, "_logger", None)  # noqa: E731 - the shipped idiom
+    pairs = []
+    if harness is not None:
+        pairs.append(("harness", harness))
+    if reference is not None:
+        pairs.append(("reference", LoggedReferenceDispatcher(reference, logger_provider)))
+    return CompositeDispatcher(pairs)

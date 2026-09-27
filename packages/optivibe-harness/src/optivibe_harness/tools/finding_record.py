@@ -234,6 +234,17 @@ def record_findings(session, params):
         return _refusal(_finding.FINDING_UNBOUND, AUDIT_RECORD_ABSENT,
                         design_name=design_name, seq=seq,
                         read_state=_finding.READ_ABSENT)
+    # PARTITION BY OWNER FIRST. The read is seq-scoped so OWNER_MISMATCH stays reachable, but
+    # two designs can now own index 1, and a conflict between THEIR rows is not a
+    # conflict at all — it is two different designs' candidates. Own rows decide;
+    # only when this design owns NONE of them does the foreign set answer.
+    own_rows = [r for r in audit_rows if r.get("design_name") == design_name]
+    if not own_rows:
+        # Every row at this index belongs to someone else. OWNER_MISMATCH is the honest
+        # answer ("that candidate is not yours"), never "no such candidate".
+        return _refusal(_finding.FINDING_UNBOUND, OWNER_MISMATCH,
+                        design_name=design_name, seq=seq, read_state=audit_state)
+    audit_rows = own_rows
     identities = {(r.get("design_name"), r.get("filename"), r.get("zmx_sha256"))
                   for r in audit_rows}
     if len(identities) > 1:

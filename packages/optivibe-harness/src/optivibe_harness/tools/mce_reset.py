@@ -370,7 +370,10 @@ REMOVE_CONFIGURATION_SPEC = ToolSpec(
         "last) — inspect current_after / active_config_shifted. Refuses the last/only config "
         "(use reset_to_single_config to go to one config) and an out-of-range index with "
         "ZERO mutation. Gotcha: when removing several, delete the HIGHEST index first to "
-        "avoid the shift bookkeeping. See reset_to_single_config, describe_configurations."
+        "avoid the shift bookkeeping, and inspect current_after. To rebuild a "
+        "multi-config (zoom) design as a SINGLE-config system, call "
+        "reset_to_single_config rather than loading an unrelated blank file. "
+        "See reset_to_single_config, describe_configurations."
     ),
 )
 
@@ -388,7 +391,11 @@ RESET_TO_SINGLE_CONFIG_SPEC = ToolSpec(
         "surviving_config (the config that was active — its values survive), mce_rows_cleared, "
         "and apply_lens_spec_unblocked. Gotcha: this CLEARS the per-config authoring — "
         "re-author with set_config_operand / set_config_value to rebuild. Use this instead of "
-        "loading an unrelated blank file. See remove_configuration, describe_configurations."
+        "loading an unrelated blank file -- do NOT load an unrelated blank file to get "
+        "back to one config. To drop ONE configuration instead, call "
+        "remove_configuration(config=n): delete the HIGHEST index first when removing "
+        "several, and inspect current_after because the active config index may shift. "
+        "See remove_configuration, describe_configurations."
     ),
 )
 

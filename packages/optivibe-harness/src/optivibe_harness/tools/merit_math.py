@@ -6,13 +6,20 @@ merit constraint from **already-resolved operand codes** + an agent-**stated
 relationship** + the agent-**read** ``sign_convention`` + **stable labels** +
 target/weight, via the EXISTING ``apply_merit_recipe`` scaffold.
 
-THE decisive architectural fact (math-tool §0): a harness handler receives ONLY the
-ZOS ``session`` as arg-0 — it physically CANNOT call ``lookup_operand`` in-process (the
-reference tools take a SQLite conn threaded by a SEPARATE dispatcher; the composite
-reconciles the two arg-0 contracts at the OUTER route-by-name boundary). So the
-grounding + disambiguation happen in the AGENT, BETWEEN tool calls; this composer takes
-a RESOLVED CODE, never a phrase/query. There is literally NO phrase->code path in
-this handler — that is the no-silent-wrong enforcement mechanic (§6.1, structural).
+THE decisive architectural fact (CORRECTED by S-REF-3): a
+harness handler receives ONLY the ZOS ``session`` as arg-0, so the reference tools' own
+SQLite conn — threaded by a SEPARATE dispatcher, reconciled at the OUTER route-by-name
+boundary — never reaches it. That is a CONTRACT, not a physical limit. Until S-REF-3
+this docstring said the handler "physically CANNOT call ``lookup_operand`` in-process";
+that was FALSE and unexamined for three months. The editable install puts
+``optivibe_reference`` in the SAME interpreter (measured), and the handler now reads the
+catalog directly through ``_grounding`` to CHECK the agent's relayed ``sign_convention``.
+
+What is unchanged is the no-silent-wrong mechanic: disambiguation still happens in the
+AGENT, between tool calls, and this composer still takes a RESOLVED CODE, never a
+phrase/query. There is still NO phrase->code path in this handler (it is
+structural). Grounding is ADDITIVE — where no catalog is built it degrades to exactly
+the pre-S-REF-3 behaviour, so a cold clone loses nothing it has today.
 
 The handler flow (math-tool §4):
 
@@ -38,11 +45,16 @@ engine fault below the cross-check inherits ``apply_merit_recipe``'s structured
 families (``merit_recipe_*`` / ``surface_write``), never an opaque dispatch
 ``internal``.
 
-Only TWO NEW error families (§7): ``merit_math_unresolved`` (unknown code / a refs
-label that resolves to no prior operand / null-or-missing sign_convention / a
-relationship not in the enum) and ``merit_math_crosscheck`` (a REFUSED cross-check
-step; OR a ``warn`` step without ``confirm_crosscheck``). Everything downstream REUSES
-the Phase-A recipe families verbatim.
+THREE new error families (the third added by S-REF-3): ``merit_math_unresolved``
+(unknown code / a refs label that resolves to no prior operand / null-or-missing
+sign_convention / a relationship not in the enum), ``merit_math_crosscheck`` (a REFUSED
+cross-check step; OR a ``warn`` step without ``confirm_crosscheck``), and
+``merit_math_ungrounded`` (the relayed ``sign_convention`` contradicts what the
+reference catalog states for that code — carries BOTH values in structured fields).
+The families stay distinguishable on purpose: a MISSING convention is an unresolved
+intent, a CONTRADICTED one is a grounding failure, and ``merit_math_unresolved`` still
+fires first for the input that satisfies both. Everything downstream REUSES the Phase-A
+recipe families verbatim.
 
 Live ZOS-API integration; unit-tested against fixture-seeded fakes
 (``FakeRecipeMFE``) whose DIFF.Value is COMPUTED from its live ``Op#`` pointers
@@ -52,10 +64,33 @@ from ..enums import _resolve_enum
 from ..errors import ToolParamError
 from ..server import ToolSpec
 from . import _config_common as _ccfg
+from . import _grounding
 from . import _merit_cells as _mc
 from . import _merit_math as _mm
 from . import _optimize_common as _oc
 from .optimize_merit_io import _phase1_validate, apply_merit_recipe
+
+
+def _engine_version(session):
+    """The live OpticStudio version as ``"<major>.<minor>.<sp>"``, or None.
+
+    NEVER raises. The string shape is the one the probes capture
+    (the live boot and session probes) and is byte-identical
+    to the reference catalog's ``optic_studio_version`` (measured: both ``"25.1.0"``),
+    which is what makes the S-REF-3 freshness comparison meaningful rather than a
+    format guess.
+
+    ``session.app`` raises ``SessionClosedError`` on a closed session, and dereferencing
+    the .NET proxy can raise a raw remoting exception on a poisoned channel. Neither may
+    reach the caller: a version we cannot read means "do not ground this call", never a
+    failed dispatch.
+    """
+    try:
+        app = session.app
+        return ".".join(str(v) for v in (
+            app.ZOSMajorVersion, app.ZOSMinorVersion, app.ZOSSPVersion))
+    except Exception:  # noqa: BLE001 — see docstring; a missing version is not an error
+        return None
 
 
 def add_math_constraint(session, params):
@@ -125,6 +160,12 @@ def add_math_constraint(session, params):
             f"could not resolve the live MeritOperandType enum to validate codes: {exc}",
         )
 
+    # S-REF-3: the LIVE engine version, read ONCE per call. It gates whether the
+    # reference catalog is allowed to contradict the agent (see ``_grounding``) —
+    # a catalog built against a different engine than the one running may not refuse
+    # anything. None (unreadable, or offline) simply means no grounding this call.
+    engine_version = _engine_version(session)
+
     cross_check = []          # the per-operand verdict list (preview + summary)
     for index, spec in enumerate(operands):
         if not isinstance(spec, dict):
@@ -177,6 +218,36 @@ def add_math_constraint(session, params):
             )
 
         sign_convention = spec.get("sign_convention")
+
+        # S-REF-3: the handler's OWN read of the reference, instead of believing the
+        # relayed value. Fires ONLY when the catalog states a convention AND is
+        # trustworthy; every other case is ``unavailable`` and leaves the pre-S-REF-3
+        # behaviour untouched (owner ruling: tracked floor + enrich). Absence is NEVER
+        # a refusal — the live enum above already owns whether a code exists.
+        # The accessor owns a never-raise belt of its own, so this second net is
+        # defense-in-depth rather than the primary guarantee. It is here because this
+        # module's docstring promises the handler NEVER raises and names EVERY faulting
+        # step as guarded — leaving the one new call bare would make that promise false
+        # about this cycle's own edit, which is the defect class S-REF-3 exists to fix.
+        # A breached belt degrades to "no grounding", never to a broken dispatch.
+        try:
+            g_status, reference_convention = _grounding.sign_convention_for(
+                code, engine_version)
+        except Exception:  # noqa: BLE001 — see above; a grounding fault is never fatal
+            g_status, reference_convention = _grounding.GROUNDING_UNAVAILABLE, None
+        if (g_status == _grounding.GROUNDING_OK
+                and reference_convention != sign_convention):
+            return _oc.error_envelope(
+                "add_math_constraint", "merit_math_ungrounded",
+                f"operand[{index}] ({code}) sign_convention mismatch: you supplied "
+                f"{sign_convention!r}, the reference catalog states "
+                f"{reference_convention!r}. Re-read the operand with lookup_operand and "
+                f"pass the value it returns.",
+                index=index, code=code,
+                relayed_sign_convention=sign_convention,
+                reference_sign_convention=reference_convention,
+            )
+
         status, reason = _mm._cross_check(relationship, sign_convention)
         verdict = {
             "index": index,

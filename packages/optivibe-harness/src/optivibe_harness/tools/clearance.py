@@ -1745,7 +1745,17 @@ CHECK_CLEARANCE_SPEC = ToolSpec(
         "Run after optimize to catch a thin/negative gap a merit floor missed. An authored "
         "GRIN element (Gradient2/Gradient3) is audited as a solid (glass) element at "
         "min_glass; see grin_geometric_audit. A non-authorable GRIN family member is listed "
-        "under grin_not_audited. See get_first_order, describe_surfaces."
+        "under grin_not_audited. "
+        "LIMITATION, on the key this tool returns: clearance_ok:true means the per-gap "
+        "audit produced an UNBROKEN run of gap records, from the first optical gap "
+        "through the back airgap, each with a finite edge thickness, and found no "
+        "violation. It is a claim about COVERAGE, not correctness -- it is not checked "
+        "against an independent surface count and it does NOT mean the geometry is "
+        "right. Absence of a finding is not proof; still look at the layout. "
+        "clearance_ok:null means the gate could not CERTIFY clearance -- a FOLDED "
+        "system, an unfaithful surface model, an unreadable global frame or an "
+        "incomplete config sweep; read clearance_summary.coverage_reason for WHICH "
+        "rather than guessing. See get_first_order, describe_surfaces."
     ),
 )
 

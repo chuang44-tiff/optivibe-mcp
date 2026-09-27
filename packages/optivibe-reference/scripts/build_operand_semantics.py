@@ -11,7 +11,7 @@ Provenance split (spec §1/§4):
   ``*VA`` -> ``equality``. NO citation (the code itself is the evidence).
 - ``family`` — an ``MN*`` whose oracle prose says "greater than" -> ``boundary_ge``;
   an ``MX*`` whose oracle prose says "less than" -> ``boundary_le``. Cited to the
-  oracle page (``manual:p<page>``). An MN/MX WITHOUT the keyword falls through.
+  oracle page (``manual:p<page+1>``, the 1-based physical page via ``manual_build.citation_page``). An MN/MX WITHOUT the keyword falls through.
 - ``manual`` — the small, cited minimize/maximize overlay (RMS-error figure-of-
   merit family). Each entry is gated behind explicit oracle support + a page cite.
 - ``null`` source — a DESCRIBED operand the rule can't otherwise decide gets
@@ -63,6 +63,7 @@ from optivibe_reference.catalog_build import (  # noqa: E402
     _oracle_boundary_dir,
     load_synonyms_rows,
 )
+from optivibe_reference import manual_build  # noqa: E402  citation_page (S-REF-1 #2)
 
 INVENTORY_PATH = os.path.join(_CAPTURES, "operand_inventory_438.json")
 ORACLE_PATH = os.path.join(_CAPTURES, "operand_raw_descriptions.json")
@@ -86,25 +87,27 @@ OUT_PATH = os.path.join(_DATA_DIR, "operand_semantics.json")
 # oracle frames every one as "RMS spot radius ..." / "RMS wavefront error ..." (a
 # smaller-is-better error magnitude that the merit function drives toward zero).
 # The ``# cite:`` comment paraphrases that framing + the oracle page (provenance:
-# tokens + page cite, no verbatim prose).
+# tokens + page cite, no verbatim prose). The page is the 1-based physical page the
+# emitted handle names (``manual:p<N>``, N = the oracle's 0-based ``page`` + 1 via
+# ``manual_build.citation_page``, S-REF-1 #2), so it matches the committed JSON.
 # ---------------------------------------------------------------------------
 MINIMIZE_OVERLAY = {
-    # cite: manual p1188 — RMS spot radius wrt centroid (Gaussian-quadrature); an
+    # cite: manual p1189 — RMS spot radius wrt centroid (Gaussian-quadrature); an
     # RMS error magnitude, smaller is better.
     "RSCE": "minimize",
-    # cite: manual p1188 — RMS spot radius wrt chief ray (Gaussian-quadrature).
+    # cite: manual p1189 — RMS spot radius wrt chief ray (Gaussian-quadrature).
     "RSCH": "minimize",
-    # cite: manual p1188 — RMS spot radius wrt centroid (rectangular-grid).
+    # cite: manual p1189 — RMS spot radius wrt centroid (rectangular-grid).
     "RSRE": "minimize",
-    # cite: manual p1188 — RMS spot radius wrt chief ray (rectangular-grid).
+    # cite: manual p1189 — RMS spot radius wrt chief ray (rectangular-grid).
     "RSRH": "minimize",
-    # cite: manual p1188 — RMS wavefront error wrt centroid (Gaussian-quadrature).
+    # cite: manual p1189 — RMS wavefront error wrt centroid (Gaussian-quadrature).
     "RWCE": "minimize",
-    # cite: manual p1188 — RMS wavefront error wrt chief ray (Gaussian-quadrature).
+    # cite: manual p1189 — RMS wavefront error wrt chief ray (Gaussian-quadrature).
     "RWCH": "minimize",
-    # cite: manual p1189 — RMS wavefront error wrt centroid (rectangular-grid).
+    # cite: manual p1190 — RMS wavefront error wrt centroid (rectangular-grid).
     "RWRE": "minimize",
-    # cite: manual p1189 — RMS wavefront error wrt chief ray (rectangular-grid).
+    # cite: manual p1190 — RMS wavefront error wrt chief ray (rectangular-grid).
     "RWRH": "minimize",
 }
 # ``maximize`` overlay: intentionally empty (no operand has explicit larger-is-
@@ -177,10 +180,10 @@ def decide(code, oracle, described):
     oracle_entry = oracle.get(code)
     if code[:2] == "MN" and _oracle_says(oracle_entry, "greater than"):
         page = oracle_entry["page"]
-        return "boundary_ge", "family", "manual:p{}".format(page)
+        return "boundary_ge", "family", "manual:p{}".format(manual_build.citation_page(page))
     if code[:2] == "MX" and _oracle_says(oracle_entry, "less than"):
         page = oracle_entry["page"]
-        return "boundary_le", "family", "manual:p{}".format(page)
+        return "boundary_le", "family", "manual:p{}".format(manual_build.citation_page(page))
 
     if code in MINIMIZE_OVERLAY or code in MAXIMIZE_OVERLAY:
         value = MINIMIZE_OVERLAY.get(code) or MAXIMIZE_OVERLAY.get(code)
@@ -191,7 +194,7 @@ def decide(code, oracle, described):
             "{}: overlay entry has no oracle page to cite".format(code)
         )
         page = oracle_entry["page"]
-        return value, "manual", "manual:p{}".format(page)
+        return value, "manual", "manual:p{}".format(manual_build.citation_page(page))
 
     if code in described:
         # No inherent direction the rule can decide — caller chooses target +

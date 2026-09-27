@@ -1634,7 +1634,17 @@ SET_ZOOM_SPEC = ToolSpec(
         "rolls back the whole compose on any REAL miss. Gotcha: needs >= 2 configs "
         "(add_configuration first); array Z needs a preceding airgap (refused on glass); "
         "each array channel images at a different plane unless you also author a "
-        "per-config focus. See add_configuration, set_config_value, "
+        "per-config focus. "
+        "ARCHITECTURE, decided BEFORE you compose: give a zoom ENOUGH zoom-variable air "
+        "spaces AND a FIXED positive master/relay group -- decouple imaging from the zoom "
+        "kernel. Prefer >=3 zoom-variable air gaps + a fixed rear master group; a "
+        "2-moving-gap form often has too few DOF for a WIDE zoom ratio, because the "
+        "compensator must hold EFL AND focus at once and can run out of travel at the "
+        "tele extreme. Too few per-config thickness DOF for the requested zoom ratio is a "
+        "common failure -- add groups before fighting an un-focusable extreme. This door "
+        "cannot check the form for you; a converged compose over too few DOF is still too "
+        "few DOF. "
+        "See add_configuration, set_config_value, "
         "set_current_configuration, describe_configurations."
     ),
 )

@@ -410,7 +410,13 @@ GET_MTF_SPEC = ToolSpec(
         "series (large). Pass at_frequencies=[f1,f2,...] for SUMMARY mode: each "
         "series returns only the interpolated tangential+sagittal at those "
         "frequencies (compact; null+note past the grid max). The series map: idx0 = "
-        "the diffraction-limit series, idx1..N = the fields in order; on-axis T == S."
+        "the diffraction-limit series, idx1..N = the fields in order; on-axis T == S. "
+        "OBSCURED PUPILS: on a system with a central obscuration (a Cassegrain "
+        "secondary shadow) author a CircularObscuration on the obstructing surface "
+        "with set_surface_aperture FIRST, so this number is computed on the TRUE "
+        "obscured pupil, not the full circle (a central CircularObscuration "
+        "min_radius=0, max_radius=R plus an outer CircularAperture forms the "
+        "annulus)."
     ),
 )
 

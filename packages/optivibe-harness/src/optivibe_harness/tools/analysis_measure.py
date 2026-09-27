@@ -2435,7 +2435,10 @@ GET_FIRST_ORDER_SPEC = ToolSpec(
         "Excludes EFLX/EFLY (they return a 1e10 sentinel for rotationally-symmetric "
         "systems). A suspicious reading is dropped from the headline and named in flags. "
         "config (None|int|'all') selects the multi-config configuration: None=current, "
-        "int=that config, 'all'=sweep every config (per_config + config_differs)."
+        "int=that config, 'all'=sweep every config (per_config + config_differs). "
+        "INTERPRETING THE READOUT: place the image surface near paraxial focus before "
+        "treating readout heuristics as defects -- a bare flat axial window may "
+        "legitimately read afocal, and that is the model, not a bug."
     ),
 )
 
@@ -2450,7 +2453,13 @@ ANALYZE_STREHL_SPEC = ToolSpec(
         "is the best-focus value). best_focus (default true) runs a back-airgap focus "
         "scan that is always restored; set false for a read-only current-plane call. "
         "Gotcha: the loaded-plane Strehl is lower than the best-focus Strehl — do not "
-        "conflate them."
+        "conflate them. "
+        "OBSCURED PUPILS: on a system with a central obscuration (a Cassegrain "
+        "secondary shadow) author a CircularObscuration on the obstructing surface "
+        "with set_surface_aperture FIRST, so this number is computed on the TRUE "
+        "obscured pupil, not the full circle (a central CircularObscuration "
+        "min_radius=0, max_radius=R plus an outer CircularAperture forms the "
+        "annulus)."
     ),
 )
 

@@ -391,7 +391,20 @@ LOOKUP_OPERAND_SPEC = ToolSpec(
         "candidate blindly - within the arithmetic/relational family (DIFF, DIVI, "
         "OPGT, OPLT, EQUA, ...) the rank-1 hit can be a plausible-but-wrong sibling, "
         "so read the candidate descriptions and sign_convention and pick the code "
-        "yourself. See search_reference for open-ended manual questions."
+        "yourself. "
+        "RESOLVE CODES HERE, BETWEEN CALLS: read the descriptions AND the "
+        "sign_convention before you pass a code anywhere; never trust the rank-1 hit "
+        "blindly -- inside an operator family it can be confidently wrong. A "
+        "merit-function operand comes from this door. "
+        "TOLERANCE CODES (TDE) NEED domain=\"tolerance\": that selects the structured "
+        "tolerance catalog (ranked codes + category/precondition_class + units, the same "
+        "code-not-phrase grounding as merit). WITHOUT domain=\"tolerance\" this door "
+        "mis-routes a tolerance ask -- it defaults to the merit catalog and returns "
+        "confidently WRONG merit operands (TOLR/VOLU/EQUA). Always pass "
+        "domain=\"tolerance\" for a tolerance code; search_reference is the manual-prose "
+        "fallback for chapter context. "
+        "This lookup takes no engine seat. "
+        "See search_reference for open-ended manual questions."
     ),
     kind="operand",
     param_types={

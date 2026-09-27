@@ -12,16 +12,15 @@ dependencies:
   - numpy
   - pip:
       - pythonnet        # bridges Python <-> the typed .NET ZOS-API via `clr`
-      - pytest           # test runner
+      - pytest           # unit + adversarial + integration test runner
       - psutil           # process introspection (server reaper, scoped to spawned PIDs)
       - mcp>=1.28,<2     # the single OptiVibe MCP stdio server (python -m optivibe_harness)
-      # ^ BOUNDED pin, kept in lockstep with pyproject.toml (the same fact,
-      # declared twice).  mcp 2.0.0 removed the low-level `Server.list_tools()`
-      # / `.call_tool()` decorator surface this harness builds its stdio server
-      # on, so an unpinned `mcp` resolves to a release that cannot boot -- and
-      # it fails SILENTLY, because stdio is redirected to devnull before the
-      # failing import runs, so the child exits 1 with nothing on stdout or
-      # stderr.  The floor is the version the server loop is written against.
+      # ^ BOUNDED pin, kept in lockstep with pyproject.toml (same fact, twice).
+      # mcp 2.0.0 removed the low-level `Server.list_tools()`/`.call_tool()` decorator
+      # surface this harness is built on, so an unpinned `mcp` resolves to a version
+      # that cannot boot -- and fails SILENTLY (stdio is already devnull'd at that
+      # point, so the child exits 1 with 0 bytes on stdout AND stderr). The floor is
+      # the probe-pinned, test-gated version; see pyproject.toml for the full rationale.
       # The single OptiVibe MCP composes the reference tool set in-process: after
       # building this env, also run (from packages/optivibe-harness/):
       #     pip install -e ../optivibe-reference
@@ -30,3 +29,5 @@ dependencies:
       # ZOSPy is an optional convenience wrapper over the ZOS-API; add it here if
       # the harness chooses to depend on it. Direct pythonnet is the baseline.
       # - zospy
+      - matplotlib>=3.6  # BOUND only: conda installs it above. ``text.parse_math``
+      # (3.6+) draws render_mtf_vs_field; kept in lockstep with pyproject.toml.

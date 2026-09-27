@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "optivibe-harness"
-version = "0.1.11"
+version = "0.1.12"
 description = "OptiVibe harness: ZOS-API automation, typed tools, and the single OptiVibe MCP"
 requires-python = ">=3.11"
 classifiers = [
@@ -37,7 +37,10 @@ dependencies = [
     # or stderr.  The floor is the version the server loop is written against.
     "mcp>=1.28,<2",
     "psutil",
-    "matplotlib",
+    # mcp is built on anyio, and ``__main__`` calls ``anyio.run`` directly.
+    "anyio",
+    # ``text.parse_math`` (matplotlib 3.6) draws the MTF-vs-field figure.
+    "matplotlib>=3.6",
     "numpy",
 ]
 
