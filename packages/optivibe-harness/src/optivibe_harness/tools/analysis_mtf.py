@@ -72,7 +72,13 @@ def _validate_at_frequencies(value):
                 f"at_frequencies elements must be numbers, got "
                 f"{type(f).__name__} {f!r}"
             )
-        ff = float(f)
+        try:
+            ff = float(f)
+        except OverflowError:  # (0.1.13 E5): a JSON int too big for a float
+            raise ToolParamError(
+                f"at_frequencies elements must be finite numbers representable as a float, got an "
+                f"integer of {f.bit_length()} bits"
+            ) from None
         if not math.isfinite(ff):
             raise ToolParamError(
                 f"at_frequencies elements must be finite numbers, got {f!r}"
@@ -357,9 +363,9 @@ def _get_mtf_at(session, params):
                     }
                 )
 
-    # Spatial-frequency unit is per-lens-unit (cycles/mm for the baseline mm lens),
-    # derived from the same SystemData.Units source (§6).
-    lens_unit = _ac._lens_units_string(system)
+    # The lens unit is still read through the unit helper, for its transport-loss re-raise only: the
+    # spatial-frequency unit is NOT derived from it -- see ``x_units`` below.
+    _ac._lens_units_string(system)
     grid_max = None
     if series_out and "frequency" in series_out[0]:
         freq_data = series_out[0].get("frequency", [])
@@ -371,7 +377,8 @@ def _get_mtf_at(session, params):
         "ok": True,
         "number_of_data_series": n,
         "x_label": "Spatial Frequency",
-        "x_units": f"cycles/{lens_unit}",
+        # the FFT MTF abscissa is cycles/mm for EVERY lens unit, measured mm/cm/in/m
+        "x_units": "cycles/mm",
         "y_units": "modulation (dimensionless 0..1)",
         "series": series_out,
     }

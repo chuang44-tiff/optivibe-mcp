@@ -162,6 +162,12 @@ REMEDY = {   # pinned strings; asserted verbatim
         "  python packages/optivibe-reference/scripts/build_vendor_data.py\n"
         "It builds every plane it can, and names the live-probe scripts to run first for any "
         "operand step it reports as SKIPPED. " + VENDOR_DATA_LICENCE_CLAUSE),
+    "stale_build": ("the manual corpus was built by another builder version (older or newer "
+                    "than this reference); it is not corrupt, it is out of date. Rebuild it "
+                    "from the repository root:\n"
+                    "  python packages/optivibe-reference/scripts/build_vendor_data.py\n"
+                    "(or packages/optivibe-reference/scripts/build_manual_corpus.py, which "
+                    "rebuilds this plane alone, where that script is present)."),
     "mcp_range": 'pip install "mcp>=1.28,<2"',
     "runtime_override": ("PYTHONNET_RUNTIME is set to a value other than netfx. The ZOS-API "
                          "assemblies target the .NET Framework and the bootstrap only "

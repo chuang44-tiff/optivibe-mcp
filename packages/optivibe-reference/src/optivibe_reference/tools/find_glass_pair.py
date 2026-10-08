@@ -446,7 +446,7 @@ FIND_GLASS_PAIR_SPEC = ToolSpec(
         "best-first (most Abbe separation at the smallest partial-dispersion "
         "mismatch). Gotcha: an ambiguous bare anchor name returns an "
         "ambiguous_glass candidate list - qualify the catalog. See find_glasses to "
-        "window-search single glasses and lookup_glass for one glass's full data."
+        "window-search single glasses. See lookup_glass for one glass's full data."
     ),
     kind="glass",
     param_types={

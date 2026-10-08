@@ -13,8 +13,10 @@ are deliberate and locked (§5):
   engine, no lock, no .NET classification — a handler answers from the threaded
   DB connection, never a module-global.
 
-``mcp`` is NOT imported here (the MCP adapter lives in ``server_mcp.py`` and
-imports ``mcp`` lazily). The dispatch envelope NEVER raises out to the caller.
+``mcp`` is NOT imported here, and this package has no MCP adapter of its own: the
+single OptiVibe MCP facade lives in the HARNESS (``optivibe_harness.server_mcp``),
+which composes this ``Dispatcher`` in-process. The dispatch envelope NEVER raises
+out to the caller.
 """
 import importlib
 import json
@@ -129,7 +131,8 @@ class ToolSpec:
     # (required AND optional) -> its JSON type token (number/integer/string). OPTIONAL
     # by default (empty) so a spec without it still loads; the harness MCP adapter
     # emits a typed inputSchema from it and falls back to the legacy all-string schema
-    # when it is empty (server_mcp._build_input_schema). Mirrors harness ToolSpec:78.
+    # when it is empty (optivibe_harness.server_mcp._build_input_schema). Mirrors
+    # harness ToolSpec:78.
     param_types: Dict[str, str] = field(default_factory=dict)
 
 

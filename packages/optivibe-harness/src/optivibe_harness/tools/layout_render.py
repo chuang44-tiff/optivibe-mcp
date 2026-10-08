@@ -28,6 +28,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass as _dataclass
+from dataclasses import replace as _dc_replace
 from time import perf_counter
 
 from .. import artifact_naming as _naming
@@ -36,11 +37,15 @@ from ..artifact_sink import _safe_name
 from ..errors import ToolParamError
 from . import _workspace_paths as _wsp  # S-1 — cycle-safe (never imports layout_render)
 from ..server import ToolSpec
+from ..server import _wedge_recorded as _slot_wedged
 from . import _asphere_cells as _asph
 from . import _config_common as _cfg
 from . import _layout_geometry as _geom
 from . import _layout_rays as _rays
-from ._image_gate import _is_png
+from . import _layout_native as _native
+from . import _layout_register as _lr
+from . import _ray_coverage as _rc
+from ._image_gate import _is_png, _png_ihdr
 
 _DEFAULT_TITLE = "Layout"
 _N_SAMPLES = 81  # linspace(-h, +h, 81) per §3.2
@@ -214,6 +219,8 @@ _FOOTER_FALLBACK_XY = (0.995, 0.005)
 #: applies ``dpi / 72`` and works in pixel space throughout, and therefore does
 #: deliver points.
 _DISCLOSURE_GAP_PT = 4.0
+#: dogfood F-4: the legend seat search steps down in this many points per candidate.
+_LEGEND_STEP_PT = 2.0
 _DISCLOSURE_X = 0.02          # axes coords — the stack's left anchor
 _DISCLOSURE_TOP = 0.98        # axes coords — the stack's top anchor
 _DISCLOSURE_FLOOR = 0.02      # axes coords — below this a box has left the canvas
@@ -279,8 +286,18 @@ _S_AP_EXT = (
     "caps_extended."
 )
 _S_OVERFLOW = "{n} MORE DISCLOSURES NOT SHOWN — full list in the result."
+# native-layout-retool: the shared far-object rule's figure strings, placed as
+# FIGURE-level captions under the scope footer (`_draw_far_captions`).
+_S_FAR = "S{k} {ROLE} NOT DRAWN: {gap:g} mm away ({ratio:.0f}x lens length)."
+_S_FAR_UNCAPTIONED = "Far-object exclusion applied; caption unavailable."
+_S_SPECK = ("Lens fills {fill:.0%} of the frame and no end qualifies for exclusion "
+            "(speck_no_cut).")
 _S_SAG = (
     "S{k} PROFILE NOT MEASURED — sag inputs unreadable (radius/conic/coefficients)."
+)
+_S_SAG_PARAXIAL = (
+    "S{k} PROFILE NOT MEASURED — a paraxial surface: an ideal element with no sag to "
+    "draw."
 )
 _S_SCOPE = (
     "projection check: prescription-level only (CB terms + surface types); "
@@ -756,6 +773,147 @@ def _resolve_element_outline(params):
     return None
 
 
+#: The ``renderer`` vocabulary (native-layout-retool). Exact tokens,
+#: no aliasing, no case-folding -- the element_outline rule.
+_RENDERER_VALUES = ("native", "self", "native_3d", "native_shaded")
+#: A7: THE switch point -- the ONLY place in src/ that names the default renderer,
+#: read in exactly one place (`_resolve_renderer`). The served description never says
+#: which token is the default, so flipping this constant is CODE-ONLY for release
+#: purposes: it needs NO hand-declared description change.
+_DEFAULT_RENDERER = "native"
+#: The tokens this build can draw. Every other member of `_RENDERER_VALUES` is
+#: refused "not available in this build" (the fixed refusal order, third rule).
+#:: every token is built -- the native cross-section AND the two 3-D views.
+_RENDERERS_BUILT = ("self", "native", "native_3d", "native_shaded")
+#: (export_3d): the native 3-D tokens -> the `_layout_native.export_3d` kind.
+#: Only ever EXPLICIT (the default never selects a 3-D view), so every failure token
+#: maps to a refusal through `_NATIVE_EXPLICIT_FAMILY`, never to a fallback.
+_RENDERERS_3D = {"native_3d": "viewer", "native_shaded": "shaded"}
+_S_3D = "UNSTAMPED 3-D VIEW - OpticStudio {kind}; no surface numbers are drawn."
+_S_3D_KIND = {"viewer": "3-D viewer export", "shaded": "shaded model export"}
+_S_3D_COLOUR_NULL = "3-D ray-colour consistency check not available ({reason})"
+#: Why a DEFAULT render fell back from its first choice. Frozen; order = the
+#: check order. Declared here so a test can discover it from the module. Since
+#: the default is `native`: a default render that cannot run natively falls back to
+#: `self` with one of these (an EXPLICIT native is refused instead; an explicit
+#: `self` never falls back).
+_RENDERER_FALLBACK_TOKENS = (
+    "non_axial", "configuration_unreadable", "grin_surface", "extent_unreadable",
+    "registration_unmodelled", "native_unavailable", "native_settings_unverified",
+    "native_export_failed", "native_not_png", "registration_unverified",
+)
+#: What an EXPLICIT `renderer="native"` returns for each token -- a refusal family,
+#: or `None` for the two registration tokens, which ship the native picture UNSTAMPED.
+_NATIVE_EXPLICIT_FAMILY = {
+    "non_axial": "render_unavailable",
+    "configuration_unreadable": "render_unavailable",
+    "grin_surface": None,              # explicit native proceeds + a flag
+    "extent_unreadable": "render_unavailable",
+    "registration_unmodelled": None,   # unstamped native
+    "native_unavailable": "render_unavailable",
+    "native_settings_unverified": "render_failed",
+    "native_export_failed": "render_failed",
+    "native_not_png": "render_gate_failed",
+    "registration_unverified": None,   # unstamped native
+}
+#: The SELF-only envelope keys, removed from a native envelope (the vendor drew
+#: the ink these describe, so under native they would describe nothing).
+_NATIVE_INK_KEYS = ("element_outline", "asphere_sag_modelled", "asphere_sag_approximate",
+                    "rim_truncated", "n_rays_drawn", "effective_draw_rays", "n_fields")
+# --- the native overlay canvas -- all [unmeasured choice] unless tagged ---- #
+_STAMP_ARM_PX = 36        # clears the 5 % margin at H>=400
+_GUTTER_STAMP_PX = 170    # arm 36 + _STAMP_TIER_MAX x ~16 px + a rider box
+_GUTTER_LINE_PX = 14      # disclosure strip: 14 px per line + 6
+_GUTTER_CAPTION_PX = 22   # title strip
+_GUTTER_MAX_LINES = 8     # disclosure strip cap (the self render caps by axes fit)
+_MARKER_INSET_PX = 10     # far-end marker row: this far above the bottom gutter's edge
+_OVERLAY_DPI = 100        # figsize = px / dpi at dpi -> integer output pixels
+#: The `registration` keys `_register_and_verify` measures (plus the
+#: curve-interior check). One tuple: the envelope copy reads this list.
+_REGISTRATION_INFO_KEYS = (
+    "bbox_sides_graded", "bbox_residual_px", "tip_points_checked", "tip_residual_px",
+    "ambiguous_surfaces", "subpixel_surfaces", "profile_points_checked",
+    "profile_residual_px", "profile_unverified_surfaces", "profile_unchecked_surfaces",
+    "profile_not_applicable", "profile_unmeasurable_surfaces",
+)
+_S_WITHHELD = ("STAMPS WITHHELD - registration {status}; no surface numbers are drawn "
+               "(see result.registration).")
+_S_FALLBACK = ("Drawn by OptiVibe's own renderer: the native export could not be used "
+               "({token}).")
+#: R-6 (MEASURED, captures/probe_native_layout_slot.json): 6 of 6 raising export runs
+#: left the engine's single tool slot unusable -- OpenCrossSectionExport,
+#: OpenLocalOptimization and OpenBatchRayTrace all returned None -- and only a NEW
+#: session recovered it. The FACT (this run raised) is stated; that THIS session's slot
+#: is wedged is the measured consequence, phrased as "likely".
+#: Served only when the latch is ON RECORD -- chosen by
+#: re-reading the dispatcher's own arbiter (``_slot_latched``), never the verdict.
+_S_SLOT_RAISED = (
+    "the export run RAISED; a raising export was measured (6 of 6) to wedge the "
+    "engine's single tool slot, so this session's tool slot is now WEDGED: the session "
+    "refuses every slot tool (the native export, optimize, batch ray traces) and "
+    "saving or loading a design, which were measured to block a wedged engine -- "
+    "restart the MCP process (restart the session or reconnect the optivibe server), "
+    "then load_design the last design saved before the wedge")
+#: The raise is NOT on record (the observation was missing, failed, disagreed, or the
+#: latch write failed), so the session will NOT refuse the save / load tools that
+#: block a wedged engine. Self-contained: it points at no other flag.
+_S_SLOT_RAISED_UNLATCHED = (
+    "the export run RAISED; a raising export was measured (6 of 6) to wedge the "
+    "engine's single tool slot, but this session has no record of that latch, so it "
+    "will NOT refuse the slot, save and load tools "
+    "that were measured to block a wedged engine -- do not save or load from this "
+    "session: restart the MCP process (restart the session or reconnect the optivibe "
+    "server), then load_design the last design saved before the wedge")
+#: The degrader rule: on a session whose tool-slot latch is set, the
+#: native export AND the ray read are NOT attempted ([measured]: every later open
+#: returned None). Replaces 's `_S_SLOT_PRIOR_RAISE` (the advisory latch is gone).
+_S_SLOT_LATCHED = (
+    "not attempted: this session's tool slot is latched wedged (a native export was "
+    "observed to wedge it); the native export and the ray trace would open nothing "
+    "until a new engine session -- restart the MCP process to recover")
+#: The wedge SIGNATURE without a raise, latched.
+_S_SLOT_SIGNATURE = (
+    "native export: the tool's Close() returned False and it still reported running "
+    "(the measured wedge signature); this session's tool slot is now latched wedged")
+#: The ABSENT/UNREADABLE band: NO latch, one flag.
+_S_SLOT_UNCONFIRMED = (
+    "native export: the tool's Close() did not confirm the slot was released "
+    "(Close() {close!r}, IsRunning {running!r}); the slot may be unusable")
+_S_SLOT_NOT_RECORDED = (
+    "tool-slot observation not recorded (session has no observe_tools_slot)")
+_S_SLOT_OBSERVE_FAILED = "tool-slot observation failed ({exc}); not recorded"
+#: The ONE figure line for a sampled-ray failure (one line whatever the
+#: field count). Conditional wording -- the drawing MAY omit or cut them short.
+_S_RAYS_MISSING = (
+    "SAMPLED RAYS FAILED for field(s) {fields}: {n_failed} of {n_sampled} sampled rays "
+    "did not reach the image; the drawing may omit or cut them short. See "
+    "ray_coverage.")
+
+
+class _RenderParams(dict):
+    """The normalised params COPY, plus the one internal fact that is not a served
+    parameter: ``renderer_strict`` (was the renderer given explicitly)."""
+
+    renderer_strict = False
+
+
+def _resolve_renderer(params):
+    """-> ``(effective_token, strict)`` or ``None`` (refuse). Never raises.
+
+    Key absent / ``None``: the default, UNLESS ``element_outline`` was given, which is
+    a self-only convention and so selects ``self`` (strict). Otherwise the value must
+    be an exact member of ``_RENDERER_VALUES``.
+    """
+    value = params.get("renderer")
+    if value is None:
+        if "element_outline" in params:
+            return "self", True
+        return _DEFAULT_RENDERER, False
+    if isinstance(value, str) and value in _RENDERER_VALUES:
+        return value, True
+    return None
+
+
 def _read_all_geometry(lde, n, system=None):
     """Read every surface's raw-float geometry + facts (§0.1, §3.2). NEVER raises.
 
@@ -850,6 +1008,31 @@ def _edge_sag(np, rows, i, half_height):
     if not idx:
         return 0.0, 0.0
     return float(z[idx[-1]]), float(z[idx[0]])
+
+
+def _edge_sag_checked(np, rows, i, half_height):
+    """``_edge_sag``'s sampling, EXPOSING validity: ``(sag_hi, sag_lo, valid, h_used)``.
+
+    ``valid`` iff the samples at ``+half_height`` AND ``-half_height`` are themselves
+    valid (``h_used == half_height``); otherwise the fallback ``_edge_sag`` would have
+    returned, with ``valid=False`` and the height it came from (``0.0`` for a fully
+    masked profile). ``_edge_sag`` itself is untouched, so the self path is unchanged.
+    """
+    h = float(half_height)
+    y = np.linspace(-h, h, _N_SAMPLES)
+    z, valid = _geom.sag_profile(
+        rows[i]["radius"], rows[i]["conic"], y,
+        coeffs=rows[i].get("aspheric_coefficients"),
+        norm_radius=rows[i].get("asphere_norm_radius"),
+        power=rows[i].get("asphere_power"),
+    )
+    idx = [k for k in range(len(y)) if bool(valid[k])]
+    if not idx:
+        return 0.0, 0.0, False, 0.0
+    hi, lo = idx[-1], idx[0]
+    ends_valid = hi == len(y) - 1 and lo == 0
+    h_used = h if ends_valid else float(min(abs(y[hi]), abs(y[lo])))
+    return float(z[hi]), float(z[lo]), bool(ends_valid), h_used
 
 
 def _emit_profile(ax, np, rows, i, half_height, to_plot, *, width, color,
@@ -1351,7 +1534,7 @@ def _union_x(bb, other):
     return _XSpan(min(bb.x0, other.x0), max(bb.x1, other.x1))
 
 
-def _tier_colliding_stamps(fig, ax, placements):
+def _tier_colliding_stamps(fig, ax, placements, *, unit_px=None):
     """Give overprinting surface-number labels DIFFERENT HEIGHTS on their side.
 
     The shipped stagger has exactly TWO slots -- a label goes to the top edge, or
@@ -1381,6 +1564,13 @@ def _tier_colliding_stamps(fig, ax, placements):
     Returns the number of labels whose tier CHANGED, so a caller can re-run after
     the limits move and stop when the assignment is stable. Never raises: an
     unmeasurable canvas leaves every label exactly where the shipped code put it.
+
+    ``unit_px`` (native overlay only): display pixels per unit of the ``to_plot``
+    ARGUMENTS. On the self figure the data units ARE those units, so the scale is
+    read off ``ax.transData`` (``None``, the default -- unchanged). On the native
+    overlay the axes' data space is PIXELS while ``to_plot`` still takes local
+    millimetres, so the caller passes the registration's px/mm; reading it off
+    ``transData`` there would add a pixel step to a millimetre arm.
     """
     if len(placements) < 2:
         return 0
@@ -1409,11 +1599,17 @@ def _tier_colliding_stamps(fig, ax, placements):
     # One tier = one label height + a fixed gap, converted display -> data through
     # the axes' own transform. Under equal aspect the y scale equals the x scale,
     # so this is the same distance the overlap was measured in.
-    try:
-        (_zx0, py0), (_zx1, py1) = ax.transData.transform([[0.0, 0.0], [0.0, 1.0]])
-    except Exception:  # noqa: BLE001 — an untransformable axes leaves labels alone
-        return 0
-    px_per_unit = abs(py1 - py0)
+    if unit_px is not None:
+        px_per_unit = float(unit_px)
+        data_px_per_unit = px_per_unit     # data units are pixels on the overlay
+    else:
+        try:
+            (_zx0, py0), (_zx1, py1) = ax.transData.transform(
+                [[0.0, 0.0], [0.0, 1.0]])
+        except Exception:  # noqa: BLE001 — an untransformable axes leaves labels alone
+            return 0
+        px_per_unit = abs(py1 - py0)
+        data_px_per_unit = 1.0
     if not (math.isfinite(px_per_unit) and px_per_unit > 0.0):
         return 0
     px_per_pt = float(fig.dpi) / 72.0
@@ -1490,7 +1686,8 @@ def _tier_colliding_stamps(fig, ax, placements):
             # pixels-per-data-unit, so an unchanged tier can still need a taller
             # arm to clear by the same number of PIXELS. Skipping on `tier ==
             # p["tier"]` alone left a measured residual overlap on the zoom.
-            if not (tier == p["tier"] and abs(pos[1] - was[1]) <= 0.02 * step):
+            if not (tier == p["tier"]
+                    and abs(pos[1] - was[1]) <= 0.02 * step * data_px_per_unit):
                 p["anno"].set_position(pos)
                 p["tier"] = tier
                 changed += 1
@@ -2034,7 +2231,11 @@ def _figure_disclosure_strings(
             lines.append(_S_AP_INT.format(k=k))
         else:
             lines.append(_S_AP.format(k=k))
-    lines.extend(_S_SAG.format(k=k) for k in profile_not_measured)
+    # dogfood F-7: a Paraxial surface has no sag at all (an ideal thin element), so its
+    # non-finite conic is not an UNREADABLE input -- it says what it is instead.
+    lines.extend((_S_SAG_PARAXIAL if 0 <= k < len(rows)
+                  and _type_name(rows, k).startswith("Paraxial") else _S_SAG).format(k=k)
+                 for k in profile_not_measured)
     return lines
 
 
@@ -2318,12 +2519,56 @@ def _draw_scope_footer(fig, ax):
     return _S_SCOPE
 
 
+_FAR_CAPTION_GID = "disclosure:far_caption"
+
+
+def _draw_far_captions(fig, strings):
+    """Stack the far-object lines as FIGURE-level captions directly under the footer.
+
+    Each line is an Annotation anchored to the bottom-right of the line above it (the
+    footer first), so the stack follows wherever the footer was seated and can never
+    enter the axes, where the stamps are, or the legend column. Returns the strings
+    placed; never raises (a line that cannot be anchored is placed at the footer's
+    fallback corner instead, never dropped).
+    """
+    placed = []
+    if not strings:
+        return placed
+    from matplotlib.text import Annotation
+    anchor = next((t for t in fig.texts if t.get_gid() == _SCOPE_GID), None)
+    for text in strings:
+        try:
+            if anchor is None:
+                raise LookupError("no footer to anchor to")
+            art = Annotation(text, xy=(1.0, 0.0), xycoords=anchor,
+                             xytext=(0.0, -2.0), textcoords="offset points",
+                             ha="right", va="top", fontsize=_DISCLOSURE_FONT_PT,
+                             color="black", annotation_clip=False)
+            fig.add_artist(art)
+        except Exception:  # noqa: BLE001 -- the deterministic corner stands
+            art = fig.text(_FOOTER_FALLBACK_XY[0], _FOOTER_FALLBACK_XY[1], text,
+                           ha="right", va="bottom", fontsize=_DISCLOSURE_FONT_PT,
+                           color="black")
+        art.set_gid(_FAR_CAPTION_GID)
+        anchor = art
+        placed.append(text)
+    return placed
+
+
 def _draw(
     plt, np, rows, n, title, stop_index, folded, apertures, rims, draw_heights,
     degraded, ray_data, draw_rays, projection, config_identity,
-    *, outline=_ELEMENT_OUTLINE_DEFAULT,
+    *, outline=_ELEMENT_OUTLINE_DEFAULT, exclusion=None, extra_strings=(),
 ):
     """Draw the UNFOLDED figure and return it. Caller owns closing it in a finally.
+
+    ``exclusion`` is the shared far-object decision
+    (``_layout_register.FarDecision``). ``None`` -- the default -- draws exactly as
+    before. ``cut_object`` drops the object ``0`` stamp (the text that dragged the
+    x-limits back out to z=0) and marks the left edge instead; ``cut_image`` ends the
+    frame at the last lens surface, drops the image plane line and its stamp, and marks
+    the right edge. ``extra_strings`` (the far-object lines) are forwarded to
+    ``_finish_disclosures``, which places them as captions under the scope footer.
 
     Coordinate-break and flat powerless air dummy/spacer surfaces are suppressed
     (scaffolding, not drawn); real optics (glass, mirrors, curved lens-backs), the
@@ -2419,10 +2664,21 @@ def _draw(
                            linestyle=_AXIS_DASHES, zorder=0)
     axis_line.set_gid("axis:optical")
     image_z = z_vertex[n - 1]
-    image_line = ax.axvline(image_z, color="black", linewidth=_NARROW_LINE_PT,
-                            zorder=2)
-    image_line.set_gid(f"s{n - 1}:image_plane")
-    callouts.append((n - 1, "0.4"))
+    cut_object = bool(exclusion is not None and exclusion.cut_object)
+    cut_image = bool(exclusion is not None and exclusion.cut_image)
+    if cut_image:
+        # The frame ends at the last lens surface (vertex + its outward edge sag), so
+        # the far image plane neither sets the x-limits nor inflates `z_span` (which
+        # otherwise drops every stamp to the bottom lane). No image line, no image
+        # stamp: a marker at the right edge names it instead.
+        _last = n - 2
+        _hi, _lo = _edge_sag(np, rows, _last, float(draw_heights[_last]))
+        image_z = z_vertex[_last] + max(0.0, _hi, _lo)
+    else:
+        image_line = ax.axvline(image_z, color="black", linewidth=_NARROW_LINE_PT,
+                                zorder=2)
+        image_line.set_gid(f"s{n - 1}:image_plane")
+        callouts.append((n - 1, "0.4"))
 
     # --- stop ticks — drawn ONLY from a MEASURED stop aperture -------------- #
     stop_label = None
@@ -2575,10 +2831,14 @@ def _draw(
     # `_stop_rider`), which is the artist that already carries a leader to the
     # stop surface.
 
-    # Object (0) reference tick at the figure margin (schematic).
-    object_stamp = ax.text(z_vertex[0], 0.0, "0", ha="right", va="center",
-                           fontsize=7, color="0.4", zorder=5)
-    object_stamp.set_gid("s0:stamp")
+    # Object (0) reference tick at the figure margin (schematic). Under an object cut
+    # it is NOT drawn: as a data-space text it would drag the x-limits back out to
+    # z=0 through `_expand_limits_to_drawn_text` and defeat the exclusion.
+    if not cut_object:
+        object_stamp = ax.text(z_vertex[0], 0.0, "0", ha="right", va="center",
+                               fontsize=7, color="0.4", zorder=5)
+        object_stamp.set_gid("s0:stamp")
+    _far_markers(ax, exclusion, n)
 
     # --- per-field chief + marginal rays (L6) ----------------------------- #
     n_rays_drawn = _draw_rays(ax, plt, ray_data, draw_rays)
@@ -2675,9 +2935,65 @@ def _draw(
         optical_indices=optical_indices, stop_index=stop_index, n=n,
         apertures=apertures, interfaces_omitted=interfaces_omitted,
         interfaces_extended=_narrow_extension_records(extensions, rows, body),
-        element_outline=outline,
+        element_outline=outline, extra_strings=extra_strings,
     )
     return fig, surface_labels, stop_label, n_rays_drawn, figure_disclosures
+
+
+def _register_rays_to_drawing(ray_data, rows, lde):
+    """Shift the global-frame ray polylines into the unfolded drawing's z frame.
+
+    On an unfolded (axial, mirror-free) system global z and `vertex_z` differ by one
+    constant, measured at the first surface whose global frame reads: the offset is
+    `vertex_z[k] - global_z[k]`. No readable frame -> the rays are returned as read
+    (the ray reader already truncated every ray at an unreadable frame). Never raises.
+    """
+    try:
+        z_vertex = _geom.vertex_z([r["thickness"] for r in rows])
+        offset = None
+        for k in range(1, len(rows)):
+            frame = _geom._read_one_global_frame(lde, k)
+            if frame.get("ok") and math.isfinite(z_vertex[k]):
+                offset = z_vertex[k] - float(frame["vertex"][2])
+                break
+        if offset is None or offset == 0.0 or not math.isfinite(offset):
+            return ray_data
+        shifted = dict(ray_data)
+        shifted["fields"] = [
+            dict(field, rays={
+                label: [(z + offset, y) for (z, y) in poly]
+                for label, poly in (field.get("rays") or {}).items()})
+            for field in ray_data.get("fields", [])
+        ]
+        return shifted
+    except Exception:  # noqa: BLE001 -- registration never sinks a render
+        return ray_data
+
+
+def _far_markers(ax, exclusion, n):
+    """The frame-edge markers for a far end the shared rule left out.
+
+    ``"← 0 OBJECT {gap:g} mm"`` just outside the LEFT edge and ``"IMAGE {n-1} →
+    {gap:g} mm"`` just outside the RIGHT edge, on the optical axis, in the rider-word
+    box style, so a reader (and the vision reviewer) still sees the image NUMBER. x is
+    in AXES coordinates and y in data coordinates: the marker sits at the frame edge
+    whatever the limits are, and -- not being a data-space text -- it never drags the
+    limits back out to the excluded end.
+    """
+    if exclusion is None:
+        return
+    from matplotlib.transforms import blended_transform_factory
+    trans = blended_transform_factory(ax.transAxes, ax.transData)
+    box = {"boxstyle": f"square,pad={_RIDER_BOX_PAD}", "facecolor": "white",
+           "edgecolor": "none", "linewidth": _NARROW_LINE_PT}
+    for entry in exclusion.excluded:
+        if entry["role"] == "object":
+            text, x, ha = f"← 0 OBJECT {entry['gap_mm']:g} mm", 0.0, "right"
+        else:
+            text, x, ha = f"IMAGE {n - 1} → {entry['gap_mm']:g} mm", 1.0, "left"
+        marker = ax.text(x, 0.0, text, transform=trans, ha=ha, va="center",
+                         fontsize=7, color="0.4", zorder=6, clip_on=False, bbox=box)
+        marker.set_gid(f"s{entry['surface']}:marker")
 
 
 def _legend_handles(legend):
@@ -2708,6 +3024,7 @@ def _draw_rays(ax, plt, ray_data, draw_rays):
     exist. Rays separate by colour, never by a third weight.
     """
     n_rays_drawn = 0
+    n_proxies = 0
     if not (draw_rays and ray_data and ray_data.get("fields")):
         return 0
     try:
@@ -2731,7 +3048,17 @@ def _draw_rays(ax, plt, ray_data, draw_rays):
             )
             ray_line.set_gid(f"ray{fi}:{label}")
             n_rays_drawn += 1
-    if n_rays_drawn > 0:
+        if first:
+            # No polyline of this field had 2 points, so nothing above
+            # labelled it and the picture would read as one field fewer. A
+            # legend-only proxy (no data, not counted in n_rays_drawn) names the
+            # field and says what the PICTURE shows -- not a coverage claim;
+            # ray_coverage stays the coverage authority.
+            proxy, = ax.plot([], [], color=color, linewidth=_NARROW_LINE_PT,
+                             label=f"field Y={fy:g} (no ray drawn)")
+            proxy.set_gid(f"ray{fi}:legend_only")
+            n_proxies += 1
+    if n_rays_drawn > 0 or n_proxies > 0:
         # frameon=False: the legend FRAME is one of the three chrome families
         # the standing instruction says to hide.
         #
@@ -2756,10 +3083,107 @@ def _draw_rays(ax, plt, ray_data, draw_rays):
     return n_rays_drawn
 
 
+def _legend_protected_extents(fig, ax, renderer):
+    """The DRAWN extents a re-seated legend may not cover: every axes text (the
+    disclosure boxes, surface stamps, STOP/IMAGE riders, markers -- patch, not glyph,
+    via ``_drawn_text_extent``), every figure text (the scope footer, far captions, the
+    fallback line), the title and the axis labels. An unmeasurable or empty text
+    contributes nothing."""
+    out = []
+    texts = list(ax.texts) + list(fig.texts) + [ax.title, ax.xaxis.label, ax.yaxis.label]
+    for t in texts:
+        try:
+            if not t.get_visible() or not t.get_text():
+                continue
+            bb = _drawn_text_extent(t, renderer)
+        except Exception:  # noqa: BLE001 -- an unmeasurable text contributes nothing
+            continue
+        if all(math.isfinite(v) for v in (bb.x0, bb.y0, bb.x1, bb.y1)):
+            out.append(bb)
+    return out
+
+
+def _seat_legend_clear_of_disclosures(fig, ax):
+    """Seat the ray legend where it is INSIDE the figure and covers nothing protected.
+
+    The legend is anchored just outside the axes' right edge, at the top. A disclosure
+    box is anchored at the axes' LEFT edge and is as wide as its text, so on a narrow
+    (equal-aspect, tall-lens) frame a box runs past the right edge and was drawn OVER
+    the legend's first rows (dogfood F-4: the on-axis field drawn but read as absent).
+
+    BOUNDED, DETERMINISTIC SEARCH (an audit finding -- the first cut
+    anchored at an unbounded y below the boxes, could leave the canvas, and checked the
+    disclosure boxes only). The legend's measured box is translated over candidate
+    seats; a seat is valid iff the translated box lies inside ``fig.bbox`` AND overlaps
+    no protected extent (``_legend_protected_extents``). Columns, in order: the
+    original x, then just right of the rightmost protected extent. In each column the
+    seat steps DOWN from the original top in ``_LEGEND_STEP_PT`` steps to the figure
+    floor. First valid seat wins. When none is valid the legend is NOT moved off its
+    original seat; that outcome is recorded on ``fig._optivibe_legend_seat``.
+
+    Returns the outcome token: ``"original"`` | ``"moved"`` | ``"no_clear_seat"`` |
+    ``"no_legend"`` | ``"unmeasured"``. Never raises.
+    """
+    legend = ax.get_legend()
+    if legend is None:
+        return "no_legend"
+    outcome = "unmeasured"
+    try:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        protected = _legend_protected_extents(fig, ax, renderer)
+        lb = legend.get_window_extent(renderer)
+        fb = fig.bbox
+        anchor = legend.get_bbox_to_anchor()
+        ax0, ay0 = float(anchor.x0), float(anchor.y1)
+
+        def _clear(dx, dy):
+            x0, x1 = lb.x0 + dx, lb.x1 + dx
+            y0, y1 = lb.y0 + dy, lb.y1 + dy
+            if x0 < fb.x0 or x1 > fb.x1 or y0 < fb.y0 or y1 > fb.y1:
+                return False
+            return not any(x0 < p.x1 and p.x0 < x1 and y0 < p.y1 and p.y0 < y1
+                           for p in protected)
+
+        if _clear(0.0, 0.0):
+            outcome = "original"
+        else:
+            step = _LEGEND_STEP_PT * float(fig.dpi) / 72.0
+            gap = _DISCLOSURE_GAP_PT * float(fig.dpi) / 72.0
+            right = max([p.x1 for p in protected if p.x1 > lb.x0] or [lb.x0 - gap])
+            seat = None
+            for dx in (0.0, right + gap - lb.x0):
+                dy = 0.0
+                while lb.y0 + dy >= fb.y0 and seat is None:
+                    if _clear(dx, dy):
+                        seat = (dx, dy)
+                    dy -= step
+                if seat is not None:
+                    break
+            if seat is None:
+                outcome = "no_clear_seat"
+            else:
+                # Anchored in AXES coordinates, never display pixels: the tight-bbox
+                # save re-lays the canvas out and a display anchor would not follow it.
+                xa, ya = ax.transAxes.inverted().transform(
+                    (ax0 + seat[0], ay0 + seat[1]))
+                if not (math.isfinite(xa) and math.isfinite(ya)):
+                    raise ValueError("legend seat not representable in axes coords")
+                legend.set_bbox_to_anchor((float(xa), float(ya)), transform=ax.transAxes)
+                outcome = "moved"
+    except Exception:  # noqa: BLE001 -- a legend seat must never sink a draw
+        outcome = "unmeasured"
+    try:
+        fig._optivibe_legend_seat = outcome
+    except Exception:  # noqa: BLE001
+        pass
+    return outcome
+
+
 def _finish_disclosures(fig, ax, *, rows, folded, projection, config_identity,
                         body, optical_indices, stop_index, n, apertures,
                         interfaces_omitted, interfaces_extended=(),
-                        element_outline=_ELEMENT_OUTLINE_DEFAULT):
+                        element_outline=_ELEMENT_OUTLINE_DEFAULT, extra_strings=()):
     """Assemble, place and return the figure's disclosure strings + the footer."""
     # Before anything is placed in AXES coordinates, make sure the DATA-space
     # limits actually contain the text already drawn in them.
@@ -2827,6 +3251,17 @@ def _finish_disclosures(fig, ax, *, rows, folded, projection, config_identity,
     # that would make the figure less HONEST rather than merely less
     # complete.
     drawn.append(_draw_scope_footer(fig, ax))
+    # The far-object lines (`_S_FAR` / `_S_SPECK`) are
+    # FIGURE-level captions stacked under the scope footer, not boxes in the top-left
+    # axes stack: measured on the D3 self render, a boxed `_S_FAR` covered the stamps
+    # of surfaces 1 and 2 and a legend entry. Outside the axes it cannot cover a stamp
+    # or the legend -- the footer's own precedent.
+    drawn.extend(_draw_far_captions(fig, extra_strings))
+    # native-layout-retool dogfood F-4: a disclosure box is as wide as its TEXT, so on a
+    # narrow (height-limited) frame it runs past the axes' right edge into the legend
+    # column and covered the first legend row -- a field drawn but missing from the
+    # legend. Seated LAST, so every box, stamp, footer and caption is already placed.
+    _seat_legend_clear_of_disclosures(fig, ax)
     # The per-surface lists the result dict carries are computed HERE, beside the
     # strings that were drawn from them, so the figure and the result can never
     # disagree about what was disclosed. They ride back on the figure because the
@@ -2855,9 +3290,15 @@ def _finish_disclosures(fig, ax, *, rows, folded, projection, config_identity,
 def _draw_folded_global(
     plt, np, rows, n, title, stop_index, apertures, rims, draw_heights,
     degraded, global_frames, ray_data, draw_rays, projection, config_identity,
-    *, outline=_ELEMENT_OUTLINE_DEFAULT,
+    *, outline=_ELEMENT_OUTLINE_DEFAULT, extra_strings=(),
 ):
     """Draw a FOLDED system in the GLOBAL frame.
+
+    ``extra_strings`` is forwarded to
+    ``_finish_disclosures``: it is the ONLY route by which a default render that fell
+    back from ``native`` on a fold says so on the figure (``_S_FALLBACK``). The default
+    ``()`` keeps every direct caller unchanged; the far-object rule is still computed
+    and disclosed, not applied, on this path.
 
     Element vertices come from ``GetGlobalMatrix(i)[10:13]`` (the SAME global frame
     the RAGY/RAGZ rays use — coherent past the fold), and each outline point is the
@@ -3151,9 +3592,931 @@ def _draw_folded_global(
         optical_indices=optical_indices, stop_index=stop_index, n=n,
         apertures=apertures, interfaces_omitted=interfaces_omitted,
         interfaces_extended=_narrow_extension_records(extensions, rows, body),
-        element_outline=outline,
+        element_outline=outline, extra_strings=extra_strings,
     )
     return fig, surface_labels, stop_label, n_rays_drawn, figure_disclosures
+
+
+# =========================================================================== #
+# native-layout-retool -- the NATIVE cross-section
+#
+# OpticStudio draws the lens; OptiVibe registers the raster to the prescription
+# (model B), VERIFIES that registration against the vendor's own ink, and only
+# then stamps OUR surface numbers over it. There is no refit: a frame that does not
+# verify either falls back to the self drawing (default) or ships UNSTAMPED
+# (explicit native).
+# =========================================================================== #
+class _NativeOutcome:
+    """What one native attempt produced. Exactly one of three shapes:
+
+    * ``token`` set -- the attempt could not produce a usable native picture; the caller
+      falls back (default) or refuses (explicit, via ``_NATIVE_EXPLICIT_FAMILY``);
+    * ``refusal`` set -- a configuration restore that did not verify: the WHOLE
+      render is refused, default or explicit;
+    * neither -- ``rgb`` / ``reg`` / ``plan`` are the registered raster, and
+      ``stamps_withheld`` names the reason when an explicit native ships unstamped.
+    """
+
+    def __init__(self):
+        self.token = None
+        self.detail = None
+        self.refusal = None
+        self.rgb = None
+        self.reg = None
+        self.extent = None
+        self.start = None
+        self.end = None
+        self.plan = []
+        self.flags = []
+        self.tmp_path = None
+        self.registration = None
+        self.stamps_withheld = None
+        #: the far decision whose Start/End this export CONSUMED (None = the exporter's
+        #: own default range). The envelope's `far_object_excluded` must describe the
+        #: SAME object (R-5); a disagreement is flagged, never silent.
+        self.range_decision = None
+        #: The SAMPLED-ray coverage of a successful export (None until
+        #: the PNG gate passed), and its per-field flags (used only when native ships).
+        self.ray_coverage = None
+        self.coverage_flags = []
+        #:: the `view_3d` envelope dict of an accepted 3-D export (None otherwise).
+        self.view_3d = None
+
+    def fail(self, token, detail):
+        self.token = token
+        self.detail = detail
+        return self
+
+
+def _type_name(rows, i):
+    """The row's ``type_name`` when it is a real ``str``, else ``""`` -- never a
+    ``str()`` of a caller-controlled value (the base-slot normalization rule)."""
+    value = rows[i].get("type_name", "")
+    return value if type(value) is str else ""
+
+
+def _native_refusal_message(outcome, renderer="native"):
+    """The explicit-native refusal text for ``outcome.token`` (never raises)."""
+    token = outcome.token
+    detail = outcome.detail or ""
+    if token == "non_axial":
+        return ("renderer 'native' cannot draw this system: it is non-axial (a "
+                "coordinate break, even an all-zero one, a Tilted surface or a "
+                "non-axial GRIN); use renderer='self' or a 3-D view ('native_3d' / "
+                f"'native_shaded'). (non_axial: {detail})")
+    return f"renderer {renderer!r} could not draw this figure ({token}): {detail}"
+
+
+def _native_to_plot(rows, frames, reg):
+    """``to_plot(surface, y, sag)`` in the overlay's PIXEL data space: local mm ->
+    the SAME frame ``surface_points`` used -> model B. Registration applied once."""
+    z_vertex = _geom.vertex_z([r["thickness"] for r in rows])
+
+    def to_plot(surface, y, sag):
+        if frames is None:
+            z, yy = z_vertex[surface] + sag, y
+        else:
+            frame = frames[surface] if surface < len(frames) else None
+            if not (isinstance(frame, dict) and frame.get("ok")):
+                return None
+            _gx, yy, z = _geom.sag_to_global(frame["R"], frame["vertex"], y, sag)
+        return reg.to_px(z, yy)
+
+    return to_plot
+
+
+def _sag_samples(np, rows, i, ys):
+    """The surface's sag at every height in ``ys`` -> ``(sags, valid)``: the sampler
+    ``_layout_register.profile_polyline`` consumes (``_edge_sag``'s own sag model)."""
+    z, valid = _geom.sag_profile(
+        rows[i]["radius"], rows[i]["conic"], np.asarray(ys, dtype=float),
+        coeffs=rows[i].get("aspheric_coefficients"),
+        norm_radius=rows[i].get("asphere_norm_radius"),
+        power=rows[i].get("asphere_power"),
+    )
+    return [float(v) for v in z], [bool(v) for v in valid]
+
+
+def _plan_native_stamps(np, *, rows, n, points, reg, extent, apertures, rims,
+                        draw_heights, stop_index, start, end):
+    """The stamp loop's SIDE SELECTION, run before anything is drawn.
+
+    ``_draw``'s callout set restricted to the drawn range, the same z-order and the
+    same top/bottom rule, with the collide threshold taken as ``_STAMP_COLLIDE_FRAC``
+    of the drawn span IN PIXELS. Each entry names the terminus its leader will touch:
+    the surface's OWN-semi curve end on the chosen side -- never our group rim, which
+    comes from OUR body pass and may touch no vendor ink.
+    """
+    optical = _optical_indices(rows, n)
+    callouts = [i for i in optical if start <= i <= end]
+    if end == n - 1:
+        callouts.append(n - 1)
+    grouped = {int(s) for g in _glass_groups(rows, n, optical) for s in g}
+    body = {"grouped": grouped}
+    rim_of = {}
+    for rim in rims:
+        if rim.basis == "measured":
+            for s in rim.surfaces:
+                rim_of[int(s)] = float(rim.rim_height)
+    x_lo = reg.to_px(extent.zmin, 0.0)[0]
+    x_hi = reg.to_px(extent.zmax, 0.0)[0]
+    collide_px = _STAMP_COLLIDE_FRAC * max(1.0, x_hi - x_lo)
+    vertex_px = {i: reg.to_px(points[i].z, points[i].y) for i in callouts}
+
+    def _order_key(i):
+        is_stop = stop_index is not None and i == stop_index
+        return (vertex_px[i][0], 1 if is_stop else 0, i)
+
+    plan = []
+    placed_top = []
+    for idx in sorted(callouts, key=_order_key):
+        p = points[idx]
+        record = apertures[idx] if idx < len(apertures) else None
+        measured = bool(record is not None and record.measured)
+        h = float(draw_heights[idx])
+        if stop_index is not None and idx == stop_index:
+            color = "red"
+        elif idx == n - 1:
+            color = "0.4"
+        else:
+            color = "black"
+        vx = vertex_px[idx][0]
+        collides = any(abs(vx - q) < collide_px for q in placed_top)
+        side = -1 if collides else 1
+        if not collides:
+            placed_top.append(vx)
+        tz, ty = (p.z_lo, p.y_lo) if side < 0 else (p.z_hi, p.y_hi)
+        sag_hi, sag_lo, ok, _h_used = _edge_sag_checked(np, rows, idx, h)
+        subpixel = bool(h * reg.s < _lr.MIN_VISIBLE_PX)
+        plan.append({
+            "surface": idx, "color": color, "side": side,
+            "terminus": reg.to_px(tz, ty), "vertex": vertex_px[idx],
+            "sag": ((sag_lo if side < 0 else sag_hi) if ok else 0.0),
+            "edge_mm": rim_of.get(idx, h),
+            "interior": _is_cemented_join(rows, body, idx),
+            "subpixel": subpixel, "measured": measured,
+            "leader_bearing": bool(measured and not subpixel),
+            "ambiguous": False, "separation_px": None,
+            "profile_applicable": _profile_applicable(rows, n, idx, grouped),
+            "profile_demoted": False,
+        })
+    return plan
+
+
+def _profile_applicable(rows, n, i, grouped):
+    """True iff the vendor draws surface ``i`` as a PROFILE the interior samples can
+    land on (R-1): a glass-group member (glass on either side), a mirror, a paraxial
+    line or the image line. A FLAT AIR surface outside every glass group -- the air
+    stop, drawn as two ticks at +/-semi with nothing between them (measured: DGauss s6,
+    no dark ink at any interior height) -- is NOT: it keeps the terminus check alone
+    and is listed in ``registration.profile_not_applicable``. This is
+    ``_is_suppressed_scaffold``'s flat-powerless-air arm WITHOUT its stop exemption."""
+    if i == n - 1 or i in grouped:
+        return True
+    r = rows[i]
+    if _geom._is_mirror(r.get("material", "")) or _type_name(rows, i).startswith(
+            "Paraxial"):
+        return True
+    return not (_geom._is_air_material(r.get("material", ""))
+                and not math.isfinite(r.get("radius", float("nan"))))
+
+
+def _register_and_verify(np, dark, reg, extent, points, plan, *, rows, frames,
+                         draw_heights, start, end):
+    """Steps 5-6: the dark-bbox z sides, then the ink at the CHOSEN termini.
+
+    Mutates ``plan`` (``ambiguous`` / ``separation_px``) and returns ``(verified,
+    info)``. What a pass DECIDES, exactly: every leader-bearing surface that keeps its
+    leader has dark ink within ``REG_TOL_PX`` of its predicted terminus, and no OTHER
+    stamped surface's PREDICTED curve passes within ``MIN_TERMINUS_SEPARATION_PX`` of
+    it. It does NOT decide that the ink belongs to that surface rather than to
+    unstamped geometry near the terminus: ownership rests on the prescription model.
+    """
+    info = {"bbox_sides_graded": [], "bbox_residual_px": None,
+            "tip_points_checked": 0, "tip_residual_px": None,
+            "ambiguous_surfaces": [], "subpixel_surfaces": [],
+            "profile_points_checked": 0, "profile_residual_px": None,
+            "profile_unverified_surfaces": [], "profile_unchecked_surfaces": [],
+            "profile_not_applicable": [], "profile_unmeasurable_surfaces": [],
+            "reasons": []}
+    # --- step 5: the dark bbox z sides (top/bottom are never graded) ------------- #
+    bb = _lr.dark_bbox(dark)
+    in_range = [p for p in points[start:end + 1]
+                if all(math.isfinite(v) for v in (p.z, p.z_hi, p.z_lo))]
+    residuals = []
+    if bb is None:
+        info["reasons"].append("no dark ink in the export")
+    else:
+        for side, target, got in (("left", extent.zmin, bb[0]),
+                                  ("right", extent.zmax, bb[2])):
+            tol = 1e-9 * max(1.0, abs(target))
+            owners = [p.surface for p in in_range
+                      if min(abs(p.z - target), abs(p.z_hi - target),
+                             abs(p.z_lo - target)) <= tol]
+            if not any(float(draw_heights[k]) * reg.s >= _lr.MIN_VISIBLE_PX
+                       for k in owners):
+                continue
+            info["bbox_sides_graded"].append(side)
+            residuals.append(abs(reg.to_px(target, 0.0)[0] - got))
+        if not info["bbox_sides_graded"]:
+            info["reasons"].append("no bbox side could be graded")
+    bbox_ok = bool(info["bbox_sides_graded"]) and all(
+        r <= _lr.REG_TOL_PX for r in residuals)
+    info["bbox_residual_px"] = round(max(residuals), 3) if residuals else None
+    if residuals and not bbox_ok:
+        info["reasons"].append(f"bbox residual {max(residuals):.2f} px")
+    # --- step 6(a): distinctness against the other stamped surfaces' curves ------ #
+    polys = {}
+    for e in plan:
+        k = e["surface"]
+        poly = _lr.profile_polyline(
+            rows, k, draw_heights[k], frames=frames, px_per_mm=reg.s,
+            sag_fn=lambda _r, _i, _ys: _sag_samples(np, _r, _i, _ys))
+        if not poly:
+            p = points[k]
+            poly = [(p.z_lo, p.y_lo), (p.z, p.y), (p.z_hi, p.y_hi)]
+        polys[k] = [reg.to_px(z, y) for z, y in poly]
+    info["subpixel_surfaces"] = [e["surface"] for e in plan if e["subpixel"]]
+    leader_bearing = [e for e in plan if e["leader_bearing"]]
+    for e in leader_bearing:
+        d = min((_lr.point_polyline_distance(e["terminus"], polys[o["surface"]])
+                 for o in plan if o["surface"] != e["surface"]), default=math.inf)
+        e["separation_px"] = d
+        if d < _lr.MIN_TERMINUS_SEPARATION_PX:
+            e["ambiguous"] = True
+            info["ambiguous_surfaces"].append(
+                {"surface": e["surface"], "separation_px": round(d, 3)})
+    distinct = [e for e in leader_bearing if not e["ambiguous"]]
+    # --- step 6(b): tip on ink, at the CHOSEN side's terminus -------------------- #
+    res = _lr.ink_residuals(dark, [e["terminus"] for e in distinct])
+    info["tip_points_checked"] = len(distinct)
+    found = [r for r in res if r is not None]
+    info["tip_residual_px"] = round(max(found), 3) if found else None
+    misses = [e["surface"] for e, r in zip(distinct, res) if r is None]
+    # --- step 6(c), R-1/R-2: the curve INTERIOR on the chosen side --------------- #
+    # The terminus sits where two vendor strokes meet (the face's own flat rim
+    # extension and the group rim line), so a face displaced ALONG that line keeps ink
+    # under it. The interior samples (PROFILE_FRACS of the own semi, chosen side) lie
+    # on the face's OWN curve, which no rim stroke shares. Per-SAMPLE distinctness: a
+    # sample within MIN_TERMINUS_SEPARATION_PX of another stamped surface's predicted
+    # curve is SKIPPED (that ink could be the neighbour's); ANY distinct sample off ink
+    # DEMOTES that surface to the unverified `k?` vertex form -- the stamp is the
+    # thing that could not be bound, not the frame. The terminus check above stays
+    # load-bearing: a terminus miss still fails the whole frame.
+    hits = []
+    for e in distinct:
+        k = e["surface"]
+        if not e["profile_applicable"]:
+            info["profile_not_applicable"].append(k)
+            continue
+        h = float(draw_heights[k])
+        fracs = [e["side"] * f for f in _lr.PROFILE_FRACS]
+        pts = _lr.curve_points(
+            rows, k, [f * h for f in fracs], frames=frames,
+            sag_fn=lambda _r, _i, _ys: _sag_samples(np, _r, _i, _ys))
+        # Round 3: a sample the sampler could not COMPUTE (``None`` from
+        # ``curve_points`` -- an invalid/non-finite sag, a frame not ok, a raise) has
+        # established NOTHING, unlike the proximity skip below (which HAS established
+        # the ink could be a neighbour's). It demotes the surface like an off-ink
+        # sample: `k?`, no leader, against the ceiling and the >= 2 rule.
+        if len(pts) != len(fracs):
+            pts = list(pts) + [None] * (len(fracs) - len(pts))
+        failed = [f for f, pm in zip(fracs, pts) if pm is None]
+        if failed:
+            e["profile_demoted"] = True
+            info["profile_unmeasurable_surfaces"].append(
+                {"surface": k, "height_fracs": failed})
+            continue
+        checked = []
+        for f, pm in zip(fracs, pts):
+            q = reg.to_px(*pm)
+            near = min((_lr.point_polyline_distance(q, polys[o["surface"]])
+                        for o in plan if o["surface"] != k), default=math.inf)
+            if near >= _lr.MIN_TERMINUS_SEPARATION_PX:
+                checked.append((f, q))
+        if not checked:
+            info["profile_unchecked_surfaces"].append(k)
+            continue
+        pres = _lr.ink_residuals(dark, [q for _f, q in checked])
+        info["profile_points_checked"] += len(checked)
+        for (f, _q), r in zip(checked, pres):
+            if r is not None and r <= _lr.PROFILE_TOL_PX:
+                hits.append(r)
+            else:
+                e["profile_demoted"] = True
+                info["profile_unverified_surfaces"].append(
+                    {"surface": k, "height_frac": f,
+                     "residual_px": None if r is None else round(r, 3)})
+    info["profile_residual_px"] = round(max(hits), 3) if hits else None
+    if info["profile_unmeasurable_surfaces"]:
+        info["reasons"].append(
+            "profile samples could not be computed for surfaces "
+            f"{[u['surface'] for u in info['profile_unmeasurable_surfaces']]}")
+    remaining = [e for e in distinct if not e["profile_demoted"]]
+    n_demoted = len(distinct) - len(remaining)
+    tips_ok = (len(remaining) >= 2 and not misses
+               and all(r <= _lr.REG_TOL_PX for r in found))
+    if len(remaining) < 2:
+        info["reasons"].append(f"only {len(remaining)} distinct, profile-verified "
+                               "termini")
+    if misses:
+        info["reasons"].append(f"no ink at the terminus of surfaces {misses}")
+    elif found and max(found) > _lr.REG_TOL_PX:
+        info["reasons"].append(f"tip residual {max(found):.2f} px")
+    n_amb = len(leader_bearing) - len(distinct)
+    ceiling_ok = n_amb + n_demoted <= _lr.AMBIGUITY_CEILING * len(leader_bearing)
+    if not ceiling_ok:
+        info["reasons"].append(
+            f"{n_amb + n_demoted} of {len(leader_bearing)} leader-bearing surfaces "
+            "ambiguous or profile-unverified")
+    return bool(bbox_ok and tips_ok and ceiling_ok), info
+
+
+def _native_attempt(session, *, rows, n, apertures, rims, draw_heights, folded,
+                    global_frames, points, decision, draw_rays, config_identity,
+                    directory, stop_index, strict, tmp_sink):
+    """Export, gate, register and verify one native cross-section. Never raises
+    for an engine fault -- every one becomes a token.
+
+    ``folded`` is the role classification (mirror => folded): an axial mirror system
+    is NOT non-axial, and its extent comes from the GLOBAL frames. The checks run in
+    ``_RENDERER_FALLBACK_TOKENS`` order. A registration failure is a token only for the
+    DEFAULT; an explicit native ships the raster unstamped instead.
+    """
+    import numpy as np
+    out = _NativeOutcome()
+    # The degrader: a LATCHED session attempts no export (zero opens).
+    if _slot_latched(session):
+        out.ray_coverage = _rc.unavailable(_rc.REASON_WEDGED)
+        return out.fail("native_unavailable", _S_SLOT_LATCHED)
+    system = session.system
+    frames = global_frames if folded else None
+    # non_axial -- decided BEFORE any tool is opened (Q4, 7/7) ------------------ #
+    if _native.read_axiality(system) is True:
+        return out.fail("non_axial", "system.IsNonAxial reads True")
+    if config_identity.count is None:
+        return out.fail("configuration_unreadable",
+                        "the configuration count could not be read")
+    # the drawn range: the shared far rule over the exporter's own default --------- #
+    if decision is not None and decision.reason != "extent_unreadable":
+        start, end = int(decision.start), int(decision.end)
+        out.range_decision = decision
+    else:
+        start, end = _lr.native_default_range(rows, n)
+    grin = [i for i in range(start, end + 1)
+            if _type_name(rows, i).startswith("Gradient")]
+    if grin:
+        if not strict:
+            return out.fail("grin_surface",
+                            f"GRIN surfaces {grin} in range; the native outline of a "
+                            "GRIN surface is unverified")
+        out.flags.append(f"native outline unverified on GRIN surfaces {grin}")
+    if points is None:
+        return out.fail("extent_unreadable",
+                        "the drawn extent cannot be predicted from the prescription")
+    t0 = float(rows[0].get("thickness", float("nan"))) if n else float("nan")
+    # A coordinate break is scaffolding the exporter never draws (and on this path
+    # it can only be reached with axiality unreadable, where the export's own refusal
+    # message is the backstop), so its unmeasured semi says nothing about the frame.
+    unmeasured = [i for i in range(start, end + 1)
+                  if i < len(apertures) and not apertures[i].measured
+                  and not (i == 0 and not math.isfinite(t0))
+                  and not _geom._is_coordinate_break(rows[i].get("type_name", ""))]
+    if unmeasured:
+        return out.fail("extent_unreadable",
+                        f"surfaces {unmeasured} have no measured semi-diameter, so the "
+                        "exported frame cannot be predicted")
+    extent = _lr.drawn_extent(points, start, end)
+    if extent is None:
+        return out.fail("extent_unreadable", "no finite drawn extent in range")
+    W, H = _lr.choose_canvas(extent)
+    try:
+        reg = _lr.fit(extent, W, H)
+    except ValueError as exc:
+        return out.fail("extent_unreadable", str(exc))
+    paraxial = [i for i in range(start, end + 1)
+                if _type_name(rows, i).startswith("Paraxial")]
+    unmodelled = bool(reg.height_limited and paraxial)
+    if unmodelled and not strict:
+        return out.fail("registration_unmodelled",
+                        f"height-limited fit with paraxial surfaces {paraxial} "
+                        "(their arrowhead extent is unmodelled)")
+    # export --------------------------------------------------------------------- #
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(suffix=".png", prefix="native_", dir=directory)
+    # Registered with the CALLER at once, so its `finally` removes the raster on every
+    # exit -- including an exception raised anywhere below.
+    tmp_sink.append(tmp)
+    os.close(fd)
+    out.tmp_path = tmp
+    res = _native.export_cross_section(
+        system, tmp, W=W, H=H, start=start, end=end,
+        n_rays=_native.DEFAULT_N_RAYS if draw_rays else 0,
+        config_count=config_identity.count, n_surfaces=n)
+    # The OBSERVATION and the latch come FIRST, before any gate
+    # and before any coverage open. The export token is returned unchanged whatever
+    # the observation says (the verdict is the observation, never the write).
+    verdict, slot_flags = _observe_slot(session, res)
+    out.flags.extend(slot_flags)
+    detail = res.detail
+    if res.run_raised:
+        # The RECORDED latch decides the text (the gate reads the same arbiter)
+        raised = _S_SLOT_RAISED if _slot_latched(session) else _S_SLOT_RAISED_UNLATCHED
+        detail = f"{detail}; {raised}"
+        out.flags.append(f"native export: {raised}")
+    if res.close_failed:
+        out.flags.append("the native export tool's Close() raised; the export result "
+                         "stands")
+    if res.restore_verified and res.configuration_moved_to is not None:
+        # A move the restore undid is DISCLOSED, never silent. One flag, not
+        # `mutation_warning` -- that key belongs to the `with_configuration` wrapper and
+        # a second writer would be a second path onto it.
+        out.flags.append(
+            "the native export moved the active configuration to "
+            f"{res.configuration_moved_to}; restored to {res.configuration_written} "
+            "and verified")
+    if not res.restore_verified:
+        out.refusal = _fail(
+            "render_failed",
+            "configuration restore did NOT verify after the native export (intended "
+            f"{res.configuration_written}, re-read {res.configuration_after}); the "
+            "active configuration may be wrong")
+        return out
+    if not res.ok:
+        return out.fail(res.token, detail)
+    ihdr = _png_ihdr(tmp)
+    if not _is_png(tmp) or ihdr != (W, H):
+        return out.fail("native_not_png",
+                        f"the export is not a {W}x{H} PNG (IHDR {ihdr})")
+    rgb = _lr.load_rgb_u8(tmp)
+    if rgb is None or tuple(rgb.shape[:2]) != (H, W):
+        return out.fail("native_not_png", "the exported PNG could not be decoded")
+    try:
+        dark = _lr.classify_pixels(rgb)[1]
+    except ValueError as exc:
+        return out.fail("native_not_png", str(exc))
+    out.rgb, out.reg, out.extent, out.start, out.end = rgb, reg, extent, start, end
+    # Coverage AFTER the PNG gate, BEFORE registration, and ONLY if the
+    # observation did not latch -- an Arm-2 export ships its PNG but has just wedged
+    # the slot, so a coverage open here would run on the wedged slot (#6).
+    if verdict == "wedged" or _slot_latched(session):
+        out.ray_coverage = _rc.unavailable(_rc.REASON_WEDGED)
+    else:
+        out.ray_coverage, out.coverage_flags = _rc.native_coverage(
+            system, res, draw_rays=draw_rays,
+            deadline=perf_counter() + _ray_budget_s())
+    registration = {
+        "model": "prescription_fit_v1", "width": W, "height": H,
+        "px_per_mm": reg.s, "start_surface": start, "end_surface": end,
+        "height_limited": bool(reg.height_limited), "bbox_sides_graded": [],
+        "bbox_residual_px": None, "tip_points_checked": 0, "tip_residual_px": None,
+        "ambiguous_surfaces": [], "subpixel_surfaces": [],
+        "profile_points_checked": 0, "profile_residual_px": None,
+        "profile_unverified_surfaces": [], "profile_unchecked_surfaces": [],
+        "profile_not_applicable": [], "profile_unmeasurable_surfaces": [],
+        "status": "withheld",
+    }
+    out.registration = registration
+    if unmodelled:                      # explicit only: unstamped, no check ran
+        out.stamps_withheld = "registration_unmodelled"
+        out.flags.append("native registration unmodelled (height-limited fit with "
+                         f"paraxial surfaces {paraxial}); stamps withheld")
+        return out
+    plan = _plan_native_stamps(
+        np, rows=rows, n=n, points=points, reg=reg, extent=extent,
+        apertures=apertures, rims=rims, draw_heights=draw_heights,
+        stop_index=stop_index, start=start, end=end)
+    verified, info = _register_and_verify(
+        np, dark, reg, extent, points, plan, rows=rows, frames=frames,
+        draw_heights=draw_heights, start=start, end=end)
+    for key in _REGISTRATION_INFO_KEYS:
+        registration[key] = info[key]
+    out.plan = plan
+    if verified:
+        registration["status"] = "verified"
+        return out
+    detail = "; ".join(info["reasons"]) or "registration check failed"
+    if not strict:
+        return out.fail("registration_unverified", detail)
+    out.stamps_withheld = "registration_unverified"
+    out.flags.append(f"native registration unverified ({detail}); stamps withheld")
+    return out
+
+
+def _slot_latched(session):
+    """INC-2b: is a WEDGED tool-slot observation on record for ``session``? The
+    dispatcher's own arbiter (``server._wedge_recorded``): ABSENT -> False, UNREADABLE
+    -> True (skip the export -- the fail-closed direction for a degrader)."""
+    return bool(_slot_wedged(session))
+
+
+def _observe_slot(session, res):
+    """Hand one export's slot evidence to the session's SOLE latch writer.
+    ``-> (verdict, flags)``; never raises an ordinary ``Exception``. A double without
+    ``observe_tools_slot`` -> ``"unknown"`` + a flag; a PRESENT method that raises ->
+    ``"unknown"`` + a flag. ``res`` (the export's own token) is never changed here."""
+    if not getattr(res, "opened", False):
+        return "not_opened", []                # no tool, no Close(), nothing observed
+    try:
+        observe = getattr(session, "observe_tools_slot")
+    except AttributeError:
+        return "unknown", [_S_SLOT_NOT_RECORDED]
+    try:
+        verdict = observe(run_raised=res.run_raised, close_returned=res.close_returned,
+                          is_running_after_close=res.is_running_after_close)
+    except Exception as exc:  # noqa: BLE001 -- a failed observation is not a latch
+        return "unknown", [_S_SLOT_OBSERVE_FAILED.format(exc=type(exc).__name__)]
+    flags = []
+    if verdict == "wedged" and res.run_raised is not True:
+        flags.append(_S_SLOT_SIGNATURE)
+    elif verdict != "wedged" and res.close_returned is not True:
+        flags.append(_S_SLOT_UNCONFIRMED.format(close=res.close_returned,
+                                                running=res.is_running_after_close))
+    return verdict, flags
+
+
+# =========================================================================== #
+# native-layout-retool -- the native 3-D views (export_3d)
+#
+# OpticStudio's 3-D viewer / shaded-model exporters, default camera, UNSTAMPED: there
+# is no 3-D registration model, so no surface number is drawn on them. One
+# configuration each (the strict current read, proven before AND after), rays
+# optional, and the far-object rule APPLIED through Start/End -- on a folded system
+# too (an owner ruling), with the fold-safe trailing end.
+# =========================================================================== #
+def _decision_3d(system, rows, n, raw_decision, rule_fault):
+    """``(decision | None, flags)``: the far rule a 3-D view applies (step 7).
+
+    An AXIAL system (``IsNonAxial`` reads False) takes the SAME prescription decision the
+    cross-section takes (``raw_decision``), so the cut happens exactly when the
+    cross-section rule would cut; anything else (non-axial, or axiality unreadable)
+    takes ``far_object_decision_folded`` -- the gap-ratio arm alone, basis labelled.
+    A cut image ends at ``last_drawn_surface_before_image`` on BOTH, never a coordinate
+    break (a known trap). ``None`` = nothing applied, and a flag says why."""
+    flags = []
+    if _native.read_axiality(system) is False:
+        if rule_fault is not None:
+            flags.append(f"far-object rule failed ({type(rule_fault).__name__}): "
+                         "nothing was excluded")
+            return None, flags
+        if raw_decision.reason == "extent_unreadable":
+            flags.append("far-object rule not evaluated (extent_unreadable): the drawn "
+                         "extent could not be predicted from the prescription; nothing "
+                         "was excluded")
+            return None, flags
+        decision = raw_decision
+        if decision.cut_image:
+            last = _lr.last_drawn_surface_before_image(
+                rows, n, scaffold=_is_suppressed_scaffold)
+            if last is not None and last != decision.end:
+                decision = _dc_replace(decision, end=last)
+        return decision, flags
+    try:
+        decision = _lr.far_object_decision_folded(rows, n,
+                                                  scaffold=_is_suppressed_scaffold)
+    except Exception as exc:  # noqa: BLE001 -- the figure never depends on the rule
+        flags.append(f"far-object rule failed ({type(exc).__name__}): nothing was "
+                     "excluded")
+        return None, flags
+    if decision.reason == "zero_optics_length":
+        flags.append("far-object rule not evaluated (zero_optics_length): no positive "
+                     "sequential path length between the first drawn optical surface "
+                     "and the fold-safe end; nothing was excluded")
+        return None, flags
+    return decision, flags
+
+
+def _native_3d_attempt(session, *, renderer, rows, n, decision, draw_rays,
+                       config_identity, directory, tmp_sink):
+    """Export and gate one native 3-D view (``export_3d``). Never raises for an
+    engine fault -- every one becomes a token, which the caller REFUSES (a 3-D token is
+    always explicit).
+
+    Slot obligations: a LATCHED session attempts no export (zero
+    ``Tools.Open*``); every export that opened a tool hands its slot evidence to
+    ``_observe_slot`` FIRST, exactly as the cross-section does."""
+    out = _NativeOutcome()
+    kind = _RENDERERS_3D[renderer]
+    if _slot_latched(session):
+        return out.fail("native_unavailable", _S_SLOT_LATCHED)
+    system = session.system
+    if config_identity.count is None:
+        return out.fail("configuration_unreadable",
+                        "the configuration count could not be read")
+    if decision is not None:
+        start, end = int(decision.start), int(decision.end)
+    else:
+        start, end = _lr.native_default_range(rows, n)
+    out.range_decision = decision
+    n_rays = _native.DEFAULT_N_RAYS_3D[kind] if draw_rays else 0
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(suffix=".png", prefix="native3d_", dir=directory)
+    tmp_sink.append(tmp)
+    os.close(fd)
+    out.tmp_path = tmp
+    res = _native.export_3d(system, kind, tmp, config_count=config_identity.count,
+                            start=start, end=end, n_rays=n_rays, n_surfaces=n)
+    verdict, slot_flags = _observe_slot(session, res)
+    out.flags.extend(slot_flags)
+    detail = res.detail
+    if res.run_raised:
+        raised = _S_SLOT_RAISED if _slot_latched(session) else _S_SLOT_RAISED_UNLATCHED
+        detail = f"{detail}; {raised}"
+        out.flags.append(f"native export: {raised}")
+    if res.close_failed:
+        out.flags.append("the native export tool's Close() raised; the export result "
+                         "stands")
+    k = res.configuration_drawn
+    if res.opened and not res.identity_verified:
+        # Step 5: the ONE identity proof failed -- the whole render is REFUSED.
+        out.refusal = _fail(
+            "render_failed",
+            "configuration identity did NOT verify after the 3-D export (configuration "
+            f"{k} before, re-read {res.configuration_after} after one restore); the "
+            "active configuration may be wrong")
+        return out
+    if res.configuration_moved_to is not None:
+        out.flags.append(
+            "the 3-D export moved the active configuration to "
+            f"{res.configuration_moved_to}; restored to {k} and verified")
+    if not res.ok:
+        return out.fail(res.token, detail)
+    W, H = _native.EXPORT_3D_SIZE
+    ihdr = _png_ihdr(tmp)
+    if not _is_png(tmp) or ihdr != (W, H):
+        return out.fail("native_not_png",
+                        f"the 3-D export is not a {W}x{H} PNG (IHDR {ihdr})")
+    rgb = _lr.load_rgb_u8(tmp)
+    if rgb is None or tuple(rgb.shape[:2]) != (H, W):
+        return out.fail("native_not_png", "the exported 3-D PNG could not be decoded")
+    # Step 6: the NAMED WEAKER consistency check -- never the identity proof.
+    consistent, reason = None, None
+    if kind != "viewer":
+        reason = "the shaded exporter colours rays by field"
+    elif n_rays == 0:
+        reason = "rays off"
+    elif config_identity.count > len(_lr.CONFIG_RAY_PALETTE):
+        reason = (f"{config_identity.count} configurations; the ray palette is "
+                  f"measured for {len(_lr.CONFIG_RAY_PALETTE)} only")
+    else:
+        try:
+            counts = _lr.ray_colour_counts(rgb)
+        except ValueError as exc:
+            return out.fail("native_not_png", str(exc))
+        consistent, reason = _lr.ray_colour_verdict(counts, k)
+        if consistent is False:
+            return out.fail(
+                "native_export_failed",
+                f"ray colours inconsistent with configuration {k} (blue "
+                f"{counts['blue']} / green {counts['green']} / red {counts['red']} px; "
+                f"configuration {k} is {_lr.CONFIG_RAY_PALETTE[k]})")
+    if consistent is None:
+        out.flags.append(_S_3D_COLOUR_NULL.format(reason=reason))
+    out.rgb, out.start, out.end = rgb, start, end
+    out.view_3d = {
+        "exporter": kind, "configuration_drawn": k,
+        "configuration_identity": "current_readback",
+        "ray_colour_consistent": consistent, "start_surface": start,
+        "end_surface": end, "n_rays": n_rays,
+    }
+    out.stamps_withheld = "view_3d"
+    return out
+
+
+def _draw_native_3d(plt, np, outcome, *, rows, n, title, stop_index, apertures,
+                    extra_strings=()):
+    """The 3-D composite: the exported raster 1:1 (``figimage``), the disclosure
+    strip on top (``_S_3D`` first) and the title strip below. No axes, no stamps, no
+    leaders. Returns ``_draw``'s 5-tuple (no labels, no stop label, 0 rays drawn)."""
+    rgb = outcome.rgb
+    H, W = int(rgb.shape[0]), int(rgb.shape[1])
+    kind = (outcome.view_3d or {}).get("exporter", "viewer")
+    optical = _optical_indices(rows, n)
+    eligible = _aperture_disclosure_indices(optical, stop_index, n)
+    aperture_not_measured = [i for i in eligible
+                             if i < len(apertures) and not apertures[i].measured]
+    profile_not_measured = [i for i in optical if _sag_inputs_unreadable(rows[i])]
+    strings = [_S_3D.format(kind=_S_3D_KIND.get(kind, kind))] + list(extra_strings)
+    truncated = 0
+    if len(strings) > _GUTTER_MAX_LINES:
+        truncated = len(strings) - (_GUTTER_MAX_LINES - 1)
+        strings = strings[:_GUTTER_MAX_LINES - 1] + [_S_OVERFLOW.format(n=truncated)]
+    strip = _GUTTER_LINE_PX * len(strings) + 6
+    C = _GUTTER_CAPTION_PX
+    Htot = strip + H + C
+    fig = plt.figure(figsize=((W + 1e-6) / _OVERLAY_DPI, (Htot + 1e-6) / _OVERLAY_DPI),
+                     dpi=_OVERLAY_DPI)
+    fig.patch.set_facecolor("white")
+    fig.figimage(rgb, xo=0, yo=C, origin="upper", zorder=-10)
+    placed = _native_captions(fig, title=title, strings=strings, width=W,
+                              height_total=Htot)
+    fig._optivibe_save_kwargs = {"dpi": _OVERLAY_DPI}
+    fig._optivibe_layout_meta = {
+        "aperture_not_measured": list(aperture_not_measured),
+        "profile_not_measured": list(profile_not_measured),
+        "rim_truncated": [],
+        "interfaces_omitted": [],
+        "interfaces_extended": [],
+        "groups_not_split": [],
+        "disclosures_truncated": int(truncated),
+        "figure_disclosures": list(placed),
+    }
+    return fig, [], None, 0, list(placed)
+
+
+def _native_captions(fig, *, title, strings, width, height_total):
+    """Place the disclosure strip (top) and the title strip (bottom) in FIGURE pixels.
+
+    Returns the strings placed, in order. The strip holds at most
+    ``_GUTTER_MAX_LINES`` lines (the caller already folded any excess into the
+    ``_S_OVERFLOW`` line). Nothing here enters the raster.
+    """
+    placed = []
+    for i, text in enumerate(strings):
+        y_px = height_total - 4 - i * _GUTTER_LINE_PX
+        art = fig.text(6.0 / width, y_px / height_total, text, ha="left", va="top",
+                       fontsize=_DISCLOSURE_FONT_PT, color="black")
+        art.set_gid("disclosure:native_strip")
+        placed.append(text)
+    cap = fig.text(0.5, (_GUTTER_CAPTION_PX / 2.0) / height_total, title,
+                   ha="center", va="center", fontsize=9, color="black")
+    cap.set_gid("disclosure:native_title")
+    return placed
+
+
+def _native_markers(ax, reg, exclusion, n):
+    """The far-end markers, in the BOTTOM stamp gutter -- OUTSIDE the raster, never on
+    vendor ink (a ~110 px marker in the ~80 px 5 % margin covered surface 1's
+    vertex on the axis row, and only leaders and white-boxed NUMBERS on the
+    vendor's pixels). Left / right frame edge, the rider-word box style, so the image
+    NUMBER stays readable when the image plane is left out. ONE placement rule, no
+    runtime relocation: the no-overlap guarantee is a test, not a second path."""
+    if exclusion is None:
+        return
+    box = {"boxstyle": f"square,pad={_RIDER_BOX_PAD}", "facecolor": "white",
+           "edgecolor": "none", "linewidth": _NARROW_LINE_PT}
+    # data y grows DOWN the raster (limits are pixel edges): H - 0.5 is the raster's
+    # bottom edge, so this row sits in the gutter just above the caption strip.
+    y = reg.H - 0.5 + _GUTTER_STAMP_PX - _MARKER_INSET_PX
+    for entry in exclusion.excluded:
+        if entry["role"] == "object":
+            text, x, ha = f"← 0 OBJECT {entry['gap_mm']:g} mm", 3.0, "left"
+        else:
+            text, x, ha = (f"IMAGE {n - 1} → {entry['gap_mm']:g} mm",
+                           reg.W - 4.0, "right")
+        marker = ax.text(x, y, text, ha=ha, va="center", fontsize=7,
+                         color="0.4", zorder=6, clip_on=False, bbox=box)
+        marker.set_gid(f"s{entry['surface']}:marker")
+
+
+def _draw_native_overlay(plt, np, outcome, *, rows, n, title, stop_index, apertures,
+                         folded, global_frames, projection, config_identity, decision,
+                         extra_strings=()):
+    """Composite the native raster 1:1 with OUR stamps. Returns ``_draw``'s 5-tuple.
+
+    The raster is placed with ``figimage`` (no resampling path exists) and an axes
+    covering EXACTLY the raster's pixels carries the stamps, its data space being the
+    raster's pixel space (``Registration.data_limits``): ``to_plot`` returns PIXELS and
+    registration is applied exactly once. The figure is saved at its own dpi with no
+    tight crop (a crop would move the registration). An unstamped native (explicit,
+    registration withheld) draws no leaders and says so in the strip.
+    """
+    rgb, reg = outcome.rgb, outcome.reg
+    H, W = int(rgb.shape[0]), int(rgb.shape[1])
+    stamps = outcome.stamps_withheld is None
+    optical = _optical_indices(rows, n)
+    # The strip's strings: the shared vocabulary. The fold strings describe OUR
+    # folded drawing and never apply to vendor ink, hence folded=False.
+    eligible = _aperture_disclosure_indices(optical, stop_index, n)
+    aperture_not_measured = [i for i in eligible
+                             if i < len(apertures) and not apertures[i].measured]
+    profile_not_measured = [i for i in optical if _sag_inputs_unreadable(rows[i])]
+    strings = _figure_disclosure_strings(
+        rows=rows, folded=False, projection=projection,
+        config_identity=config_identity, open_groups=(), placeholder_groups=(),
+        aperture_not_measured=aperture_not_measured, interfaces_omitted=(),
+        profile_not_measured=profile_not_measured)
+    if not stamps:
+        strings.insert(0, _S_WITHHELD.format(status=outcome.stamps_withheld))
+    strings.extend(extra_strings)
+    truncated = 0
+    if len(strings) > _GUTTER_MAX_LINES:
+        truncated = len(strings) - (_GUTTER_MAX_LINES - 1)
+        strings = strings[:_GUTTER_MAX_LINES - 1] + [_S_OVERFLOW.format(n=truncated)]
+    strip = _GUTTER_LINE_PX * len(strings) + 6
+    P, C = _GUTTER_STAMP_PX, _GUTTER_CAPTION_PX
+    Htot = strip + P + H + P + C
+    # +1e-6 px: matplotlib TRUNCATES figsize * dpi to the canvas size, and e.g.
+    # 1624 / 100 * 100 is 1623.9999999999998 -- one pixel row short of the raster.
+    fig = plt.figure(figsize=((W + 1e-6) / _OVERLAY_DPI, (Htot + 1e-6) / _OVERLAY_DPI),
+                     dpi=_OVERLAY_DPI)
+    fig.patch.set_facecolor("white")
+    # Below every axes artist: a figure image is drawn after the axes at equal zorder
+    # and would otherwise cover the stamps.
+    fig.figimage(rgb, xo=0, yo=C + P, origin="upper", zorder=-10)
+    ax = fig.add_axes([0.0, (C + P) / Htot, 1.0, H / Htot])
+    lims = reg.data_limits()
+    ax.set_xlim(lims[0], lims[1])
+    ax.set_ylim(lims[2], lims[3])
+    ax.set_aspect("auto")
+    ax.set_axis_off()
+    frames = global_frames if folded else None
+    to_plot = _native_to_plot(rows, frames, reg)
+
+    surface_labels = []
+    stop_label = None
+    placements = []
+    if stamps:
+        for e in outcome.plan:
+            idx = e["surface"]
+            color = e["color"]
+            if idx != n - 1:
+                surface_labels.append(idx)
+            if stop_index is not None and idx == stop_index:
+                stop_label = idx
+            no_leader = bool(e["ambiguous"] or e["subpixel"] or not e["measured"]
+                             or e.get("profile_demoted"))
+            word = _rider_word(idx, stop_index, n, at_vertex=no_leader)
+            if no_leader:
+                # The terminus could not be attributed (ambiguous), is below a pixel
+                # (subpixel), has no measured edge, or its predicted profile was not
+                # found on ink (profile_demoted): the number sits at the PREDICTED
+                # VERTEX with no leader, UNVERIFIED -- so it always reads `k?` (R-3: a
+                # subpixel stamp is never ink-checked either, and must not look it).
+                vx, vy = e["vertex"]
+                text = f"{idx}?"
+                stamp = ax.text(vx, vy, text, ha="center", va="bottom", fontsize=8,
+                                color=color, zorder=6, clip_on=False)
+                stamp.set_gid(f"s{idx}:stamp")
+                if word is not None:
+                    w_art = ax.annotate(
+                        word[0], xy=(vx, vy), xytext=(0.0, -4.0),
+                        textcoords="offset points", ha="center", va="top",
+                        fontsize=7, color=word[1], zorder=6, annotation_clip=False,
+                        bbox={"boxstyle": f"square,pad={_RIDER_BOX_PAD}",
+                              "facecolor": "white", "edgecolor": "none",
+                              "linewidth": _NARROW_LINE_PT})
+                    w_art.set_gid(f"s{idx}:word")
+                continue
+            side = e["side"]
+            # The fixed 36-px arm expressed in LOCAL mm for `to_plot` (two coordinate
+            # systems: the helpers take mm, the axes' data units are pixels).
+            arm = float(e["edge_mm"]) + _STAMP_ARM_PX / reg.s
+            label = to_plot(idx, side * arm, e["sag"])
+            if label is None:
+                continue
+            tip = e["terminus"]
+            anno = ax.annotate(
+                str(idx), xy=tip, xytext=label, ha="center",
+                va="bottom" if side > 0 else "top", fontsize=8, color=color,
+                zorder=6, annotation_clip=False,
+                arrowprops={"arrowstyle": "-" if e["interior"] else "->",
+                            "lw": _NARROW_LINE_PT, "color": color,
+                            "shrinkA": 1.0, "shrinkB": 1.0},
+            )
+            anno.set_clip_on(False)
+            anno.set_gid(f"s{idx}:leader")
+            placements.append({"anno": anno, "surface": idx, "side": side,
+                               "base": arm, "sag": e["sag"], "to_plot": to_plot,
+                               "tier": 0, "rider": None})
+            if word is not None:
+                anno.set_bbox({"boxstyle": f"square,pad={_RIDER_BOX_PAD}",
+                               "facecolor": "white", "edgecolor": "none",
+                               "linewidth": _NARROW_LINE_PT})
+                rider = _word_rider(ax, to_plot, idx, side, arm + 12.0 / reg.s,
+                                    e["sag"], word[0], word[1])
+                if rider is not None:
+                    rider.set_clip_on(False)
+                    placements[-1]["rider"] = rider
+            if e["interior"]:
+                _leader_dot(ax, idx, tip, color).set_clip_on(False)
+        if outcome.start == 0:
+            ox, oy = to_plot(0, 0.0, 0.0) or (None, None)
+            if ox is not None:
+                obj = ax.text(ox, oy, "0", ha="right", va="center", fontsize=7,
+                              color="0.4", zorder=5, clip_on=False)
+                obj.set_gid("s0:stamp")
+        # Tier to a fixed point with NO re-framing: the limits ARE the raster.
+        for _pass in range(_STAMP_TIER_PASSES):
+            if not _tier_colliding_stamps(fig, ax, placements, unit_px=reg.s):
+                break
+    _native_markers(ax, reg, decision, n)
+    placed = _native_captions(fig, title=title, strings=strings, width=W,
+                              height_total=Htot)
+    fig._optivibe_save_kwargs = {"dpi": _OVERLAY_DPI}
+    fig._optivibe_layout_meta = {
+        "aperture_not_measured": list(aperture_not_measured),
+        "profile_not_measured": list(profile_not_measured),
+        "rim_truncated": [],
+        "interfaces_omitted": [],
+        "interfaces_extended": [],
+        "groups_not_split": [],
+        "disclosures_truncated": int(truncated),
+        "figure_disclosures": list(placed),
+    }
+    # dogfood F-6: the stamps are PLACED in plan order (tiering), not surface order;
+    # the envelope lists the same set ascending, as the self renderer does.
+    return fig, sorted(surface_labels), stop_label, 0, list(placed)
 
 
 def render_layout(session, params, *, exact_path=None):
@@ -3203,8 +4566,36 @@ def render_layout(session, params, *, exact_path=None):
     # downstream (the drawing decision AND the echo) reads one already-validated
     # value instead of re-deriving it from the raw input. The copy keeps this
     # normalisation out of the caller's dict.
-    params = dict(params)
+    # renderer (native-layout-retool): resolved HERE for the same reason -- every
+    # refusal lands before the config resolve below touches `session.system`. The
+    # order is FIXED so a message is deterministic: unknown token -> element_outline
+    # with a non-self renderer -> a token this build cannot draw.
+    _renderer = _resolve_renderer(params)
+    if _renderer is None:
+        return _fail(
+            "render_failed",
+            f"renderer must be one of {list(_RENDERER_VALUES)}; got "
+            f"{params.get('renderer')!r}",
+        )
+    if _renderer[0] != "self" and "element_outline" in params:
+        return _fail(
+            "render_failed",
+            "element_outline applies to renderer='self' only; pass renderer='self' "
+            "or omit element_outline",
+        )
+    if _renderer[0] not in _RENDERERS_BUILT:
+        return _fail(
+            "render_failed",
+            f"renderer {_renderer[0]!r} is not available in this build",
+        )
+    params = _RenderParams(params)
     params["element_outline"] = _outline
+    # The effective token rides the params COPY; the `strict` flag rides the copy as
+    # an ATTRIBUTE, not a key -- it is not a served parameter, and the body's signature
+    # is pinned: an EXPLICIT renderer that cannot run is REFUSED, an omitted one (the
+    # default) may fall back.
+    params["renderer"] = _renderer[0]
+    params.renderer_strict = bool(_renderer[1])
     # resolve the OPTIONAL single-config selector; stamp the title.
     try:
         cfg_idx = _resolve_render_config(session.system, params.get("config"))
@@ -3271,6 +4662,7 @@ def _render_layout_at(session, params, *, exact_path=None):
     fig = None
     plt = None
     tmp = None
+    native_tmps = []
     minted = False
     try:
         # WHERE THE FIGURE GOES IS DECIDED FIRST, BEFORE ANY ENGINE READ. A minted
@@ -3405,12 +4797,156 @@ def _render_layout_at(session, params, *, exact_path=None):
         if folded:
             global_frames = _geom.read_global_frames(lde, n)
 
+        # --- the shared far-object rule (native-layout-retool, owner ruling) ------ #
+        # Computed from the prescription alone, BEFORE the ray read. APPLIED on the
+        # unfolded self path and on the native cross-section; on the folded self path
+        # it is computed and DISCLOSED but NOT applied (an owner ruling -- the folded
+        # self frame includes every ray point by design), ticketed.
+        renderer_req = params.get("renderer", "self")
+        strict = bool(getattr(params, "renderer_strict", False))
+        renderer_used = "self"
+        fallback_token = None
+        native = None
+        native_flags = []
+        # The rule is NEW code run on every render, so a fault in it must never sink
+        # the figure: it is caught HERE, nothing is cut, and one flag says so. An
+        # abort (BaseException) is not caught and reaches the outer handler.
+        points = None
+        raw_decision = None
+        rule_fault = None
+        try:
+            points = _lr.surface_points(
+                rows, n, draw_heights, frames=global_frames if folded else None,
+                sag_fn=lambda _rows, _i, _h: _edge_sag_checked(np, _rows, _i, _h))
+            raw_decision = _lr.far_object_decision(rows, n, points)
+        except Exception as exc:  # noqa: BLE001 -- the figure never depends on the rule
+            points, raw_decision, rule_fault = None, None, exc
+
+        # --- the native cross-section: first choice when requested -------
+        if renderer_req == "native":
+            native = _native_attempt(
+                session, rows=rows, n=n, apertures=apertures, rims=rims,
+                draw_heights=draw_heights, folded=folded, global_frames=global_frames,
+                points=points, decision=raw_decision, draw_rays=draw_rays,
+                config_identity=config_identity,
+                directory=os.path.dirname(attempted) or ".", stop_index=stop_index,
+                strict=strict, tmp_sink=native_tmps)
+            if native.refusal is not None:
+                return native.refusal
+            if native.token is not None:
+                family = _NATIVE_EXPLICIT_FAMILY.get(native.token, "render_failed")
+                if strict:
+                    return _fail(family or "render_failed",
+                                 _native_refusal_message(native))
+                fallback_token = native.token
+                native_flags.append(
+                    f"native fallback ({native.token}): {native.detail}")
+            else:
+                renderer_used = "native"
+            native_flags.extend(native.flags)
+        # --- the native 3-D views: ALWAYS explicit, so never a fallback ------
+        rule_flags_3d = []
+        if renderer_req in _RENDERERS_3D:
+            decision_3d, rule_flags_3d = _decision_3d(
+                session.system, rows, n, raw_decision, rule_fault)
+            native = _native_3d_attempt(
+                session, renderer=renderer_req, rows=rows, n=n, decision=decision_3d,
+                draw_rays=draw_rays, config_identity=config_identity,
+                directory=os.path.dirname(attempted) or ".", tmp_sink=native_tmps)
+            if native.refusal is not None:
+                return native.refusal
+            if native.token is not None:
+                family = _NATIVE_EXPLICIT_FAMILY.get(native.token, "render_failed")
+                return _fail(family or "render_failed",
+                             _native_refusal_message(native, renderer_req))
+            renderer_used = renderer_req
+            native_flags.extend(native.flags)
+
+        far_flags = []
+        far_strings = []
+        # R-5: WHETHER the rule applies is decided in a PURE branch, outside any `try`,
+        # so a fault in the caption formatting below can drop the caption but never the
+        # RECORD of a cut the picture already carries (the export and the self frame
+        # consume the same `raw_decision`).
+        if renderer_used in _RENDERERS_3D:
+            # the decision the 3-D export CONSUMED (its Start/End): one object, one range
+            decision = native.range_decision
+            far_flags.extend(rule_flags_3d)
+        elif rule_fault is not None:
+            decision = None
+            far_flags.append(
+                f"far-object rule failed ({type(rule_fault).__name__}): nothing was "
+                "excluded")
+        elif raw_decision.reason == "extent_unreadable":
+            # checked FIRST, on BOTH paths ("no cut + flag")
+            decision = None
+            far_flags.append(
+                "far-object rule not evaluated (extent_unreadable): the drawn "
+                "extent could not be predicted from the prescription; nothing "
+                "was excluded")
+        elif folded and renderer_used == "self":
+            decision = None
+            # dogfood F-3 (spec Task B step 2): a folded SELF render never applies the
+            # rule, so it says so on EVERY such render, not only when the rule fired --
+            # an untriggered rule is still a rule this path did not apply.
+            if raw_decision.triggered:
+                far_flags.append(
+                    f"far-object rule computed (fill {raw_decision.fill:.3f}) but "
+                    "not applied: folded system — "
+                    "")
+            else:
+                _fill = raw_decision.fill
+                _fill_txt = (f"fill {_fill:.3f}" if isinstance(_fill, (int, float))
+                             and math.isfinite(_fill) else "fill unread")
+                far_flags.append(
+                    f"far-object rule computed ({_fill_txt}, not triggered) but "
+                    "not applied: folded system — "
+                    "")
+        else:
+            decision = raw_decision
+        if decision is not None:
+            try:
+                for entry in decision.excluded:
+                    far_strings.append(_S_FAR.format(
+                        k=entry["surface"], ROLE=entry["role"].upper(),
+                        gap=entry["gap_mm"], ratio=entry["gap_over_length"]))
+                # the fill is a 2-D frame prediction; a 3-D view has none
+                if (decision.reason == "speck_no_cut"
+                        and renderer_used not in _RENDERERS_3D):
+                    far_strings.append(_S_SPECK.format(fill=decision.fill))
+            except Exception as exc:  # noqa: BLE001 -- a caption fault drops the caption only
+                far_strings = [_S_FAR_UNCAPTIONED] if decision.excluded else []
+                far_flags.append(
+                    f"far-object caption unavailable ({type(exc).__name__}); the "
+                    "exclusion itself stands (see far_object_excluded)")
+        # One decision object, one range: the native export's own Start/End must be
+        # what the envelope describes. A disagreement is flagged, never silent.
+        if renderer_used == "native" and native is not None:
+            used = native.range_decision
+            if (used is None) != (decision is None) or (
+                    used is not None and decision is not None
+                    and (used.start, used.end) != (decision.start, decision.end)):
+                far_flags.append(
+                    "far-object record and the native export's range disagree "
+                    f"(export {getattr(used, 'start', None)}..{getattr(used, 'end', None)}"
+                    f", record {getattr(decision, 'start', None)}.."
+                    f"{getattr(decision, 'end', None)})")
+
         ray_data = None
         ray_flags = []
         # Rays draw whenever requested AND not blocked by the unfolded axial-degrade
         # case. Folded systems NO LONGER suppress rays (nit 5a).
         suppress_axial = bool(axial_degraded) and not folded
-        effective_draw_rays = bool(draw_rays) and not suppress_axial
+        effective_draw_rays = (bool(draw_rays) and not suppress_axial
+                               and renderer_used == "self")
+        # The degrader rule: a latched session does NOT attempt the ray
+        # read -- every batch open would return None and each polyline would truncate
+        # at k=1 with a wrong "ray was truncated" diagnosis.
+        rays_latched = False
+        if effective_draw_rays and _slot_latched(session):
+            effective_draw_rays = False
+            rays_latched = True
+            ray_flags = [f"rays {_S_SLOT_LATCHED}"]
         if effective_draw_rays:
             try:
                 # A3: time-bound the ray loop — a perf_counter deadline checked BETWEEN
@@ -3427,26 +4963,78 @@ def _render_layout_at(session, params, *, exact_path=None):
                     "flags": [f"ray trace unavailable: {type(exc).__name__}: {exc}"],
                 }
             ray_flags = list(ray_data.get("flags", []))
-        elif draw_rays and suppress_axial:
+        elif draw_rays and suppress_axial and renderer_used == "self":
             ray_flags = [
                 "rays suppressed: degraded axial geometry (surfaces "
                 f"{axial_degraded} have non-finite thickness; vertex registration "
                 "unreliable)"
             ]
 
+        # The ONE place the two frames meet (unfolded path only). The rays are in the
+        # engine's GLOBAL frame, whose origin is the global coordinate reference
+        # surface (surface 1 by default); the unfolded drawing places surfaces by
+        # `vertex_z`, whose origin is the OBJECT surface. They coincide only when the
+        # object is at infinity AND the reference is surface 1 -- a finite object at
+        # 1000 mm drew every ray 1000 mm upstream of the lens.
+        if not folded and ray_data and ray_data.get("fields"):
+            ray_data = _register_rays_to_drawing(ray_data, rows, lde)
+
         # The convention token, read ONCE from the params the caller normalised.
         # `render_layout` has already VALIDATED it and written the effective value
         # back, so there is no re-derivation here and no branch that could coerce
         # an unrecognised value to a default.
         outline = params.get("element_outline", _ELEMENT_OUTLINE_DEFAULT)
-        if folded:
+        # A default render that fell back from native says so ON the figure too.
+        fallback_strings = (
+            (_S_FALLBACK.format(token=fallback_token),) if fallback_token else ())
+        # The SAMPLED-ray coverage of whichever renderer drew. Never a
+        # refusal, never a fallback token; one flag per affected field (self: only an
+        # empty field -- a cut is already flagged by the reader) and ONE figure line.
+        if renderer_used in _RENDERERS_3D:
+            # POPPED under the 3-D tokens (a 3-D depiction of a failing
+            # ray is unmeasured) -- no key, no flag, no figure line.
+            ray_coverage = None
+            coverage_flags = []
+        elif renderer_used == "native":
+            ray_coverage = native.ray_coverage or _rc.unavailable(
+                _rc.REASON_TRACE_UNAVAILABLE)
+            coverage_flags = list(native.coverage_flags) + _rc.coverage_flags(
+                ray_coverage)
+        else:
+            ray_coverage = _rc.self_coverage(
+                ray_data, draw_rays=draw_rays, latched=rays_latched,
+                suppressed=bool(draw_rays) and suppress_axial)
+            coverage_flags = ([] if ray_coverage.get("reason") in (
+                _rc.REASON_WEDGED, _rc.REASON_SUPPRESSED)
+                else _rc.coverage_flags(ray_coverage, only_none=True))
+        _missing = (None if ray_coverage is None
+                    else _rc.missing_summary(ray_coverage))
+        missing_strings = (() if _missing is None else (_S_RAYS_MISSING.format(
+            fields=", ".join(str(f) for f in _missing[0]), n_failed=_missing[1],
+            n_sampled=_missing[2]),))
+        if renderer_used in _RENDERERS_3D:
+            (fig, surface_labels, stop_label, n_rays_drawn,
+             figure_disclosures) = _draw_native_3d(
+                plt, np, native, rows=rows, n=n, title=title, stop_index=stop_index,
+                apertures=apertures, extra_strings=tuple(far_strings),
+            )
+        elif renderer_used == "native":
+            (fig, surface_labels, stop_label, n_rays_drawn,
+             figure_disclosures) = _draw_native_overlay(
+                plt, np, native, rows=rows, n=n, title=title, stop_index=stop_index,
+                apertures=apertures, folded=folded, global_frames=global_frames,
+                projection=projection, config_identity=config_identity,
+                decision=decision,
+                extra_strings=tuple(far_strings) + missing_strings,
+            )
+        elif folded:
             # The global-frame coherent folded figure.
             (fig, surface_labels, stop_label, n_rays_drawn,
              figure_disclosures) = _draw_folded_global(
                 plt, np, rows, n, title, stop_index, apertures, rims,
                 draw_heights, degraded, global_frames, ray_data,
                 effective_draw_rays, projection, config_identity,
-                outline=outline,
+                outline=outline, extra_strings=fallback_strings + missing_strings,
             )
         else:
             # The all-refractive UNFOLDED path.
@@ -3455,8 +5043,12 @@ def _render_layout_at(session, params, *, exact_path=None):
                 plt, np, rows, n, title, stop_index, folded, apertures, rims,
                 draw_heights, degraded, ray_data, effective_draw_rays,
                 projection, config_identity, outline=outline,
+                exclusion=decision,
+                extra_strings=(fallback_strings + tuple(far_strings)
+                               + missing_strings),
             )
         _layout_meta = dict(getattr(fig, "_optivibe_layout_meta", {}) or {})
+        _legend_seat = getattr(fig, "_optivibe_legend_seat", None)
 
         # Atomic durability gate (§3.8): UNIQUE temp in the target dir -> _is_png ->
         # replace. A unique temp (tempfile.mkstemp) avoids the race where two
@@ -3472,7 +5064,10 @@ def _render_layout_at(session, params, *, exact_path=None):
         # magic-bytes + byte count, the montage imshow-s whatever it is
         # handed, no test asserts a size) -- and the catalog plotter already
         # ships this exact call.
-        fig.savefig(tmp, dpi=120, format="png", bbox_inches="tight")
+        # The native overlay carries its own save arguments (its own dpi, NO tight
+        # crop: a crop would shift the registration); the self figures keep theirs.
+        fig.savefig(tmp, format="png", **getattr(
+            fig, "_optivibe_save_kwargs", {"dpi": 120, "bbox_inches": "tight"}))
         # Close the figure NOW (before the gate / replace) — leak-safe even on the
         # gate-fail return path. (Also closed in finally as a backstop.) A teardown
         # failure must NEVER mask the gate result, so the inline close is guarded;
@@ -3557,12 +5152,12 @@ def _render_layout_at(session, params, *, exact_path=None):
                 "(coordinate breaks + flat powerless air dummies — frame operators / "
                 "spacers, not surfaces the beam lands on)"
             )
-        if asphere_sag_modelled:
+        if asphere_sag_modelled and renderer_used == "self":
             notes.append(
                 f"surfaces {asphere_sag_modelled} are even aspheres drawn from the FULL "
                 "sag (sphere + conic + polynomial term) — the drawn profile is faithful"
             )
-        if asphere_sag_approximate:
+        if asphere_sag_approximate and renderer_used == "self":
             # FAIL-CLOSED honesty: every entry here is a surface whose even-asphere
             # polynomial term could NOT be read (a degraded/throwing coefficient cell, OR a
             # wedged row that could be an asphere). The drawn curve fell back to the
@@ -3590,15 +5185,16 @@ def _render_layout_at(session, params, *, exact_path=None):
                     "read failed) and MAY be even aspheres; if so the drawn profile is "
                     "approximate (sphere+conic base only) — open the .zmx to verify"
                 )
-        if folded:
+        if folded and renderer_used == "self":
             # the folded figure is now drawn COHERENTLY in the global
             # frame (elements + rays share one frame), so the note is honest about that
             # — no longer the "axial layout past the fold is schematic" caveat. A
             # surface whose global frame was degraded is surfaced via `degraded`.
             notes.append(
                 "Folded system drawn in the global frame (element vertices from "
-                "GetGlobalMatrix coherent with the RAGY/RAGZ rays). Open the .zmx for "
-                "the native 3D layout."
+                "GetGlobalMatrix coherent with the RAGY/RAGZ rays). For the native 3-D "
+                "view call render_layout with renderer=\"native_3d\" (or "
+                "\"native_shaded\")."
             )
             if global_frames is not None:
                 # Scan through n-1 (INCLUSIVE) so a degraded IMAGE-plane frame
@@ -3626,6 +5222,14 @@ def _render_layout_at(session, params, *, exact_path=None):
         if degraded:
             notes.append(f"surfaces {degraded} were unreadable and degraded")
         flags = list(ray_flags)  # additive machine-readable channel (rays + geometry)
+        flags.extend(native_flags)
+        flags.extend(far_flags)
+        flags.extend(coverage_flags)
+        if _legend_seat == "no_clear_seat":
+            # dogfood F-4: never silent -- the bounded seat search found no seat inside the
+            # figure clear of the disclosures/stamps/captions, so the legend kept its seat.
+            flags.append("ray legend could not be seated clear of the figure's "
+                         "disclosures and stamps; it may overlap them")
 
         # GRIN (§6.2) disclosure: a GRIN surface's INTERNAL index profile is not
         # drawn — the drawn geometry is the Standard sphere/conic base (the index
@@ -3643,6 +5247,10 @@ def _render_layout_at(session, params, *, exact_path=None):
                 if _grin.grin_type_of_name(str(rows[i].get("type_name", ""))) is not None:
                     grin_index_profile_not_drawn.append(i)
         except Exception:  # noqa: BLE001 — a GRIN resolver hiccup -> no GRIN disclosure
+            grin_index_profile_not_drawn = []
+        if renderer_used in _RENDERERS_3D:
+            # POPPED under the 3-D tokens -- the key, its flag and _REASON_GRIN (how
+            # a 3-D view depicts a GRIN is unmeasured, so nothing is claimed about it).
             grin_index_profile_not_drawn = []
         if grin_index_profile_not_drawn:
             flags.append(
@@ -3665,7 +5273,8 @@ def _render_layout_at(session, params, *, exact_path=None):
             and (n - 1) < len(global_frames)
             and bool(global_frames[n - 1].get("ok"))
         )
-        if folded and not surface_labels and n_rays_drawn == 0 and not image_frame_ok:
+        if (folded and renderer_used == "self" and not surface_labels
+                and n_rays_drawn == 0 and not image_frame_ok):
             flags.append(
                 "no drawable folded geometry after global-frame suppression — the figure "
                 "is blank (every surface frame was degraded and no ray was drawn)"
@@ -3688,7 +5297,8 @@ def _render_layout_at(session, params, *, exact_path=None):
         coverage_reasons = []
         if _layout_meta.get("aperture_not_measured"):
             coverage_reasons.append(_REASON_APERTURE)
-        if folded:
+        if folded and renderer_used == "self":
+            # the token describes OUR folded global-frame drawing, never vendor ink
             coverage_reasons.append(_REASON_FOLDED)
         if grin_index_profile_not_drawn:
             coverage_reasons.append(_REASON_GRIN)
@@ -3777,7 +5387,33 @@ def _render_layout_at(session, params, *, exact_path=None):
             "figure_disclosures": list(figure_disclosures),
             "disclosures_truncated": int(
                 _layout_meta.get("disclosures_truncated", 0)),
+            # native-layout-retool: WHO drew these bytes, whether the default fell
+            # back from its first choice and why (null = it did not), and which far
+            # end the shared rule left out of the frame ([] = nothing), each entry
+            # carrying its own numbers so a wrong cut is auditable.
+            "renderer": renderer_used,
+            "renderer_fallback": fallback_token,
+            "far_object_excluded": (
+                [dict(e) for e in decision.excluded] if decision is not None else []),
+            # WHICH of the rays OptiVibe SAMPLED could not reach the image
+            # (`basis` names the sample; native: exporter correspondence UNVERIFIED).
+            "ray_coverage": ray_coverage,
         }
+        # native: the SELF-only ink keys describe nothing on vendor ink -> removed;
+        # `registration` rides EVERY native cross-section envelope (verified and
+        # withheld alike); `stamps_withheld` names why an explicit native is unstamped.
+        if renderer_used != "self":
+            for _key in _NATIVE_INK_KEYS:
+                _result.pop(_key, None)
+            if native is not None and native.registration is not None:
+                _result["registration"] = dict(native.registration)
+            if native is not None and native.stamps_withheld is not None:
+                _result["stamps_withheld"] = native.stamps_withheld
+        # The 3-D counterpart of `registration`, on EVERY 3-D envelope; the
+        # sampled-ray coverage is POPPED there.
+        if renderer_used in _RENDERERS_3D:
+            _result["view_3d"] = dict(native.view_3d)
+            _result.pop("ray_coverage", None)
         # GRIN (§6.2): the additive index-not-drawn surface list — emitted ONLY when
         # non-empty (a non-GRIN system stays byte-for-byte unchanged).
         if grin_index_profile_not_drawn:
@@ -3815,13 +5451,24 @@ def _render_layout_at(session, params, *, exact_path=None):
                 plt.close(fig)
             except Exception:  # noqa: BLE001 — teardown must never raise
                 pass
-        # Clean a leftover temp on any unexpected exit path.
-        if tmp is not None:
+        # Clean a leftover temp on any unexpected exit path -- and the native
+        # export's raster, which is never the delivered file.
+        for _left in [tmp] + native_tmps:
+            if _left is None:
+                continue
             try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
+                if os.path.exists(_left):
+                    os.remove(_left)
             except OSError:
                 pass
+
+
+#: The served description's HARD CAP (native-layout-retool): 5,416 chars MEASURED
+#: (`len(RENDER_LAYOUT_SPEC.description)`) + 1,000 [unmeasured
+#: choice: room for the four call-changing native facts an agent must read at
+#: tool-selection time]. Pinned by a test so a later edit cannot exceed it silently;
+#: slimming is.
+_DESCRIPTION_CHAR_CAP = 6_416
 
 
 RENDER_LAYOUT_SPEC = ToolSpec(
@@ -3833,7 +5480,10 @@ RENDER_LAYOUT_SPEC = ToolSpec(
                  # element-edge convention selector; the closed
                  # vocabulary lives in the description prose, NOT in a served
                  # enum -- see the description and `_resolve_element_outline`.
-                 "element_outline": "string"},
+                 "element_outline": "string",
+                 # who draws the picture (native-layout-retool); the same
+                 # prose-not-enum rule -- see `_resolve_renderer`.
+                 "renderer": "string"},
     description=(
         "With no path the figure goes to candidates/scratch/ as a numbered scratch "
         "file (minted:true) and never overwrites an earlier one; if that directory "
@@ -3841,14 +5491,30 @@ RENDER_LAYOUT_SPEC = ToolSpec(
         "because a name it cannot prove is free could destroy an existing figure. A "
         "REVIEWABLE figure is the one save_candidate(render=true) writes beside its "
         ".zmx. "
-        "Draw a real meridional (y-z) optical layout PNG for the user, in an "
+        "renderer picks who draws the picture: 'native' (OpticStudio's own "
+        "cross-section, axial systems only; it cannot draw any coordinate break, even "
+        "all-zero) or 'self' (OptiVibe's drawing, below), or the UNSTAMPED "
+        "'native_3d' / 'native_shaded' views (one configuration each, rays optional, "
+        "the same far-object exclusion, folds included). Omit it for the default; "
+        "every successful result names the renderer that drew the bytes (renderer) "
+        "and, if the default could not use its first choice, why (renderer_fallback). "
+        "An explicit renderer that cannot run is refused, never swapped. Both "
+        "cross-sections stamp "
+        "OUR surface numbers; native stamps are registered to the prescription and "
+        "ink-verified (registration), and an explicit native whose check failed is "
+        "UNSTAMPED (stamps_withheld). A very distant object or image plane is left "
+        "out by BOTH and named in far_object_excluded, with a marker at the frame "
+        "edge; for self, on a folded system that rule is computed and disclosed in "
+        "flags but not applied. "
+        "The self renderer draws a real meridional (y-z) optical layout PNG for the "
+        "user, in an "
         "ISO 10110-inspired visual style (a LOOK borrowed from optical drawing "
         "practice — this is NOT a standards drawing and nothing here is a "
         "conformance claim): equal-aspect (true curvature), cement-aware closed "
         "element outlines with a FLAT rim, two line weights, a patterned optical "
-        "axis + image plane, a STOP marker, OUR stamped surface numbers (how the "
-        "user points at a surface). element_outline selects the element-outline "
-        "convention and takes exactly one of two values: 'per_element' (the "
+        "axis + image plane, a STOP marker, OUR stamped surface numbers. "
+        "element_outline (self renderer only; giving it "
+        "selects self) selects the element-outline convention and takes exactly one of two values: 'per_element' (the "
         "default) or 'grouped'; any other value — including a differently-cased or "
         "space-separated spelling — is REFUSED before anything is drawn or "
         "written, and the effective value is echoed back as element_outline on "
@@ -3875,7 +5541,7 @@ RENDER_LAYOUT_SPEC = ToolSpec(
         "(present only when it happened). And — unless draw_rays=False — the chief + "
         "upper/lower marginal ray of each field, retained on purpose because ray "
         "bending is the strongest cue that a system is sane (one color per field). "
-        "2-D meridional cross-section only — there is no other view. A body's rim "
+        "A body's rim "
         "height — the body being a cemented GROUP under 'grouped' and a single "
         "ELEMENT under 'per_element' — is the maximum MEASURED clear semi-diameter "
         "over that body: an approximation forced by the absence of any "
@@ -3885,23 +5551,26 @@ RENDER_LAYOUT_SPEC = ToolSpec(
         "the check cannot vouch for; one active configuration is drawn and labelled. "
         "Returns the saved PNG path plus png_valid/n_fields/n_rays_drawn/n_surfaces/"
         "aperture_not_measured/profile_not_measured/out_of_plane/figure_disclosures/"
-        "cb_suppressed/scaffold_suppressed/flags; inspect result.ok. n_surfaces is the "
+        "cb_suppressed/scaffold_suppressed/renderer/renderer_fallback/"
+        "far_object_excluded/ray_coverage/flags; inspect result.ok. n_surfaces is the "
         "system's surface count measured at render time from the state drawn — every "
         "row including object, image and suppressed scaffolding, so the image plane is "
         "n_surfaces-1; it is NOT len(surface_labels) and must not be derived from them. "
         "It is present on every ok:true result and absent when ok is false. Folded systems "
-        "(coordinate break / mirror) are drawn in the GLOBAL frame, coherent with "
+        "(coordinate break / mirror) are drawn by the self renderer in the GLOBAL "
+        "frame, coherent with "
         "the rays — so the rays ARE drawn for a fold; coordinate-break and flat "
         "powerless air dummy/spacer surfaces are suppressed (scaffolding, not "
         "drawn); real optics (glass, mirrors, curved lens-backs), the stop, and the "
-        "image are stamped with their true Zemax numbers. Gotcha: this is a "
-        "self-drawn headless figure — it carries the surface-number stamps and the "
-        "disclosure flags a native export does not; for native fidelity, open the "
-        "saved .zmx. This PNG is a SCRATCH drawing for your "
+        "image are stamped with their true Zemax numbers. Gotcha: the surface-number "
+        "stamps are OptiVibe's on every cross-section renderer; a bare vendor image "
+        "numbers nothing, and under 'self' the figure is self-drawn. The saved .zmx "
+        "is the full-fidelity record. This PNG is a SCRATCH drawing for your "
         "own eyes; it is NOT the reviewable figure — a finding about it cannot be "
         "recorded (record_findings refuses it as finding_figure_unbound). To have a "
         "figure reviewed, call save_candidate first and review ITS paired PNG, which is "
         "the one png_sha256 binds. "
+        "ray_coverage: fields whose sampled rays fail. "
         "TALKING ABOUT A SURFACE WITH THE USER: this figure stamps OUR surface numbers "
         "on it, so the user points at a stamped number to talk about a surface -- keep "
         "that convention in mind for the rest of the exchange, including turns where no "
@@ -3910,9 +5579,8 @@ RENDER_LAYOUT_SPEC = ToolSpec(
         "BEFORE PRESENTING A MULTI-CONFIG DESIGN: call freeze_semidiameters (so each "
         "element draws at ONE size across configs -- a physically-correct layout) and "
         "verify_zoom (which flags a gap declared to zoom that is CONSTANT across "
-        "configs). A zoom rendered without those two draws a picture that is not the "
-        "design. "
-        "See describe_surfaces, fold_beam, freeze_semidiameters, verify_zoom."
+        "configs). "
+        "See fold_beam."
     ),
 )
 

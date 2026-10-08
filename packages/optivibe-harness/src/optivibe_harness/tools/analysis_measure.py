@@ -378,17 +378,16 @@ _BASIS_BAND = "band_extremes"      # otherwise -> the system's own shortest/long
 # identical ON AN ASCENDING GRID. The cost is only that float noise can skip a check;
 # skipping a check is safe, comparing a clamped value as if it were a reading is not.
 #
-# ROUND-13 NARROWS THAT CLAIM to the qualifier now on it. The guard computes its bounds
-# as ``min(p[0] for p in points)`` / ``max(...)`` while ``shift_at`` clamps at
-# ``pts[0][0]`` / ``pts[-1][0]`` — the FIRST and LAST points. Those coincide only when
-# the X grid ascends. On a non-ascending grid the guard's interval is the full extent
-# while ``shift_at``'s is the endpoint pair, so a wavelength inside the extent but
-# outside the endpoints passes the guard and is then CLAMPED — exactly the outcome the
-# note says exact bounds prevent. Nothing here sorts or asserts monotonicity; the
-# "(monotone-in-wavelength) X grid" in ``shift_at``'s own comment is an ASSUMPTION about
-# the engine's series, not a checked property. Left as-is deliberately: no non-ascending
-# FocalShiftDiagram series has been observed, and imposing a sort would silently
-# reinterpret a grid we have not measured. The claim is corrected, not the code.
+# ASCENDING-ONLY BY GUARD (0.1.13 E3): ``_focal_shift_curve``
+# refuses any grid that is not strictly ascending as an odd result, so the guard's extent
+# and ``shift_at``'s endpoints coincide for every curve that reaches here, no zero-width
+# segment is skipped and no interior dip is interpolated. OBSERVED, not contracted
+# (a lock measurement): on ``measurement_doublet.zmx`` the X grid came back
+# strictly ascending (121 points, re-gridded min to max wavelength) for ascending,
+# descending and duplicate wavelength entry. That is NOT established for other designs,
+# analysis settings or engine versions -- where a grid is not strictly ascending, the
+# guard refuses it and ``analyze_axial_color`` degrades to the scalar with the
+# ``FocalShiftDiagram curve unavailable`` flag.
 
 
 # --------------------------------------------------------------------------- #
@@ -1408,9 +1407,19 @@ def _focal_shift_curve(system):
     # load-bearing (``shift_at`` indexes ``pts[0]`` / ``pts[-1]`` unguarded).
     if not points:
         return None, None
+    # A grid that is not STRICTLY ascending is an ODD RESULT under
+    # this function's contract -- refuse it. shift_at clamps at the ENDPOINTS while the
+    # range guard takes the EXTENT (those agree only on an ascending grid), a duplicate X
+    # is a zero-width segment shift_at skips, and an interior dip makes the interpolation
+    # AMBIGUOUS (the first bracketing segment wins). Observed on
+    # measurement_doublet.zmx only: the engine re-gridded ascending under ascending,
+    # descending and duplicate entry. Not established for other designs, settings or
+    # engine versions -- this refusal is what covers them.
+    if any(points[i][0] >= points[i + 1][0] for i in range(len(points) - 1)):
+        return None, None
 
     def shift_at(um):
-        # Linear interpolation on the (monotone-in-wavelength) X grid.
+        # Linear interpolation on the (strictly ascending — enforced above) X grid.
         pts = points
         if um <= pts[0][0]:
             return pts[0][1]

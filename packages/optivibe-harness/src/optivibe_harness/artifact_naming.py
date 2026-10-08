@@ -16,7 +16,10 @@ Two schemes exist on disk:
 THE ONE PREDICATE is :func:`candidate_index_of`. The counter uses it (max over the
 names for which it answers an int) and the resolver uses it (a hit is a name for
 which it answers N). There is deliberately no second acceptance rule, so a name one
-accepts the other accepts.
+accepts the other accepts. The ORPHAN rule (a v2 file with no manifest row) is
+:func:`legal_readings`: every legal ``(design, index, label)`` reading of the stem, the
+producer's own validator injected, so the orphan path and the save-time disclosure count
+the same thing.
 
 NO GLOB PATTERN IS EVER BUILT FROM A DESIGN NAME, here or anywhere in the package.
 ``_safe_name`` admits ``[`` and ``]`` (its illegal set is ``<>:"/\\|?*``), so
@@ -30,7 +33,7 @@ Live ZOS-API integration: N/A (no backend; pure string/filesystem work).
 import os
 import re
 
-from .artifact_sink import _safe_name
+from .artifact_sink import _RESERVED_NAMES, _safe_name
 
 #: Minimum width of the per-design candidate index. A MINIMUM, not a maximum:
 #: ``f"{1000:03d}"`` is ``"1000"`` and every parser below accepts ``\d{3,}``.
@@ -41,9 +44,8 @@ LEGACY_INDEX_DIGITS = 4
 
 _LEGACY_RE = re.compile(r"^\d{4,}_.*\.(zmx|png)$")
 _LEADING_DIGITS_RE = re.compile(r"^(\d+)")
-#: A LOOKAHEAD, so every START POSITION is counted: ``_001_002_`` has delimiters at
-#: two positions even though the two runs share an underscore.
-_DELIMITER_RE = re.compile(r"(?=_\d{3,}_)")
+#: One capturing lookahead so every START POSITION is a reading: ``_001_002_`` yields two.
+_READING_RE = re.compile(r"(?=_(\d{3,})_)")
 
 
 def candidate_stem(design_name: str, index: int, label: str) -> str:
@@ -124,23 +126,24 @@ def legacy_index(basename: str):
         return None
     try:
         return int(match.group(1))
-    except ValueError:  # pragma: no cover — see the reachability note below
+    except ValueError:  # see the reachability note below (exercised directly by a test)
         # THE REASON THIS IS EXEMPTED IS REACHABILITY, NOT ARITHMETIC. It used to
         # read "a digit run always parses", which is FALSE on this interpreter:
         # ``sys.get_int_max_str_digits()`` is 4300 and ``int("9" * 4301)`` raises
         # ValueError ("Exceeds the limit (4300 digits)"). A universal was doing the
         # work a measurement should do.
         #
-        # MEASURED instead: both production callers -- ``workspace.py:3190`` and
-        # ``:3238`` -- pass basenames taken from ``os.listdir`` / ``os.walk``, so
+        # MEASURED instead: both production callers -- ``_resolve_candidate``'s orphan
+        # listing (``os.listdir``) and its trail-note ``os.walk`` -- pass basenames, so
         # the string is always a real path COMPONENT, and a component of even 255
         # digits cannot be created on this filesystem (measured: FileNotFoundError
         # at 255, 256 and 300). No production path can supply 4301 digits.
         #
         # That is a checkable claim about the CALL SITES, so it goes stale loudly:
         # a caller that feeds this a manifest- or envelope-supplied string rather
-        # than a directory entry invalidates it, and the branch then needs a test
-        # rather than a pragma.
+        # than a directory entry invalidates it. The branch is now exercised by a
+        # direct test (0.1.13 batch E1, T8-b) instead of excluded by a pragma, and
+        # ``candidate_index_of`` answers the same ``None`` (the parsers are symmetric).
         return None
 
 
@@ -164,36 +167,62 @@ def candidate_index_of(basename: str, design_name: str, ext: str = "zmx"):
     match = re.match(r"^(\d{3,})_.*\." + re.escape(ext) + r"$", remainder)
     if match is None:
         return None
-    return int(match.group(1))
+    try:
+        return int(match.group(1))
+    except ValueError:
+        # Symmetric with ``legacy_index``:
+        # ``int`` refuses a run past ``sys.get_int_max_str_digits`` (4300). No production caller can supply
+        # one -- every name is a directory entry -- but ``legal_readings`` parses the same runs and the
+        # module must be total over strings regardless of caller, so the answer is ``None``, not a raise.
+        return None
 
 
-def delimiter_count(basename: str) -> int:
-    """How many ``_\\d{3,}_`` delimiters the STEM carries. PURELY SYNTACTIC.
+def legal_readings(basename, design_ok):
+    """Every LEGAL ``(design, index, label)`` reading of a v2 stem, in position order.
 
-    Every START POSITION counts, so ``_001_002_`` is 2. No legality judgement, no
-    validator, no length rule — this makes no claim about which readings are legal
-    designs.
+    A v2 stem ``<design>_<NNN>_<label>`` can be split at EVERY overlapping ``_\\d{3,}_``
+    position. A reading is legal iff ``design_ok(design)`` -- the PRODUCER's own validator,
+    injected (``workspace._design_name_error is None``); this module must not re-state that
+    rule -- AND the label is in the IMAGE of ``_safe_name`` (``candidate_stem`` emits
+    ``_safe_name(label)``, so the image IS the set of labels this writer can produce). The
+    image is NOT the set of fixed points: ``_safe_name`` is NOT idempotent. Its reserved-device
+    check runs BEFORE truncation, and truncation plus the second ``rstrip`` can expose a bare
+    reserved word nothing checks again -- ``_safe_name("CON" + " " * 117 + "xx") == "CON"``
+    while ``_safe_name("CON") == "snapshot_CON"``. Measured (targeted + 300k random fuzz,
+    0.1.13 batch E1 round 2): the non-fixed part of the image is exactly the bare reserved
+    words, so the rule is ``_safe_name(label) == label or label.upper() in _RESERVED_NAMES``
+    (the set imported from where ``_safe_name`` reads it, never re-typed). It excludes the
+    empty label, which sanitises to ``snapshot``. A digit run ``int`` refuses
+    (``sys.get_int_max_str_digits``) is not a reading. The orphan path of ``promote_best``
+    publishes iff exactly ONE reading is legal AND that reading names the claimant's
+    ``(design, number)`` -- a sole reading that belongs to another design refuses for this
+    claimant; the save-time
+    ``label_ambiguous_without_row`` disclosure is the count alone (the saving design's own
+    reading is legal because its label is in the image -- a fixed-point rule broke exactly
+    that, and let ``alpha`` publish ``alpha_001_y``'s produced ``alpha_001_y_001_CON.zmx``),
+    so the two cannot drift.
 
-    Used ONLY on the orphan path of ``promote_best``: a v2
-    orphan with NO manifest row whose stem carries more than one delimiter is refused
-    as ambiguous, whichever design asks. ``alpha_001_001_x.zmx`` could be
-    ``(alpha, 1, "001_x")`` or ``(alpha_001, 1, "x")`` and with no row nothing can
-    tell them apart, so nothing is published for either claimant.
-
-    This OVER-REFUSES relative to "exactly one LEGAL reading" — some second readings
-    would not be legal designs at all. That is DELIBERATE, and it is NOT YET TICKETED:
-    an earlier draft of this docstring cited a ``TICKET-`` id for a DesignTicket file
-    that does not exist, which ``::
-    test_no_dangling_ticket_pointer_in_src`` caught. A pointer to a ticket nobody filed
-    is worse than none — it reads as "handled elsewhere". The sound enumerator would
-    need the producer's validator rules and overlapping-delimiter handling; filing that
-    is open work. The remedy for a refused orphan is to RE-SAVE, which restores the
-    manifest row, and the row is the identity source.
+    MEASURED, so nobody expects more than this rescues: ``alpha_001_note_002_x`` has TWO legal
+    readings (``alpha_001_note`` is a legal design) and stays refused; what this admits over
+    the old syntactic count is an alternate design that is not a fixed point (``alpha_001_x.``,
+    a trailing dot) or over 120 chars, and an alternate label that is empty.
     """
     if not isinstance(basename, str):
-        return 0
+        return []
     stem = os.path.splitext(basename)[0]
-    return len(_DELIMITER_RE.findall(stem))
+    out = []
+    for match in _READING_RE.finditer(stem):
+        design = stem[:match.start()]
+        digits = match.group(1)
+        label = stem[match.start() + len(digits) + 2:]
+        try:
+            index = int(digits)
+        except ValueError:
+            continue
+        if design_ok(design) and (_safe_name(label) == label
+                                  or label.upper() in _RESERVED_NAMES):
+            out.append((design, index, label))
+    return out
 
 
 def has_numeric_leading_segment(design_name: str) -> bool:

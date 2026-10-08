@@ -10,14 +10,14 @@ description: Use when the user asks what you think of the layout, and at the opt
 A vision reviewer looks at a SAVED layout PNG and says what looks wrong. It is a hypothesis generator — the tool is the check. Blind-adjudicated violation
 recall was 4 of 25 = 0.16 and it fell as the figure got busier — but that was measured on the v0 prompt: the shipped reviewer-prompt.md is a NEW
 INSTRUMENT, and no rate attaches to it until the corpus bench re-measures. An empty findings list means the eye found nothing, never that the design is clean.
-The reviewer is an ADVISOR ROLE, not an autopilot: what it finds is advice to the human and the agent, and a lever moves only when a human chooses it.
+The reviewer is an ADVISOR ROLE, not an autopilot: what it finds is advice to the human and the agent, and a lever moves only when a human chooses it — while a human is there. With none, the agent is the steer (NO HUMAN, Step 4).
 
 ## When to Use
 
 - ON DEMAND — the user asks "what do you think of the layout", or tells you to look at it. This is a
   PRIMARY entry, not a debug aside: save the candidate first, then invoke this skill with its seq.
 - After a `save_candidate`, over that candidate's paired PNG named by its seq, when the drawing
-  is worth a look before the next optimization round: "look at the layout", "does the figure look right", "eyeball the drawing". This is the loop's MIDPOINT PAUSE — the caller presents what comes back and waits for the human's steer.
+  is worth a look before the next optimization round: "look at the layout", "does the figure look right", "eyeball the drawing". This is the loop's MIDPOINT PAUSE — the caller presents what comes back and waits for the human's steer, or, with no human to steer, applies NO HUMAN (Step 4).
 - After a large edit, when the FORM may have moved and no operand says so.
 - NOT for measurement. The three hard negatives, verbatim: no edge gap off the
   figure, no config_headline, nothing inferred from a folded system's gaps. They
@@ -36,7 +36,8 @@ That envelope names the .zmx digest artifact_sha256, NOT zmx_sha256 — one valu
 candidate has NO bound picture: refuse the dispatch and say so.
 
 Do not call `render_layout` for the bindings; a second render is a different picture. Every binding comes from that ONE envelope: png_path and png_sha256 from those keys; surface_labels,
-stop_label and figure_disclosures from the keys of those names; extra_flags from flags or "none"; config from config_evaluated; n_surfaces from n_surfaces; image_surface = n_surfaces - 1.
+stop_label and figure_disclosures from the keys of those names, a PRESENT but empty figure_disclosures list bound as "none" (a clean
+native figure has none); extra_flags from flags or "none"; config from config_evaluated; n_surfaces from n_surfaces; image_surface = n_surfaces - 1.
 No binding may be empty, and an ABSENT envelope key counts as empty: refuse the dispatch, never fill from memory. The disclosures travel with the image: a reviewer not told what the figure
 hides inherits the defect.
 
@@ -86,11 +87,9 @@ STOP_BUDGET                           # backstop only -- unreachable when the st
                                       # must survive a driver that miscounts
 ```
 
-    # 0.20 sits inside the measured gap [0.172, 0.250]: 5/29 unreadable (0.172) still
-    # addressed correctly (stamp recall 0.828, precision 1.000; stamp-readback probe,
-    #); 3/12 (0.250) and 8/28 (0.286) each returned ZERO violation recall
-    # (dogfood). Interpolation, n=3, not a rate; the next corpus bench
-    # pass re-derives it.
+    # 0.20 sits in the measured gap [0.172, 0.250]: 5/29 unreadable (0.172) still addressed correctly
+    # (stamp recall 0.828, precision 1.000); 3/12 (0.250) and 8/28 (0.286) each returned ZERO violation
+    # recall. Interpolation, n=3, not a rate; the next corpus bench pass re-derives it.
 
 The unreadable fraction is LOOP CONTROL. It never enters a finding, and there is no
 schema field it could go in.
@@ -105,20 +104,37 @@ never invented — and they are the ids every later judgment block must name.
 
 | the finding | where it goes |
 |---|---|
-| figure-scoped `looks_tight`, `looks_generous` or `too_thin` | call `check_clearance` FIRST. A CONFIRMED FLOOR violation is a finding a tool AGREED with; it still reaches the human as a SUGGESTION and the edit waits for the steer. A floor that PASSES answers nothing: a `too_thin` whose floor passes goes to the thin-element row below, never booked contradicted or declined. A `looks_generous` is adjudicated against the budget declared for this design — it follows automatically from build_merit; pass explicit values to override; a design or configuration change retires it. With none in force, book it NO ORACLE (last row); ABOVE it the audit REPORTS rather than confirms |
+| figure-scoped `looks_tight`, `looks_generous` or `too_thin` | call `check_clearance` FIRST. A CONFIRMED FLOOR violation is a finding a tool AGREED with; it still reaches the human as a SUGGESTION and the edit waits for the steer while a human is there (with none, NO HUMAN below). A floor that PASSES answers nothing: a `too_thin` whose floor passes goes to the thin-element row below, never booked contradicted or declined. A `looks_generous` is adjudicated against the budget declared for this design — it follows automatically from build_merit; pass explicit values to override; a design or configuration change retires it. With none in force, book it NO ORACLE (last row); ABOVE it the audit REPORTS rather than confirms |
 | figure-scoped `too_thick`, `asymmetric`, `steep_bend` or `wrong_sign_suspected` | a `too_thick` needs a declared maximum-glass budget: with none in force it is NO ORACLE whether or not a violation is reported, because the floor measures a MINIMUM and says nothing about thickness. Above one it REPORTS, exactly as `looks_generous` does. The other three: a SUGGESTION to the human and the agent, note quarantined; no edit on this channel alone |
-| `too_thin`, or a thin edge, that a named tool does not CONFIRM | a SUGGESTION to the human and the agent — a fixed floor cannot measure thickness against DIAMETER, so a floor that passes never closes it. Carry three things: (a) WHAT WAS SEEN AND WHERE, by the stamps the reviewer read; (b) THE LEVERS, as merit operands a steer may pick — a minimum centre thickness (CTGT on that surface), a thickness-to-diameter ratio (CTVA and DMVA combined through `add_math_constraint`), a curvature limit (CVLT or CVGT on the steep surface), or an edge floor (ETGT, which evaluates each surface's OWN semi-diameter and can differ from `check_clearance`'s edge by up to ~46% — a force, not a verdict); (c) THE EVIDENCE — the `check_clearance` numbers, and a `tolerance` run in sensitivity mode over that element's thickness, radius and irregularity, taken after `load_design` reloads the saved file, because tolerancing an in-memory build returns an empty report. The threshold is the task spec's: cite the limit it states, and where it states none, ASK the human. No fixed shop number belongs here |
+| `too_thin`, or a thin edge, that a named tool does not CONFIRM | a SUGGESTION to the human and the agent — a fixed floor cannot measure thickness against DIAMETER, so a floor that passes never closes it. Carry three things: (a) WHAT WAS SEEN AND WHERE, by the stamps the reviewer read; (b) THE LEVERS, as merit operands a steer may pick — a minimum centre thickness (CTGT on that surface), a thickness-to-diameter ratio (CTVA and DMVA combined through `add_math_constraint`), a curvature limit (CVLT or CVGT on the steep surface), or an edge floor (ETGT, which evaluates each surface's OWN semi-diameter and can differ from `check_clearance`'s edge by up to ~46% — a force, not a verdict); (c) THE EVIDENCE — the `check_clearance` numbers, and a `tolerance` run in sensitivity mode over that element's thickness, radius and irregularity, taken after `load_design` reloads the saved file, because tolerancing an in-memory build returns an empty report. The threshold is the task spec's: cite the limit it states, and where it states none, ASK the human if one is there; with none, the agent states the limit it chose and applies NO HUMAN. No fixed shop number belongs here |
 | REPORTED — the audit measured it and handed you both numbers | **make the ballpark call a designer makes in two seconds.** Ask whether the SEPARATION is worth acting on, never whether one number is bigger: a gap 0.004% over a declared 16 mm is not generous, it is CONVERGED — sitting exactly where its own boundary operand parked it. Only a FLOOR violation reaches CONFIRMED now; above a ceiling there is no comparable fact, only a matter of degree, which is what an exact predicate cannot judge. A REPORTED row authors nothing and gates nothing; act on it by making the judgment and **RECORDING** it -- `save_candidate(..., render=False, judgment={"finding_ids": [...], "disposition": ..., "reason": ...})`, which writes it to disk bound to that candidate's digest. Say it in your reply too, but the reply is not the record: prose scrolls past, and a dismissal nobody can find later is indistinguishable from a finding you dropped |
 | system-scoped | a human, or a NAMED first-order test; never a scored bucket |
 | keyed on a stamp the reviewer could not read | DROP it, and record the drop |
 | the floor says fine and the reviewer still means something | with NO budget declared, book it as having NO ORACLE, never as contradicted. With one declared, the ceiling decides and a gap inside its limit IS contradicted. And if the thickness could not be read at all, the tool measured NOTHING: no edit, no closure, reported as unmeasured rather than as either verdict. A `too_thin` is never booked here: a floor that passes is not an answer to it |
-| CONFIRMED by a NAMED tool — the advice arm | it goes to the human and the agent as a SUGGESTION carrying the tool's numbers and the levers above. NO finding — CONFIRMED, UNCONFIRMED, NO ORACLE or REPORTED — authors a constraint or re-enters the loop on its own; a lever is applied only when the human chooses it, and a constraint authored on that steer is ONE soft, low-weight constraint (`add_math_constraint`); every stated target outranks it |
-| CONFIRMED by a NAMED tool — the completion arm | it is already RECORDED (above), and a RECORDED finding blocks **PROMOTION** until a recorded response names it: promote_best refuses (refuse_finding_unanswered) and names the open ids. Answer it — `save_candidate(..., render=False, judgment={"finding_ids": [...], "disposition": ..., "reason": ...})` — whatever the answer says. At the pause the human's steer IS that answer: record it. The gate reads ONLY that a response EXISTS for those ids, bound to those bytes, carrying a non-empty reason; it never reads whether the finding was TRUE or whether you AGREED. NO ORACLE and REPORTED are recorded and block promotion on the same terms. NO ORACLE is never auto-closed — it goes to a human, dispositioned referred; neither is REPORTED |
+| CONFIRMED by a NAMED tool — the advice arm | it goes to the human and the agent as a SUGGESTION carrying the tool's numbers and the levers above. While a human is there to steer, NO finding — CONFIRMED, UNCONFIRMED, NO ORACLE or REPORTED — authors a constraint or re-enters the loop on its own; a lever is applied only when the human chooses it, and a constraint authored on that steer is ONE soft, low-weight constraint (`add_math_constraint`); every stated target outranks it. With NO human to steer, the agent is the steer: see NO HUMAN below |
+| CONFIRMED by a NAMED tool — the completion arm | it is already RECORDED (above), and a RECORDED finding blocks **PROMOTION** until a recorded response names it: promote_best refuses (refuse_finding_unanswered) and names the open ids. Answer it — `save_candidate(..., render=False, judgment={"finding_ids": [...], "disposition": ..., "reason": ...})` — whatever the answer says. At the pause the human's steer IS that answer: record it. With no human, the caller's own recorded acted or declined response is. The gate reads ONLY that a response EXISTS for those ids, bound to those bytes, carrying a non-empty reason; it never reads whether the finding was TRUE or whether you AGREED. NO ORACLE and REPORTED are recorded and block promotion on the same terms. NO ORACLE is never auto-closed — it goes to a human, dispositioned referred (with no human there, refer it and name it in the final report); neither is REPORTED |
 | the review came back SILENT (no findings at all) | NOT a pass. Record VISION_SILENT, say the eye found nothing, and proceed |
 
 Silence never certifies. A RECORDED finding blocks PROMOTION — not this loop's report — until a recorded response names it, whatever that response says. Every routed finding that was not dropped goes to the human as a SUGGESTION — what was seen
-and where, the levers, the evidence — and the caller WAITS for the steer before re-optimizing or promoting. Return the stop token, the
+and where, the levers, the evidence — and, when a human is there, the caller WAITS for the steer before re-optimizing or promoting; with no human to steer, the caller applies NO HUMAN below instead of waiting. Return the stop token, the
 per-round saved reply paths, the finding_ids `record_findings` returned, and every finding with its route; the skill performs no edit.
+
+### Answering a finding — the decline standard, and NO HUMAN
+
+- **DECLINE ONLY WITH A MEASUREMENT THAT ANSWERS WHAT THE FINDING SAYS.** A finding is often about PROPORTION, and
+  a passing floor answers none of it: for `too_thin` or a skinny element, give centre thickness against diameter;
+  for a lens that reads too long, total track against focal length; for `looks_tight`, the gap against its
+  neighbours. A `reason` without such a number is not a decline — refer the finding instead. A proportion finding
+  that no stated target covers is NOT dismissed for that reason.
+- **NO HUMAN — the agent is the steer.** When no human is there to steer (a headless run, or the human said to
+  proceed without them), the caller does not wait: it acts on a CONFIRMED or proportion finding by authoring ONE
+  soft, low-weight constraint (`add_math_constraint`) that addresses it, re-optimizes, re-measures every stated
+  target, and records `disposition: "acted"` with the numbers before and after. A confirmed finding whose own
+  gap ALSO violates its floor authors nothing — the floor operand is already restoring it. Any other finding is
+  declined with a measurement that answers it, or referred and named in the final report.
+- **PUSH BACK TO PRESERVE PERFORMANCE.** The agent may decline after trying, when the change costs a stated target
+  or a material loss of performance; the `reason` names that cost in numbers, before and after. Every stated target
+  outranks a finding. With a human there, the same evidence goes to them and their steer decides.
 
 ## Key Rules
 
@@ -127,7 +143,8 @@ per-round saved reply paths, the finding_ids `record_findings` returned, and eve
 - **The REVIEWER writes the raw record; the driver proves it.** Byte-identity between the returned message and reply_raw.json is the proof; a summary is not a record.
 - **Escalate broken addressing; never iterate on it.** Above the threshold the FIGURE is what gets fixed.
 - **Advice, not autopilot.** A finding no tool confirms still reaches the human with its levers and its
-  evidence; a floor that passed is not a reason to drop it silently.
+  evidence; a floor that passed is not a reason to drop it silently. With no human there, the agent acts on it
+  or declines with a measured cost (NO HUMAN above).
 - **A number in a note is not evidence.** Every real number comes from a tool.
 
 <!-- VISION_FINDING_CLASSES

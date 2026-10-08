@@ -115,6 +115,14 @@ class LazyHarnessDispatcher:
         # the flag makes activation fire at most once per process (no re-swap on a
         # re-open-after-reap, no retry-storm on a failed activation).
         self._logging_activated = False
+        # _logging_activated
+        # records that activation was ATTEMPTED once (set in finally, success or not -- the
+        # no-retry-storm latch); _logging_active records that activation returned without
+        # raising (the log objects were constructed; this does not prove a file was
+        # written) -- set as the last statement of the try. A reader who finds
+        # attempted=True, active=False knows the durable log is absent and why nothing
+        # re-tries.
+        self._logging_active = False
         self._activation_lock = threading.Lock()
         # Eager, engine-free build: Dispatcher.__init__ only reads
         # session._lock (created in ZemaxSession.__init__); it does NOT open the engine.
@@ -204,8 +212,9 @@ class LazyHarnessDispatcher:
             the inner's slow-call watchdog would otherwise log through a stale None.
 
         Idempotent: double-checked under the dedicated ``_activation_lock`` and gated by
-        the one-time ``_logging_activated`` flag (set in ``finally`` even on failure, so a
-        broken activation never retry-storms). NEVER raises and NEVER takes
+        the one-time ``_logging_activated`` ATTEMPT latch (set in ``finally`` even on
+        failure, so a broken activation never retry-storms); the OUTCOME is
+        ``_logging_active``, True only when every step above completed. NEVER raises and NEVER takes
         ``session._lock`` (no lock-ordering entanglement with ``open()``). A re-open after
         reap does NOT re-fire (the flag persists); the fd 1/2 from the first activation
         (append-mode file) stay valid.
@@ -233,10 +242,12 @@ class LazyHarnessDispatcher:
                     )
                 # server.py:185 caches _logger at __init__ (None at boot) -> rebind.
                 self._inner._logger = self._session._logger
+                self._logging_active = True
             except Exception:  # noqa: BLE001 — never block a dispatch on logging
                 pass
             finally:
-                # Set even on failure -> never retry-storm a broken activation.
+                # ATTEMPTED, success or not -> never retry-storm a broken activation (the
+                # outcome is _logging_active).
                 self._logging_activated = True
 
     def dispatch(self, tool_name, params):

@@ -1799,6 +1799,17 @@ def _record_declared_budget(session, system, min_air, min_glass, max_air, max_gl
         # the record. Owner ruling: THE LIMITATION STANDS, THE SILENCE DOES
         # NOT. The caller learns at the moment of declaring, not never.
         #
+        # Hd3 (batch D r6): what is refused is the DECLARED RECORD, not the call. After
+        # ``resolve_ceilings`` sets the record aside, ``check_clearance`` falls back to the
+        # active-merit basis (V-INT D1-b, 419515f) and adjudicates the MXCA/MXCG rows this
+        # same build authored -- measured live (live-r4, lv12). The note says so; it used
+        # to claim "the audit refuses rather than adjudicating", which was false.
+        # Hd3 r7 (r6 MED): the fallback is ATTEMPTED, not guaranteed -- a family the
+        # build did not enable authors no bound rows (``declares_anything`` gate in
+        # ``check_clearance``), and a spanning build's CONF brackets taint both kinds in
+        # ``_merit_ceiling`` so those ceilings read SOURCE_UNREADABLE -> ``unresolved``.
+        # The note names all three outcomes rather than promising adjudication.
+        #
         # This also closes an asymmetry the agent named: the unreadable-config
         # and unreadable-shape doors above already refuse WITH a ``budget_note``, and this
         # door -- the same class of "your declaration will not adjudicate" -- was silent.
@@ -1816,12 +1827,21 @@ def _record_declared_budget(session, system, min_air, min_glass, max_air, max_gl
                 named.append(
                     f"max_glass={max_glass} is below the default min_glass={floor_glass}")
             return (
-                "the budget WAS recorded, but it will NOT apply to a bare "
-                "check_clearance(): " + "; ".join(named) + ", so the ceiling and the "
-                "floors a bare call applies form an empty box and the audit refuses "
-                "rather than adjudicating. Pass the ceiling explicitly on the call "
-                "instead -- check_clearance(max_air=..., max_glass=..., min_air=..., "
-                "min_glass=...) -- which audits against the floors you name"
+                "the budget WAS recorded, but a bare check_clearance() will not apply "
+                "it as the declared budget: " + "; ".join(named) + ", so the ceiling "
+                "and the floors a bare call applies form an empty box and the declared "
+                "record is set aside. The bare call then ATTEMPTS the ACTIVE-MERIT "
+                "fallback, and what it can read decides the outcome. While this merit "
+                "is loaded: ceiling rows this "
+                "build authored (MXCA for max_air, MXCG for max_glass) that the audit can "
+                "read are adjudicated as center_ceiling_audit basis 'active_merit', "
+                "against the DEFAULT floors, not the ones you declared; a family this "
+                "build did not enable (air=/glass=) authored no ceiling row and so "
+                "supplies no ceiling; rows the audit cannot resolve (e.g. under the CONF "
+                "brackets of a spanning build) are reported unresolved, not adjudicated. "
+                "Pass the ceiling explicitly on the "
+                "call instead -- check_clearance(max_air=..., max_glass=..., "
+                "min_air=..., min_glass=...) -- which audits against the floors you name"
             )
         return None
     except Exception:  # noqa: BLE001 — a record step NEVER breaks a successful build
@@ -2196,7 +2216,12 @@ def build_merit(session, params):
         # §a disclosure (probe Q3a, live-proven): when span_configs=True the SEQ
         # wizard authors the MNCA/MNEA/MNCG/MNEG floor operands INSIDE every per-config CONF
         # bracket, so active floors (min_air>0 or min_glass>0) are PER-CONFIG — free from the
-        # span lever, no hand-authoring. False for a single-config / floors-off build.
+        # span lever, no hand-authoring.
+        # COMPUTED from the call, not read back: span_configs AND a nonzero min_air/min_glass, the
+        # DEFAULTS (0.5 / 1.0) included. So it reads True with glass=False and air=False (no
+        # wizard floor family enabled) and on a 1-config system called with span_configs=True;
+        # False only when span_configs is off or both floors are 0. The served description
+        # says so.
         "floors_per_config": bool(
             span_configs and (min_air > 0 or min_glass > 0)
         ),
@@ -3361,6 +3386,11 @@ def add_operand(session, params):
     else:
         result["target"] = safe_float(actual_target)
         result["weight"] = safe_float(actual_weight)
+        # Measured live on OpticStudio 2025 R1: a Target written
+        # here read back as its 15-significant-figure rendering; where the digits go is not isolated, and
+        # Weight was not measured. This key reports that OBSERVED Target read-back
+        # precision; the write check above is math.isclose at 1e-9 relative.
+        result["readback_precision"] = "G15"
     if cell_params is not None:
         result["params"] = written_params
     return result
@@ -3608,6 +3638,8 @@ def edit_operand(session, params):
         "type": type_name,
         "target": safe_float(float(op.Target)),
         "weight": safe_float(float(op.Weight)),
+        # Measured: OBSERVED Target read-back precision.
+        "readback_precision": "G15",
     }
 
 
@@ -3672,6 +3704,16 @@ BUILD_MERIT_SPEC = ToolSpec(
         "centred on sqrt(n0 cell); n0_at_build reports that physical value); a satisfied "
         "box caps PER-POINT excursion (not the full Δn spread — pass grin_dn_max to optimize "
         "for the spread + n<1 audit). "
+        "ZOOM / MULTI-CONFIG FLOORS: on a multi-config system pass span_configs=true so the wizard "
+        "authors its operands AND any active min_air/min_glass floors inside EVERY per-config CONF "
+        "bracket (echoed as floors_per_config:true when a floor is active -- but true is NOT "
+        "proof a floor was authored: the key is COMPUTED from the call, span_configs AND a "
+        "nonzero min_air or min_glass with the DEFAULT floors counted, so it can read true with "
+        "glass and air both false or on a single-config system; it does not say a floor family "
+        "is enabled, and it is NOT a read-back of the built MFE; dump_merit_function is the "
+        "read-back); without it the merit and "
+        "its floors control only the CURRENT config, another config's gap can go negative under "
+        "optimize, and you learn it only AFTER the build, from build_merit's warning or note (whichever the envelope carries; it names the UNCONTROLLED configs). "
         "ZOOM / MULTI-CONFIG WEIGHTING: a per-config EFFL constraint must DOMINATE the "
         "spot merit, or the optimizer collapses every config to ONE focal length (a "
         "non-zooming local minimum). Weight per-config EFFL well above the spot "
@@ -3714,13 +3756,17 @@ ADD_OPERAND_SPEC = ToolSpec(
         "flagged). " + _oc._RANGE_DOOR_SERVED_CLAUSE + " A WELL-FORMED result describes "
         "only the range structure at write time — it does not establish that the "
         "interval contains a qualifying surface or that the operand will contribute. "
-        "RESOLVE THE CODE BEFORE YOU CALL: a merit-function operand comes from "
-        "lookup_operand -- read the descriptions AND the sign_convention, and never "
-        "trust the rank-1 hit blindly (within an operator family it can be "
-        "confidently wrong). For an MTF constraint (the corner tangential-MTF reversal "
+        "RESOLVE THE CODE BEFORE YOU CALL: read the operand's description AND its "
+        "sign_convention, and never trust a rank-1 hit blindly (within an operator "
+        "family it can be confidently wrong). A merit-function operand comes from "
+        "lookup_operand. For an MTF constraint (the corner tangential-MTF reversal "
         "an RMS-spot merit misses) use lookup_operand to pick the code (MTFT "
         "tangential / MTFS sagittal / MTFA average), then author it here with "
         "params={'Field':<1-based index>,'Freq':<cyc/mm>}. "
+        "Measured on OpticStudio 2025 R1: a Target written through this API "
+        "reads back as its 15-significant-figure rendering; where in the round trip "
+        "the digits go is not isolated, and Weight was not measured. The envelope's "
+        "readback_precision reports this OBSERVED Target read-back precision. "
         "See add_math_constraint, apply_merit_recipe, build_merit, get_mtf."
     ),
 )
@@ -3749,8 +3795,12 @@ EDIT_OPERAND_SPEC = ToolSpec(
         "weight), read-back proven. Use this to change a per-config EFFL inside a CONF "
         "block WITHOUT remove+re-add (which appends and breaks the CONF bracket). "
         "Refuses a value-less control operand (e.g. CONF, which has no numeric "
-        "Target/Weight). Find the row number with dump_merit_function. See add_operand, "
-        "build_merit."
+        "Target/Weight). Find the row number with dump_merit_function. "
+        "Measured on OpticStudio 2025 R1: a Target written through this API "
+        "reads back as its 15-significant-figure rendering; where in the round trip "
+        "the digits go is not isolated, and Weight was not measured. The envelope's "
+        "readback_precision reports this OBSERVED Target read-back precision. "
+        "See add_operand, build_merit."
     ),
 )
 

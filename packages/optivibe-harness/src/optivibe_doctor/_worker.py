@@ -49,6 +49,10 @@ def _short(text):
     return flat[:_ERROR_CHARS]
 
 
+class _StaleBuild(ValueError):
+    """The reference opener refused a COMPLETE corpus built by another builder version."""
+
+
 def emit(check, **facts):
     """Write one JSON observation line to stdout and flush it immediately.
 
@@ -466,8 +470,19 @@ def _open_plane(plane, path):
         # The corpus opener answers ``None`` for a partial or inconsistent build rather
         # than raising.  That is a refusal, and it must be reported as one — letting the
         # None fall through would surface as an ``AttributeError`` and describe a
-        # half-built corpus as an internal doctor failure.
-        raise ValueError("the reference opener refused this file (partial or inconsistent)")
+        # half-built corpus as an internal doctor failure.  A STALE build (another builder
+        # version) is told apart first, through the reference layer's own predicate -- never
+        # by comparing BUILDER_VERSION here.  An older reference without that reader
+        # keeps the old verdict.
+        stale = getattr(module, "manual_corpus_is_stale_build", None) if plane == "manual" else None
+        if stale is not None and stale(path):
+            raise _StaleBuild("the reference opener refused this file: built by another builder "
+                              "version (stale build -- rebuild it; it is not corrupt)")
+        refused = ValueError("the reference opener refused this file (partial or inconsistent)")
+        # stale_build is False ONLY when the reference predicate was actually asked and said
+        # no; anywhere it was not asked the fact stays None (unmeasured, never "not stale").
+        refused.stale_build = False if stale is not None else None
+        raise refused
     return conn
 
 
@@ -657,6 +672,8 @@ def _probe_planes(paths, dispatcher, dispatcher_error=None):
             except BaseException as exc:                           # noqa: BLE001
                 opens = False
                 facts["open_error"] = type(exc).__name__ + ": " + _short(exc)
+                facts["stale_build"] = (True if isinstance(exc, _StaleBuild)
+                                        else getattr(exc, "stale_build", None))
             if opens is True:
                 attr = PLANES[plane][2]
                 if dispatcher is None:

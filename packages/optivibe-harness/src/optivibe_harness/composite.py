@@ -47,9 +47,10 @@ def _copy_entry(entry):
     """Snapshot one advertise entry, deep-copying its mutable nested members.
 
     Copies the nested ``required_params`` LIST and the nested ``param_types`` DICT
-    (the latter only when present — the 5 reference tools carry none, and that
-    absence is preserved) so a caller mutating a returned entry cannot reach into
-    the source dispatcher's manifest nor the composite's internal snapshot.
+    (the latter only when present, and its absence is preserved — today only the
+    zero-parameter harness tools omit it; every reference spec carries one since 868a8b8)
+    so a caller mutating a returned entry cannot reach into the source dispatcher's
+    manifest nor the composite's internal snapshot.
     """
     return {
         **entry,
@@ -99,8 +100,9 @@ class CompositeDispatcher:
                 # share that mutable member, so a caller mutating a list_tools()
                 # result could corrupt the internal snapshot (BUG-2). The typed-
                 # inputSchema cycle added a nested param_types DICT on harness
-                # entries; copy it too when present (absence preserved — the 5
-                # reference tools carry no param_types).
+                # entries; copy it too when present (absence preserved).
+                # (0.1.13 E4): every reference spec carries param_types (868a8b8);
+                # entries without them are today only the zero-parameter harness tools.
                 self._manifest.append(_copy_entry(entry))
 
     def list_tools(self):

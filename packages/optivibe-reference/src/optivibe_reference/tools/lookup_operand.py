@@ -203,6 +203,7 @@ def _exact_payload(row):
             "description_pending": True,
             "description_source": d["description_source"],
             "param_cells": param_cells,
+            "param_cells_known": bool(d["cell_layout"]),
             "units": d["units"],
             "units_source": d["units_source"],
             "sign_convention": d["sign_convention"],
@@ -222,6 +223,7 @@ def _exact_payload(row):
         "description_pending": False,
         "description_source": d["description_source"],
         "param_cells": param_cells,
+        "param_cells_known": bool(d["cell_layout"]),
         "units": d["units"],
         "units_source": d["units_source"],
         "sign_convention": d["sign_convention"],
@@ -244,6 +246,7 @@ def _rag_candidate(db_conn, code, score):
         "description": d.get("description"),
         "description_source": d.get("description_source"),
         "param_cells": _param_cells(d.get("cell_layout")),
+        "param_cells_known": bool(d.get("cell_layout")),
         # Semantics §6: the merit-builder ranks RAG candidates by direction + units, so
         # surface them (+ their sources) alongside the description on every candidate.
         "units": d.get("units"),
@@ -382,7 +385,12 @@ LOOKUP_OPERAND_SPEC = ToolSpec(
         "(e.g. EFFL, OPGT) for its definition, or a natural phrase (\"effective "
         "focal length\", \"hold one operand above another\") to get ranked "
         "candidate operands. Each candidate carries its description, units, and "
-        "sign_convention (the constraint direction). Defaults to the merit-function "
+        "sign_convention (the constraint direction). An empty param_cells with "
+        "param_cells_known false means the catalog records no cell layout for that "
+        "code (not that the operand has none); with param_cells_known true the catalog "
+        "records that the operand has no parameter cells; the Surf/param cells of a "
+        "range operand are verified by engine read-back, never assumed. Defaults to the "
+        "merit-function "
         "catalog; pass domain=\"tolerance\" to resolve tolerance codes instead "
         "(tilt/decenter resolve to a FAMILY that differs by mechanism - surface vs "
         "element vs coordinate-break - so read each candidate's category and "
@@ -401,10 +409,9 @@ LOOKUP_OPERAND_SPEC = ToolSpec(
         "code-not-phrase grounding as merit). WITHOUT domain=\"tolerance\" this door "
         "mis-routes a tolerance ask -- it defaults to the merit catalog and returns "
         "confidently WRONG merit operands (TOLR/VOLU/EQUA). Always pass "
-        "domain=\"tolerance\" for a tolerance code; search_reference is the manual-prose "
-        "fallback for chapter context. "
+        "domain=\"tolerance\" for a tolerance code. "
         "This lookup takes no engine seat. "
-        "See search_reference for open-ended manual questions."
+        "See search_reference for chapter context and open-ended manual questions."
     ),
     kind="operand",
     param_types={

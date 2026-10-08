@@ -183,8 +183,9 @@ def _load_json(path):
 def _synonyms_to_text(synonyms):
     """Coerce a row's ``synonyms`` field to a clean space-joined FTS string.
 
-    The committed ``operand_descriptions.json`` stores synonyms as a single
-    space-joined STRING today, but the schema permits a list/tuple (e.g.
+    The committed ``operand_synonyms.json`` stores synonyms as a single
+    space-joined STRING (``load_synonyms_rows`` requires a ``str``), but a catalog
+    JSON handed to ``build_db`` may still carry a list/tuple (e.g.
     ``["anti reflection", "AR coating"]``). A list rendered through ``str``/format
     would emit a Python repr (``['anti reflection', 'AR coating']``) and pollute
     the FTS index with brackets, quotes, and commas. This normalizes:
@@ -273,6 +274,49 @@ _SYNONYMS_ALLOWED_FIELDS = frozenset({"synonyms", "units", "units_source"})
 _TOLERANCE_SYNONYMS_ALLOWED_FIELDS = _SYNONYMS_ALLOWED_FIELDS | frozenset(
     _TOLERANCE_SAFETY_FIELDS
 )
+
+# The committed ``operand_semantics.json`` row ALLOWLIST (schema-CLOSED, the same
+# discipline as the synonyms allowlists above) — the ONE definition;
+# ``scripts/project_release_semantics.py`` imports it rather than carrying a second
+# literal. The merge CONSUMES ``sign_convention`` + ``sign_convention_source`` (both
+# REQUIRED on every row, explicit ``null`` allowed). ``citation_handle`` is OPTIONAL
+# and allowed-but-ignored by the build (a page POINTER; the release projection nulls
+# it). Any other key is a HARD ERROR. Enforced by ``_check_semantics_rows``.
+_ALLOWED_SEMANTICS_FIELDS = frozenset(
+    {"sign_convention", "sign_convention_source", "citation_handle"}
+)
+_REQUIRED_SEMANTICS_FIELDS = frozenset({"sign_convention", "sign_convention_source"})
+
+
+def _check_semantics_rows(semantics):
+    """Validate each ``operand_semantics.json`` row's SHAPE (schema-closed allowlist).
+
+    Every row is a ``dict``; it carries no key outside ``_ALLOWED_SEMANTICS_FIELDS``;
+    and it carries BOTH consumed keys (``_REQUIRED_SEMANTICS_FIELDS``, explicit
+    ``null`` allowed) — a ``{}`` row would otherwise merge as ``None``/``None`` while
+    ``semantics_state`` reads ``"present"``. Each failure is a ``BuildContractError``
+    naming the operand and the key(s).
+    """
+    _require(isinstance(semantics, dict), (
+        f"operand_semantics.json is not a {{code: row}} object "
+        f"({type(semantics).__name__})"
+    ))
+    for code, row in semantics.items():
+        _require(isinstance(row, dict), (
+            f"{code}: operand_semantics.json row is not a dict "
+            f"({type(row).__name__})"
+        ))
+        extra = set(row) - _ALLOWED_SEMANTICS_FIELDS
+        _require(not extra, (
+            f"{code}: operand_semantics.json row carries field(s) {sorted(extra)} "
+            f"outside the allowlist {sorted(_ALLOWED_SEMANTICS_FIELDS)} "
+            "(unknown content must never ride the semantics merge)"
+        ))
+        missing = _REQUIRED_SEMANTICS_FIELDS - set(row)
+        _require(not missing, (
+            f"{code}: operand_semantics.json row is missing required field(s) "
+            f"{sorted(missing)} (explicit null is allowed; an absent key is not)"
+        ))
 
 
 def load_synonyms_rows(synonyms_path, *, tolerance=False):
@@ -522,7 +566,18 @@ def build_catalog_json(
     # stale-oracle silent sign-drop). Gated on ``semantics_provided`` (is-not-None),
     # NEVER truthiness — an empty ``{}`` from a provided path now HARD-ERRORS via the
     # ``missing_sem`` check rather than silently writing 438 null signs at exit 0.
+    #
+    # SEMANTICS ROW CONTRACT — the semantics file's own ROWS are visible only here (the
+    # ``assert_*_invariants`` guards run over the BUILT catalog), so the row-shape
+    # allowlist is enforced here, BEFORE guard 5: ``_check_semantics_rows``. The merge
+    # below CONSUMES exactly ``sign_convention`` + ``sign_convention_source`` (both
+    # REQUIRED per row, explicit ``null`` allowed). ``citation_handle`` is
+    # allowed-and-IGNORED here: it is a page POINTER (the catalog's handle comes from
+    # the local descriptions only) and the release projection nulls it — which is why
+    # this allowlist differs from ``operand_synonyms.json``'s (a synonyms row
+    # never carries it). The allowlist is schema-CLOSED: an unknown field fails closed.
     if semantics_provided:
+        _check_semantics_rows(semantics)
         stale_keys = set(semantics) - code_set
         _require(not stale_keys, (
             f"operand_semantics.json carries {len(stale_keys)} key(s) not in the "
@@ -958,7 +1013,7 @@ def build_db(catalog_json_path, conn):
                 row.get("optic_studio_version"),
                 row.get("schema_version"),
                 # Tolerance cycle: the 3 tolerance-safety columns. NULL for every merit row
-                # (operand_descriptions.json / operand_semantics.json never supply
+                # (operand_synonyms.json / operand_semantics.json never supply
                 # them) — real values only on the separate tolerance_operand catalog.
                 row.get("category"),
                 row.get("precondition_class"),

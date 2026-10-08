@@ -149,12 +149,16 @@ def _require_int_index(params, key):
     )
 
 
-def _require_bool_param(params, name):
-    """Pull + validate an OPTIONAL strict-boolean param. Default ``False``. NO engine read.
+def _require_bool_param(params, name, *, intent="enable it"):
+    """Pull + validate an OPTIONAL strict-boolean param. Default ``False``. NO engine read;
+    ``intent`` is the one-token tail that keeps each door's message byte-identical to what
+    it served before the re-point (``"override"`` for ``replace_solve``, the default for
+    ``refuse_on_solve_refs``).
 
-    The ``optimize_variable._require_replace_solve`` rule (itself the ``promote_best``
-    ``force`` precedent), parameterised by NAME so a second opt-in flag does not become a
-    second copy of the rule. ``1``, ``"true"``, ``"yes"`` and ``[]`` must NOT enable an
+    The strict-bool rule (the ``promote_best`` ``force`` precedent; the local reader
+    ``optimize_variable._require_replace_solve`` that first carried it was DELETED
+    and its doors now read through here), parameterised by NAME so a second
+    opt-in flag does not become a second copy of the rule. ``1``, ``"true"``, ``"yes"`` and ``[]`` must NOT enable an
     opt-in behaviour — a mode reached by truthiness is a mode nobody chose (the measured
     ``force="no"`` defect measured on the save/promote clearance gate).
 
@@ -170,17 +174,18 @@ def _require_bool_param(params, name):
     ZERO ENGINE READS on every path, which is why a caller may hoist it above its first
     engine call (``remove_surface`` does exactly that).
 
-    THE ``_require_replace_solve`` RE-POINT IS DEFERRED, not forgotten: that reader's
-    message is pinned byte-for-byte by a test owned elsewhere, so re-pointing it risks a
-    reddened pin
-    for zero behaviour change. Two readers with one ticket beats that.
+    THE RE-POINT LANDED: ``replace_solve``'s
+    five doors (``set_variable``, ``vary``, ``add_coordinate_break``, ``add_return_cb``,
+    ``fold_beam``) read through this function with ``intent="override"``; the local reader
+    is gone. The messages were measured byte-identical on seven non-bool inputs before the
+    local reader was deleted, and a test pins that text.
     """
     value = params.get(name, False)
     if not isinstance(value, bool):
         raise ToolParamError(
             f"{name} must be a boolean (true/false), got {type(value).__name__} "
             f"{value!r}; it is refused rather than read as false, because a caller who "
-            "meant to enable it must not silently not have"
+            f"meant to {intent} must not silently not have"
         )
     return value is True
 
@@ -199,6 +204,14 @@ def _readback_ok(intended, actual):
     - ``nan`` NEVER equals anything (a nan read-back is always a mismatch).
     - otherwise ``math.isclose(intended, actual, rel_tol, abs_tol)`` (absorbs the
       post-reload float drift).
+    - two exact non-bool ``int``s compare EXACTLY (any magnitude). The class this CHANGED
+      is EVERY pair of DISTINCT ints that the float path's
+      ``READBACK_REL_TOL`` (1e-9) relative tolerance used to call equal -- not only the
+      ``2**53`` float collapse: ``(2**53+1, 2**53)``, ``(2**31, 2**31-1)`` and
+      ``(10**12, 10**12+1)`` all read EQUAL before and read a MISMATCH now. That includes
+      an ``Int32`` saturation (``2**31`` written, ``2**31-1`` read back), which used to
+      pass this read-back silently. A ``bool`` is not an exact int here and takes the
+      float path; a mixed int/float pair stays on the float path too.
 
     String path (Material/Comment): case-insensitive equality (the canonical
     catalog spelling is what gets written, and read-back compares
@@ -211,6 +224,15 @@ def _readback_ok(intended, actual):
         if isinstance(intended, str) and isinstance(actual, str):
             return intended.casefold() == actual.casefold()
         return False
+
+    # Two exact (non-bool) ints compare EXACTLY at any magnitude -- no float
+    # round-trip, so a 10**400 pair neither raises OverflowError nor (the rejected fix)
+    # reads as a POSITIVE inequality for two equal values. bool is excluded on purpose:
+    # True == 1 is the trap coerce_param_value already refuses, and a read-back is where
+    # it would silently agree -- so a bool keeps today's float-path answer (pinned).
+    if (isinstance(intended, int) and isinstance(actual, int)
+            and not isinstance(intended, bool) and not isinstance(actual, bool)):
+        return intended == actual
 
     # From here both are expected to be numeric.
     try:

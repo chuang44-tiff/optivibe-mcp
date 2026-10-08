@@ -19,7 +19,7 @@ guarded helper that returns the dispatcher or ``None`` (warning to stderr on fai
 Because the harness build is now engine-free, it effectively ALWAYS builds — only a
 manifest-import failure makes it ``None``. The reference layer is provably engine-free +
 license-free. reference-None -> harness-lazy-only; harness-None ->
-reference-only; BOTH-None -> stderr FATAL + return 2.
+reference-only; BOTH-None -> stderr FATAL + return 2; stdio unprotectable -> stderr + return 3.
 
 SESSION REAP (L22): ``main()`` is the SINGLE owner of the ZOS session. It reaps EXACTLY
 ONCE in its ``finally`` via the lazy dispatcher's ``close()`` (which calls
@@ -61,8 +61,10 @@ BufferedReader/BufferedWriter — matching the SDK's own wrapping) and passes th
 explicit ``stdin``/``stdout`` to ``stdio_server()``. This OS-level fd surgery prevents ANY
 native output (matplotlib font cache, FRU warnings, .NET Console.Write, stray prints) from
 corrupting the JSON-RPC transport on the CC pipe, and prevents >4KB stderr from blocking
-the process against the pipe buffer. Fallback: if isolation fails, ``_serve()`` gets
-``(None, None)`` and calls ``stdio_server()`` with no overrides (the pre-fix behavior).
+the process against the pipe buffer. Fallback: if isolation fails, ``_stdio_fallback()`` saves the pipe fds and puts devnull on fd 1/2,
+so ``_serve()`` still receives private fds; if that fails too, ``main()`` returns 3 and nothing
+is served on an unprotected pipe. ``_serve()``'s no-override branch remains as that function's
+own contract, reached only by a caller that passes no fds.
 Private fds are ``os.close()``d in ``main()``'s ``finally`` (explicit, not GC-dependent);
 all Python wrappers use ``closefd=False`` (Axis 4 — correctness requirement).
 """
@@ -118,7 +120,8 @@ def _isolate_stdio() -> tuple:
     private pipe fds (step B), decoupled from fd 1/2 — probe-proven unaffected by the
     later devnull->file swap.
 
-    Raises on failure (caller catches + warns + proceeds without isolation).
+    Raises on failure (the caller falls back to ``_stdio_fallback()``, or returns 3 when
+    that fails too).
     On a partial dup2 failure, undoes completed redirects before raising.
     """
     import io
@@ -197,6 +200,35 @@ def _isolate_stdio() -> tuple:
 
     # I. Return the private pipe fds (caller owns cleanup).
     return real_stdin_fd, real_stdout_fd
+
+
+def _stdio_fallback() -> tuple:
+    """: the MINIMAL pipe protection when
+    ``_isolate_stdio()`` failed entirely. Saves the real pipe fds (so the MCP transport
+    still answers), then puts devnull on fd 1 AND fd 2 (devnull never blocks -- the
+    Invariant). No stdin isolation, no wrapper rewrap, no undo beyond
+    closing what it opened. Raises on ANY failure; the caller then REFUSES to serve.
+    Under a failure of _isolate_stdio's step H (the rewrap) fd 1/2 are already on devnull
+    and the saved fds are devnull copies: protected, deaf -- disclosed, not hidden.
+    """
+    saved_in = os.dup(0)
+    try:
+        saved_out = os.dup(1)
+    except OSError:
+        os.close(saved_in)
+        raise
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, 1)
+            os.dup2(devnull, 2)
+        finally:
+            os.close(devnull)
+    except OSError:
+        os.close(saved_in)
+        os.close(saved_out)
+        raise
+    return saved_in, saved_out
 
 
 def _env_float(name, default):
@@ -281,24 +313,64 @@ def _build_reference_dispatcher():
     (``pip install -e ../optivibe-reference``) fails loudly here at startup as a
     degraded-mode warning, not at module import. The reference ``Dispatcher()``
     default-constructs from the committed catalog JSON (engine-free, license-free),
+    when that JSON is present. In a public install the glass catalog and the merit and tolerance
+    operand catalogs are all user-built (gitignored), and a missing one degrades its door
+    (``glass_catalog_unavailable`` / ``operand_catalog_unavailable``)
     so it stands up with no live engine.
 
-    BOOT-helper except is NARROW (``except Exception``, NOT ``BaseException``) so a
-    ``KeyboardInterrupt``/``SystemExit`` raised during the import aborts the boot
+    Import and construction fail for different reasons, so they warn differently (each
+    message names only the PHASE it saw, never a guessed cause):
+
+    1. ``ModuleNotFoundError`` whose ``name`` is exactly ``optivibe_reference`` -- the
+       top package is missing: "not installed". A missing SUBMODULE or a missing
+       transitive dependency is NOT this case (its ``name`` differs).
+    2. Any other import failure (a missing dependency, a reference-module bug raising at
+       import time): "FAILED TO IMPORT -- a defect or missing dependency, not missing data".
+    3. ``ReferenceDispatcher()`` raised: "FAILED TO CONSTRUCT". Phase-only: construction
+       itself imports the tool modules (``load_manifest``), so a missing tool dependency
+       can land here too; the exception text carries the cause.
+
+    BOOT-helper excepts are NARROW (``except Exception``, NOT ``BaseException``) so a
+    ``KeyboardInterrupt``/``SystemExit`` raised during the import or the construction
     (propagates to ``main()``'s ``finally``) instead of degrading to harness-only.
     The warning text is routed through ``_safe_error_text`` so a broken
     ``__str__`` on the failure cannot turn a clean degrade into a crash.
     """
     try:
         from optivibe_reference.server import Dispatcher as ReferenceDispatcher
-
+    except ModuleNotFoundError as exc:  # KI/SystemExit propagate (not Exception subclasses)
+        try:
+            top_package_missing = getattr(exc, "name", None) == "optivibe_reference"
+        except Exception:  # noqa: BLE001 -- a hostile ``name`` must not escape the boot helper
+            top_package_missing = False
+        if top_package_missing:
+            _warn(
+                f"optivibe: reference layer UNAVAILABLE — optivibe_reference is not "
+                f"installed (pip install -e packages/optivibe-reference) — grounding tools "
+                f"DISABLED ({_safe_error_text(exc)})"
+            )
+        else:
+            _warn(_reference_import_failed_text(exc))
+        return None
+    except Exception as exc:  # noqa: BLE001 — import-time defect/dependency -> degrade
+        _warn(_reference_import_failed_text(exc))
+        return None
+    try:
         return ReferenceDispatcher()
-    except Exception as exc:  # noqa: BLE001 — missing install/data -> degrade; KI/SystemExit propagate
+    except Exception as exc:  # noqa: BLE001 — construction failed -> degrade; KI/SystemExit propagate
         _warn(
-            f"optivibe: reference layer UNAVAILABLE — grounding tools DISABLED "
+            f"optivibe: reference dispatcher FAILED TO CONSTRUCT — grounding tools DISABLED "
             f"({_safe_error_text(exc)})"
         )
         return None
+
+
+def _reference_import_failed_text(exc):
+    """The warning for an import failure that is NOT the top package missing."""
+    return (
+        f"optivibe: reference package FAILED TO IMPORT — a defect or missing dependency, "
+        f"not missing data — grounding tools DISABLED ({_safe_error_text(exc)})"
+    )
 
 
 def _serve(composite, pipe_in_fd=None, pipe_out_fd=None):
@@ -353,7 +425,9 @@ def main():
     """Boot the single OptiVibe MCP: build each dispatcher, compose, serve, reap.
 
     Returns a process exit code: ``0`` on a clean serve, ``2`` when BOTH subsystems
-    failed to stand up (nothing to serve). The engine is NOT opened at boot (lazy-open);
+    failed to stand up (nothing to serve), ``3`` when neither the isolation nor the
+    devnull fallback could protect the CC pipe (nothing is served on an unprotected
+    pipe). The engine is NOT opened at boot (lazy-open);
     OpticStudio opens on the first harness-tool call. The ZOS session is reaped EXACTLY
     ONCE in the ``finally`` regardless of which exit path is taken, and whether or not the
     engine ever opened (L22).
@@ -367,9 +441,15 @@ def main():
         try:
             pipe_in_fd, pipe_out_fd = _isolate_stdio()
         except Exception:  # noqa: BLE001 — isolation failure must never crash boot; KI/SystemExit propagate
-            _warn("optivibe: stdio isolation FAILED -- proceeding without "
-                  "isolation (the hang risk is present)")
-            pipe_in_fd, pipe_out_fd = None, None
+            _warn("optivibe: stdio isolation FAILED -- falling back to the minimal pipe "
+                  "protection (devnull on fd 1/2; once it holds, no further diagnostics "
+                  "reach this stream)")
+            try:
+                pipe_in_fd, pipe_out_fd = _stdio_fallback()
+            except Exception:  # noqa: BLE001 — the fallback failed too: refuse, never serve unprotected
+                _warn("optivibe: the devnull fallback FAILED too -- refusing to serve on an "
+                      "unprotected pipe (exit 3)")
+                return 3
 
         # the hang-watchdog §1.6/§4.3/§5: the operator surface — two guarded floats.
         connect_timeout_s = _env_float("OPTIVIBE_CONNECT_TIMEOUT_S", 30.0)

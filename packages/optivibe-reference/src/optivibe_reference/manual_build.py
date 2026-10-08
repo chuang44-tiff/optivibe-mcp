@@ -39,7 +39,14 @@ from .errors import ProvenanceGateError
 # v3: ``manual_chunk_fts`` indexes ``section_path`` as a 2nd column. No
 # chunk changes (chunk_id / checksum are unchanged); the bump exists so a v2 .db
 # (body-only index) is REFUSED at open with a rebuild message, never served degraded.
-BUILDER_VERSION = 3
+# v4 (the 0.1.13 reference cleanup): a CONTENTS page (``is_contents_page``)
+# yields no chunk and is not fed to the section tracker. On the 2025 R1 manual 27
+# front pages leave the corpus (2030 -> 2003 chunks) and the first body page loses an
+# inherited contents-page section_path, so one chunk_id changes. Every user rebuilds
+# once (scripts/build_manual_corpus.py), then restarts the MCP server: the reference
+# Dispatcher opens the corpus in its constructor and keeps that connection. Until the
+# rebuild, search_reference answers corpus_unavailable (a stale build is refused).
+BUILDER_VERSION = 4
 SCHEMA_VERSION = 1
 OPTIC_STUDIO_VERSION = "25.1.0"
 
@@ -71,6 +78,27 @@ _LEDGER_ROW_MARKER = "OpticStudio manual FTS5 index"
 SECTION_HEADING_RE = re.compile(r"^\s*(\d+(?:\.\d+)+)\.?\s+[A-Z]")
 # Back-compat alias (the section tracker reads this name).
 _HEADING_RE = SECTION_HEADING_RE
+
+# Contents-page rule (the 0.1.13 reference cleanup, measured on the 2025 R1 manual's
+# builder_version 3 corpus): a page is a CONTENTS page iff BOTH hold over its
+# normalized text -- dots are >= _TOC_DOT_RATIO of the non-whitespace chars AND it
+# holds >= _TOC_MIN_DOT_RUNS runs of >= _TOC_DOT_RUN_LEN consecutive dots. Measured:
+# contents pages 0.596-0.851 dot ratio with 21-44 runs; per whole page, the nearest
+# other page 0.111 (an 18-char page) with 0 runs, and no other page holds more than 1
+# run. The run count carries the separation; requiring both is what keeps a
+# dot-heavy body page.
+# LIMITATION: the rule classifies a WHOLE page, so a front-block page mixing >= 5
+# leaders with real body text and a heading is dropped whole (supported edition: the
+# measured 2025 R1 manual, whose contents pages are 60-85% dots). The contents block
+# is the FIRST contiguous run of contents pages; a contents page found AFTER that
+# block has ended raises in build_chunks, naming the page (see there).
+# LIMITATION: a manual with NO front contents block has its first contents page,
+# wherever it sits, taken as the block, so a lone mid-body contents page is dropped
+# silently rather than raising.
+_TOC_DOT_RATIO = 0.30
+_TOC_MIN_DOT_RUNS = 5
+_TOC_DOT_RUN_LEN = 5
+_TOC_DOT_RUN_RE = re.compile(r"\.{%d,}" % _TOC_DOT_RUN_LEN)
 
 # Path anchors (package-relative, NOT cwd-relative — agent cwd resets, §5).
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -214,6 +242,32 @@ class RunningSectionTracker:
         return self._current
 
 
+def _page_text(lines_or_text):
+    """The normalized page text ``build_chunks`` chunks (a str or a list of lines)."""
+    if isinstance(lines_or_text, str):
+        lines = lines_or_text.splitlines()
+    else:
+        lines = list(lines_or_text)
+    return normalize(" ".join(lines))
+
+
+def is_contents_page(lines_or_text):
+    """True iff the page is a CONTENTS page (dot-leader rows) — PURE, fitz-free.
+
+    Both conditions over the normalized text (constants above): the dot share of
+    the non-whitespace chars is >= ``_TOC_DOT_RATIO`` AND there are >=
+    ``_TOC_MIN_DOT_RUNS`` runs of >= ``_TOC_DOT_RUN_LEN`` dots. An empty or
+    whitespace-only page is False (no division by zero).
+    """
+    text = _page_text(lines_or_text)
+    non_ws = len(text) - text.count(" ")
+    if non_ws == 0:
+        return False
+    dot_ratio = text.count(".") / non_ws
+    runs = len(_TOC_DOT_RUN_RE.findall(text))
+    return dot_ratio >= _TOC_DOT_RATIO and runs >= _TOC_MIN_DOT_RUNS
+
+
 def _split_tokens(text, max_tokens=MAX_CHUNK_TOKENS):
     """Split normalized ``text`` into <= ``max_tokens``-word slices (≥1 slice).
 
@@ -238,16 +292,37 @@ def build_chunks(pages, max_tokens=MAX_CHUNK_TOKENS):
     function is the fitz-FREE chunker the FAST tests drive with synthetic pages.
 
     Page-primary + size-cap secondary split; content-addressed ``chunk_id``.
+
+    A CONTENTS page (``is_contents_page``) yields no chunk and is skipped BEFORE
+    the section tracker sees it, so a contents row never becomes a section_path.
+    Contents pages must form ONE contiguous block (empty pages inside it are
+    allowed; pages before it, such as a cover, are not constrained). A contents
+    page found after that block has ended -- i.e. after a non-empty, non-contents
+    page that follows the block -- raises ``ValueError`` naming the page, never a
+    silent drop.
     """
     tracker = RunningSectionTracker()
     chunks = []
+    # None: no contents page seen yet; "open": inside the block; "closed": ended.
+    contents_block = None
     for page_index, page_lines in pages:
         if isinstance(page_lines, str):
             lines = page_lines.splitlines()
         else:
             lines = list(page_lines)
-        section = tracker.update(lines)
         page_text = normalize(" ".join(lines))
+        if is_contents_page(lines):
+            if contents_block == "closed":
+                raise ValueError(
+                    f"contents page at page index {page_index} follows body pages "
+                    f"(PDF page {citation_page(page_index)}); "
+                    "contents pages must form one contiguous front block"
+                )
+            contents_block = "open"
+            continue
+        if page_text and contents_block == "open":
+            contents_block = "closed"
+        section = tracker.update(lines)
         for ordinal, slice_text in _split_tokens(page_text, max_tokens):
             norm = normalize(slice_text)
             chunk_id = _sha256_text(f"{section}|{page_index}|{ordinal}")
@@ -404,13 +479,49 @@ def _builder_version_matches(meta):
 
     The ONE builder-version acceptance predicate, called by BOTH
     ``open_manual_corpus`` (runtime: a stale build is refused, by owner ruling)
-    and ``_existing_db_matches`` (build time: a stale build is rebuilt). A missing
+    ``_existing_db_matches`` (build time: a stale build is rebuilt) and
+    ``manual_corpus_is_stale_build`` (the public reader for callers outside this
+    package, asked only after every other opener precondition holds). A missing
     meta row, or a missing / NULL ``builder_version``, counts as a MISMATCH.
     """
     if not meta:
         return False
     found = meta.get("builder_version")
     return found is not None and found == BUILDER_VERSION
+
+
+def manual_corpus_is_stale_build(db_path=MANUAL_DB_PATH):
+    """True iff the ONLY reason ``open_manual_corpus`` refuses ``db_path`` is the builder version.
+
+    The public reader of the ONE builder-version predicate (``_builder_version_matches``)
+    for callers outside this package (the harness doctor): they must never compare
+    ``BUILDER_VERSION`` themselves. Every OTHER opener precondition is proved FIRST --
+    the file exists, the meta row reads, ``build_complete == 1``, ``manual_chunk`` is
+    readable and its COUNT equals ``meta.chunk_count`` -- and only then is the version
+    asked. So an absent, unreadable, incomplete, table-less or count-mismatched file is
+    False (not "stale": it stays "corrupt" to a caller that asks) even when its version
+    is also old. Never raises for a plain ``str`` filesystem path; closes the connection it
+    opened.
+    """
+    if not os.path.isfile(db_path):
+        return False
+    try:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+    except sqlite3.Error:
+        return False
+    try:
+        meta = _read_meta(conn)
+        if meta is None or meta.get("build_complete") != 1:
+            return False
+        try:
+            actual = conn.execute("SELECT COUNT(*) FROM manual_chunk").fetchone()[0]
+        except sqlite3.Error:
+            return False
+    finally:
+        conn.close()
+    if actual != meta.get("chunk_count"):
+        return False
+    return not _builder_version_matches(meta)
 
 
 def open_manual_corpus(db_path=MANUAL_DB_PATH):
