@@ -109,16 +109,22 @@ def dry_run(session, params):
     ray fails to trace at the current design) returns the
     ``optimize_merit_uncomputable`` envelope (``ok=False``, NO ``ready`` key) — the
     SAME agent-facing name ``optimize`` reports, mirroring the stop-vertex
-    special-case. The legacy bare families (``no_variables``/``no_merit``) stay BARE
-    in dry_run (out of scope for that cycle); the asymmetry (legacy bare; stop +
-    merit-uncomputable prefixed-on-both) is intentional + precedented.
+    special-case.
 
-    ROUND-10a — the "prefixed-on-both" clause above does NOT hold for
-    ``stop_indeterminate``: ``dry_run`` serves that family BARE while ``optimize``
-    serves ``optimize_stop_indeterminate``, so ONE condition reaches an agent under TWO
-    names depending on which door it knocked at. Recorded here rather than renamed:
-    changing either name is an agent-facing contract change and belongs to a round that
-    can carry the served-boundary and consumer sweep.
+    THE FAMILY PARTITION AT THIS DOOR, as shipped (the owner's decision): exactly TWO preflight families are
+    served under the ``optimize_`` prefix on BOTH doors -- ``stop_on_glass_vertex`` ->
+    ``optimize_stop_on_glass_vertex`` and ``merit_uncomputable`` ->
+    ``optimize_merit_uncomputable``. The other three fall through BARE HERE while
+    ``optimize`` prefixes every one of them: ``no_variables`` -> ``optimize_no_variables``,
+    ``no_merit`` -> ``optimize_no_merit`` (the legacy pair, bare here since) and
+    ``stop_indeterminate`` -> ``optimize_stop_indeterminate``. The bare
+    ``stop_indeterminate`` is RETAINED ON PURPOSE: the token has been served from this door
+    since the first public release, so renaming it is an agent-facing contract change
+    needing a consumer sweep and a release declaration, and the condition it names is a
+    transient Material-read fault whose remedy (``_gate_message``: retry, or
+    ``require_free_stop=false``) is identical on both doors -- so the name difference costs
+    an agent no action. Pinned by (T3-a, the two-door
+    partition table; T3-c, this sentence).
     """
     system = session.system
     require_free_stop = _bool_param(params, "require_free_stop", True)
@@ -647,6 +653,13 @@ def _malformed_range_finding(system, warning):
       a consumer that wants a census must branch on ``scan_completed`` instead of reading
       a missing key as a zero.
 
+    The bare SENTENCE also rides its own key,
+    ``malformed_range_warning`` -- the key ``build_merit`` has served since an earlier release -- on all
+    three doors here, so the four doors agree on the KEY; the merge into ``warning`` is
+    KEPT (the three preflight doors own that channel). Present exactly when
+    ``malformed_ranges`` is: the scanner's sentence is non-None iff its record is
+    (measured at the sentence builder's three append sites and the fault shape).
+
     **THE PARAGRAPH BELOW IS HISTORY, AND THE TENSE IS THE WHOLE POINT OF KEEPING IT.**
     ``_scan_malformed_ranges`` USED TO return ``(None, None)`` -- the CLEAN signal -- on a
     TOTAL-scan throw (``system.MFE`` or ``int(mfe.NumberOfOperands)``, i.e. before the row
@@ -667,7 +680,8 @@ def _malformed_range_finding(system, warning):
     SITE, and the callee's fix does not reach it.
     """
     sentence, ranges = _oc._scan_malformed_ranges(system)
-    keys = {} if ranges is None else {"malformed_ranges": ranges}
+    keys = {} if ranges is None else {"malformed_ranges": ranges,
+                                      "malformed_range_warning": sentence}
     return _merge_warning(warning, sentence), keys
 
 
@@ -3998,7 +4012,7 @@ OPTIMIZE_SPEC = ToolSpec(
         "Each pass saves a file into a PER-RUN directory under "
         "candidates/trail/<run_id>/ (echoed as artifacts_dir) — NOT in "
         "candidates/zmx/, so it never consumes a design's candidate number and never "
-        "appears among its keepers; the file count there is 1 + n_passes. "
+        "appears among its keepers; the file count there is 1 + n_passes. " + _wsp.RUN_ID_RULE + " "
         "save_candidate is what names a design's keeper. "
         "verdict has 7 values: improved, stable, diverged, improved_unphysical, "
         "improved_unverified, stable_unphysical, stable_unverified. improved means the "

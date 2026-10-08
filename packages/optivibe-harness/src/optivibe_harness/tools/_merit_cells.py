@@ -287,7 +287,9 @@ def read_cell(op, col):
     accessor MATCHING the kind:
 
     - ``"blank"`` -> ``(header, None)`` (an unused column; the caller skips it);
-    - ``"int"``   -> ``(header, int(cell.IntegerValue))``;
+    - ``"int"``   -> ``(header, int(cell.IntegerValue))`` -- a bool served by a FAKE is
+      coerced to its int here (an engine ``Int32`` cell cannot serve one; see
+      ``_optimize_common._range_cell_int``);
     - ``"double"``-> ``(header, float(cell.DoubleValue))``.
 
     The accessor read is THROW-guarded the same way (a wrong-accessor read RAISES

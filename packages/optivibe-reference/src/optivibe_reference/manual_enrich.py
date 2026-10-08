@@ -7,10 +7,12 @@ whose leftmost word starts at x0 ≈ 85 OPENS a new operand entry (first token =
 the 4-letter code, remainder = first description line); lines at x0 ≈ 137 are
 CONTINUATION; the next x0 ≈ 85 line closes the prior entry.
 
-The extracted ``raw_text`` is VERBATIM manual prose — it is the ORACLE the human
-authors a local paraphrase from, NEVER a committed artifact (§6/§8). It lands only in a gitignored scratch capture. This module's committed
-output is the build script; the descriptions a human authors live in
-``data/operand_descriptions.json`` (paraphrased, cited).
+The extracted ``raw_text`` is VERBATIM manual prose, NEVER a committed artifact
+(§6/§8). Since it is the verbatim-local description source:
+``scripts/build_manual_corpus.py --emit-raw`` writes it to a gitignored raw capture,
+and the build merges it into the gitignored, user-built operand catalog. No
+description file is committed; the committed per-operand data is
+``data/operand_synonyms.json`` (synonyms + units only).
 
 The pure pairing (``pair_operands``) is fitz-FREE and FAST-testable from synthetic
 ``(page, [(x0, line_text), ...])`` fixtures. ``iter_operand_pages`` is the lazy
@@ -36,17 +38,51 @@ MERIT_INVENTORY_PATH = os.path.join(
 def load_merit_operand_inventory(path=MERIT_INVENTORY_PATH):
     """Return the merit operand code set (a ``frozenset``) from the user-built inventory.
 
+    A missing file names its PRODUCER: the capture is written by ``scripts/probe_operands.py``
+    (a live probe).
+
     Raises loudly (``OSError`` / ``KeyError`` / ``ValueError``) on a missing or
     malformed file — the caller must never silently fall back to the ungated pairer.
     """
-    with open(path, encoding="utf-8") as fh:
-        inventory = json.load(fh)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            inventory = json.load(fh)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"merit operand inventory {path} is missing -- it is written by "
+            f"packages/optivibe-reference/scripts/probe_operands.py (a live probe; "
+            f"operand_inventory_<N>.json under scripts/captures/)") from exc
     codes = frozenset(m["code"] for m in inventory["members"])
     if len(codes) != inventory["total_members"]:
         raise ValueError(
             f"merit inventory {path}: {len(codes)} unique codes != "
             f"total_members {inventory['total_members']}"
         )
+    return codes
+
+
+def load_tolerance_operand_inventory(path=None):
+    """Return the tolerance operand code set (a ``frozenset``) from the capture.
+
+    The sibling of ``load_merit_operand_inventory``. A missing file names its PRODUCER: ``scripts/probe_tolerances.py`` (a live probe)
+    writes ``tolerance_inventory_<N>.json`` under ``scripts/captures/``.
+    """
+    if path is None:
+        from .tolerance_build import TOLERANCE_INVENTORY_PATH  # lazy: tolerance_build never imports this module
+        path = TOLERANCE_INVENTORY_PATH
+    try:
+        with open(path, encoding="utf-8") as fh:
+            inventory = json.load(fh)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"tolerance operand inventory {path} is missing -- it is written by "
+            f"packages/optivibe-reference/scripts/probe_tolerances.py (a live probe; "
+            f"tolerance_inventory_<N>.json under scripts/captures/)") from exc
+    codes = frozenset(m["code"] for m in inventory["members"])
+    if len(codes) != inventory["total_members"]:
+        raise ValueError(
+            f"tolerance inventory {path}: {len(codes)} unique codes != "
+            f"total_members {inventory['total_members']}")
     return codes
 
 # Column x0 bands (probe finding 2): code column ≈ 84.7, description ≈ 137.3.

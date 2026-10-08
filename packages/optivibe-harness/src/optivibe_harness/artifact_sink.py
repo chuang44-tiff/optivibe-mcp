@@ -33,6 +33,10 @@ _RESERVED_NAMES = frozenset(
 # Illegal-on-Windows filename characters (the colon also blocks the ADS trap).
 _ILLEGAL_CHARS = '<>:"/\\|?*'
 
+#: The longest stem ``_safe_name`` returns. Named so the optimize ``run_id`` door states
+#: and enforces the SAME limit (tools/_workspace_paths.py RUN_ID_RULE), never a copy.
+_MAX_STEM_CHARS = 120
+
 
 class RunIdCollisionError(Exception):
     """Raised when a run_id's directory already exists and is non-empty."""
@@ -77,7 +81,7 @@ def _safe_name(label: str) -> str:
     - An empty result becomes the literal stem ``snapshot``. Uniqueness across
       empty-label snapshots is carried by the ``{seq:04d}_`` filename prefix that
       ``snapshot()`` prepends, not by the stem itself.
-    - The stem is truncated to <= 120 chars.
+    - The stem is truncated to <= _MAX_STEM_CHARS chars.
 
     The colon is among the illegal chars, so an ADS path can never be produced.
     """
@@ -102,8 +106,8 @@ def _safe_name(label: str) -> str:
 
     # Truncate FIRST, then strip again: truncation can cut back into a run of
     # dots/spaces and re-expose a trailing one, so the rstrip MUST run after it.
-    if len(name) > 120:
-        name = name[:120]
+    if len(name) > _MAX_STEM_CHARS:
+        name = name[:_MAX_STEM_CHARS]
     name = name.rstrip(". ")
 
     if name == "":

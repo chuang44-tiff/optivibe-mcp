@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "optivibe-harness"
-version = "0.1.12"
+version = "0.1.13"
 description = "OptiVibe harness: ZOS-API automation, typed tools, and the single OptiVibe MCP"
 requires-python = ">=3.11"
 classifiers = [
@@ -42,6 +42,9 @@ dependencies = [
     # ``text.parse_math`` (matplotlib 3.6) draws the MTF-vs-field figure.
     "matplotlib>=3.6",
     "numpy",
+    # matplotlib already requires Pillow; ``_layout_register`` imports ``PIL`` directly
+    # to read the native layout raster, so the dependency is declared, not inherited.
+    "pillow",
 ]
 
 [project.optional-dependencies]

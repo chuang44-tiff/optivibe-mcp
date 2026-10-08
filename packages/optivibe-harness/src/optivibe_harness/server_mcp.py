@@ -55,7 +55,11 @@ _TOOL_TOKEN_RE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
 # This is the invariant's miner: every whole-word identifier in the text, so a known
 # tool of ANY shape (``optimize``, ``get_mtf``, ``trace_rays``) is seen. False positives
 # on prose are excluded by INTERSECTING with the known-tool universe, not by token shape.
-_WORD_TOKEN_RE = re.compile(r"\b[a-z][a-z0-9_]*\b")
+# Case-insensitive: a
+# sentence that OPENS with a door name ("Lookup_operand grounds it.") must be seen too --
+# the lowercase OUTPUT is _word_tokens's .lower(). Measured 0 served-byte diffs across 95
+# descriptions + both instruction compositions at the change.
+_WORD_TOKEN_RE = re.compile(r"\b[a-z][a-z0-9_]*\b", re.IGNORECASE)
 
 
 def _tool_shaped_tokens(text):
@@ -114,6 +118,51 @@ def _instructions_name_only_present_tools(instructions, manifest_names):
     named = _word_tokens(instructions)
     offending = (named & known_tools) - manifest
     return sorted(offending)
+
+
+# A sentence break is ``.``/``!``/``?`` + whitespace + the START of a sentence: an uppercase
+# letter, optionally after one opening quote/backtick/paren/bracket. A period followed by a
+# lowercase word is NEVER a break -- so an abbreviation followed by a lowercase word (e.g./i.e./
+# vs./cf./etc./E.G.) never splits, without listing the members; one followed by a CAPITAL
+# (``cf. Table``, ``vs. Zemax``) still does. The price, pinned by D13: a sentence that
+# names a reference door must itself START with a capital, or it merges into its neighbour
+# and a partial composition drops both. The terminal ``.``/``!``/``?`` may be followed by ONE
+# closing paren/bracket/quote/backtick (``...door.) Next``), else a parenthesised sentence
+# would swallow the one after it. Measured: 0 served-byte diffs and 0 moved split points
+# across 7 compositions against the lookbehind-only splitter, except the list_catalogs
+# rewording that shipped with it.
+_SENTENCE_BREAK_RE = re.compile(
+    r"(?:(?<=[.!?])|(?<=[.!?][)\]\"'`]))\s+(?=[\"'`(\[]?[A-Z])")
+
+
+def _description_names_absent_tools(text, manifest_names):
+    """Sorted KNOWN tools named by ``text`` (whole-word, ``_word_tokens``) that are absent
+    from ``manifest_names``. Known = manifest | _ADDENDUM_REFERENCE_DOORS. Curated harness
+    names are deliberately NOT unioned (a harness-partial manifest is not constructible in
+    production; the prose word ``tolerance`` is a harness tool name). [] = holds."""
+    names = set(manifest_names)
+    known = names | set(_ADDENDUM_REFERENCE_DOORS)
+    return sorted((_word_tokens(text) & known) - names)
+
+
+def served_description(name, description, manifest_names):
+    """The description a client receives for THIS manifest: every SENTENCE that names a
+    known tool absent from ``manifest_names`` is dropped. Byte-identical to ``description``
+    when nothing is absent (pinned by D3: a no-op over all 95 -- 90 harness + 5 reference --
+    on the full composition). Splits on
+    ``.``/``!``/``?`` (optionally + one closer) + whitespace + an uppercase start
+    (optionally after a quote/backtick/paren). AUTHORING RULE (pinned by D6/D11): a sentence names at most ONE
+    optional door and carries only that door's routing. Does not raise for a ``str`` (or
+    ``None``) description and an iterable of names; logs ONE WARNING per call that drops."""
+    parts = _SENTENCE_BREAK_RE.split(description or "")
+    kept = [p for p in parts if not _description_names_absent_tools(p, manifest_names)]
+    if len(kept) == len(parts):
+        return description
+    logging.getLogger("optivibe_harness.server_mcp").warning(
+        "ABSENT-TOOL INVARIANT (descriptions): %s names tool(s) %s absent from the served "
+        "manifest -- serving it without those sentence(s).",
+        name, _description_names_absent_tools(description, manifest_names))
+    return " ".join(kept)
 
 
 def _strip_lines_naming(instructions, tokens):
@@ -185,9 +234,10 @@ def _build_input_schema(entry):
     optional) becomes a property with its real JSON-Schema type, and ``required``
     is the dispatcher's ``required_params`` (a flat strict-subset; conditional
     requiredness is the handler's job, D3). Tools WITHOUT
-    ``param_types`` (the reference dispatcher's specs) fall back to the LEGACY
-    all-string-over-required-params schema — unchanged behavior (the shim still
-    un-stringifies them at the boundary).
+    ``param_types`` fall back to the LEGACY all-string-over-required-params schema (the
+    shim still un-stringifies them at the boundary); today those are ONLY zero-parameter
+    harness tools, whose legacy schema is the empty object -- every reference spec has
+    carried ``param_types`` since the typed-schema change.
 
     A ``config`` param on a tool in ``_CONFIG_ALL_TOOLS`` is advertised
     as an ``anyOf`` (number OR the literal string ``"all"``) — the per-config sweep
@@ -238,10 +288,10 @@ def _reparse_arguments(arguments, string_params=frozenset()):
     param's value must NEVER be JSON-coerced. Otherwise a legit string that
     happens to be a bare JSON literal would be mangled (``design_name="123"``
     -> ``123``; ``label="true"`` -> ``True``), and the strict handler would
-    then LOUD-reject a perfectly valid value. Tools with NO ``param_types``
-    (the reference dispatcher's specs) pass an empty ``string_params`` -> every
-    string still reparses (UNCHANGED legacy behavior — they need the shim to
-    un-stringify their numeric params).
+    then LOUD-reject a perfectly valid value. A tool with NO ``param_types`` passes an
+    empty ``string_params`` -> every string still reparses (the legacy path); today those
+    are ONLY zero-parameter harness tools (nothing to reparse), and every reference spec
+    carries its ``param_types`` since the typed-schema change.
 
     A ``parse_constant`` hook REJECTS the JSON non-finite tokens
     (``NaN``/``Infinity``/``-Infinity``) at ANY nesting depth — they would
@@ -298,7 +348,7 @@ HARNESS_INSTRUCTIONS = (
     "- Many tools take a domain CODE (a merit operand, a glass, a solve type, a\n"
     "  tolerance). Resolve it from the design INTENT first, then pass the RESOLVED\n"
     "  code — never a phrase, and never the first ranked hit inside an ambiguous\n"
-    "  family. The tool that takes the code names the door that resolves it.\n"
+    "  family. The tool that takes the code names the door that resolves it, if one is served.\n"
 )
 
 # The COMPLETE set of reference doors the REFERENCE_ADDENDUM prose names as usable
@@ -502,13 +552,16 @@ def build_mcp_server(session):
     # compose_instructions. This builder serves the HARNESS-ONLY
     # manifest, in which no reference door is present, so the gate appends no addendum --
     # the same string this block produced when the logic was inline here.
-    _instructions = compose_instructions({e["name"] for e in dispatcher.list_tools()})
+    _names = {e["name"] for e in dispatcher.list_tools()}
+    _instructions = compose_instructions(_names)
 
     server = Server("optivibe-harness", instructions=_instructions)
 
     # Per-tool set of params declared "string" — those must NOT be
     # JSON-reparsed (a string value must stay a string). A tool with no
-    # param_types (reference specs) -> empty set -> full reparse (legacy).
+    # param_types -> empty set -> full reparse (legacy path; today only zero-parameter
+    # harness tools, whose legacy schema is the empty object -- every reference spec
+    # carries param_types since 868a8b8).
     _string_params = {
         e["name"]: {p for p, t in (e.get("param_types") or {}).items() if t == "string"}
         for e in dispatcher.list_tools()
@@ -521,7 +574,8 @@ def build_mcp_server(session):
             tools.append(
                 mcp_types.Tool(
                     name=entry["name"],
-                    description=entry["description"],
+                    description=served_description(
+                        entry["name"], entry["description"], _names),
                     inputSchema=_build_input_schema(entry),
                 )
             )
@@ -592,7 +646,8 @@ def build_composite_mcp_server(dispatcher):
     server = Server("optivibe", instructions=_instructions)
 
     # Per-tool set of params declared "string" — see build_mcp_server.
-    # Reference tools carry no param_types -> empty set -> full legacy reparse.
+    # Same rule as build_mcp_server: an entry with no param_types -> empty set -> full
+    # legacy reparse. Reference entries DO carry param_types (868a8b8).
     _string_params = {
         e["name"]: {p for p, t in (e.get("param_types") or {}).items() if t == "string"}
         for e in _entries
@@ -611,7 +666,8 @@ def build_composite_mcp_server(dispatcher):
             tools.append(
                 mcp_types.Tool(
                     name=entry["name"],
-                    description=entry["description"],
+                    description=served_description(
+                        entry["name"], entry["description"], _names),
                     inputSchema=_build_input_schema(entry),
                 )
             )

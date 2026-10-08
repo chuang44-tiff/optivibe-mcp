@@ -304,8 +304,8 @@ SEARCH_REFERENCE_SPEC = ToolSpec(
         "term never occurs in the manual as that literal token or phrase, the "
         "search answers no match and lists the term in absent_terms - drop or "
         "rephrase it and retry. Gotcha: this is prose search, not the operand "
-        "index - for an exact 4-letter operand code or an intent->operand mapping "
-        "use lookup_operand instead. See lookup_operand for operand grounding."
+        "index. See lookup_operand for an exact 4-letter operand code or an "
+        "intent->operand mapping."
     ),
     kind="manual_rag",
     param_types={

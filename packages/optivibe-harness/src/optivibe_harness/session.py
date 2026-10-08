@@ -107,26 +107,124 @@ _CHANNEL_DEAD_PROSE_HEAD = (
     "supported way back is a file on disk. "
 )
 
-# The CANNOT-NAME variant is a CONSTANT: no part of a rejected ``workspace_root``
+# The two SAVE-FOLDER TAILS, shared by BOTH refusal families. Factored
+# so the tool-slot message does not carry a second copy of these sentences;
+# the two channel constants below are re-expressed as HEAD + TAIL and are
+# BYTE-IDENTICAL to their pre-factoring text by construction -- pinned against a
+# frozen copy taken at 3a6686d
+# (test_channel_prose_bytes_unchanged_by_the_tail_factoring).
+#
+# The CANNOT-NAME tail: no part of a rejected ``workspace_root`` is ever
 # is ever interpolated into it (a test asserts equality with this exact string).
 # The reason clause covers all three ways this variant is reached — unset,
 # unreadable, AND un-renderable. The third matters: ``_channel_dead_refusal_text``
-# falls back to this constant when a custom message builder returns a non-str or a
+# falls back to the constant when a custom message builder returns a non-str or a
 # blank string, and in THAT case ``workspace_root`` may have been perfectly valid
 # and readable. Saying only "not set, or could not be read"
 # would have been false on exactly that path.
-CHANNEL_DEAD_CANNOT_NAME_MESSAGE = _CHANNEL_DEAD_PROSE_HEAD + (
+_SAVE_FOLDER_CANNOT_NAME_TAIL = (
     "OptiVibe cannot name a default save folder for this session (it was not set, "
     "could not be read, or could not be rendered), so look wherever your designs "
     "were written. If nothing was saved, the design has to be rebuilt."
 )
 
-_CHANNEL_DEAD_NAMED_TEMPLATE = _CHANNEL_DEAD_PROSE_HEAD + (
+_SAVE_FOLDER_NAMED_TAIL = (
     "OptiVibe's default save folder for this session is:\n"
     "  {root}\n"
     "Look there first. OptiVibe has not checked whether it contains anything, and "
     "a session configured with its own artifact sink may have written elsewhere."
 )
+
+CHANNEL_DEAD_CANNOT_NAME_MESSAGE = _CHANNEL_DEAD_PROSE_HEAD + _SAVE_FOLDER_CANNOT_NAME_TAIL
+
+_CHANNEL_DEAD_NAMED_TEMPLATE = _CHANNEL_DEAD_PROSE_HEAD + _SAVE_FOLDER_NAMED_TAIL
+
+# ------------------------------------------------------------------------- #
+# The TOOL-SLOT refusal prose. Same discipline as
+# the channel prose above: module-scope constants, read by exactly two named
+# functions (``ZemaxSession.tools_slot_wedged_message`` composes,
+# ``server._tools_slot_refusal_text`` selects the constant fallback).
+#
+# MEASURED vs POLICY, stated in the text itself. The measured facts
+# [measured: captures/probe_wedged_save.json + probe_wedged_save_2.json, every wedged
+# run re-measured run_raised=True, Close()->False, IsRunning->True]: on a wedged
+# engine SaveAs / LoadFile / New BLOCK (>100 s) or kill the engine; reads, an LDE
+# edit, MFE editing + SaveMeritFunction and CloseApplication return normally; a .zmx
+# saved BEFORE the wedge is intact on disk. Set 3 (captures/probe_wedged_save_3.json):
+# LoadMeritFunction, MaterialCatalogs.AddCatalog and CalculateMeritFunction
+# return normally, 2/2 each. The served text names ONLY these measured operations;
+# every other served tool is said to be "served but not measured". So "MEASURED on this class of fault"
+# appears ONLY in the Arm-1 (raised) clause -- the probe wedged the slot that way.
+# The Arm-2 clause says the signature was observed WITHOUT a raise and that the
+# refusal is POLICY by analogy. No sentence promises a design save.
+#
+# WORDING REVIEW (V9 class): NOT "the engine is dead" (it is alive, reads are served);
+# NOT "the export failed because of your design"; NOT "re-opening would fail".
+# "restart ... then load_design" is the remedy MEASURED to work (R-6: a new session
+# was the only recovering rung) plus the door that reloads a file.
+#
+# ``{observation}`` is filled from the RECORDED arm, never invented: an Arm-2 latch
+# never says "RAISED". SIX prose names: the head, the
+# two arm clauses, the ARM-KEYED cannot-name template and the named template (both
+# filled by ``tools_slot_wedged_message``), and the ARM-NEUTRAL constant
+# ``TOOLS_SLOT_WEDGED_CANNOT_NAME_MESSAGE`` -- served ONLY when no builder could say
+# which arm latched (the server fallback, or an unrecorded arm).
+# ------------------------------------------------------------------------- #
+_TOOLS_SLOT_PROSE_HEAD = (
+    "The OpticStudio engine's single tool slot is WEDGED for this MCP process. "
+    "OptiVibe observed a native layout export {observation} This session therefore "
+    "refuses save_snapshot, save_candidate, load_design, apply_lens_spec and every "
+    "tool that opens a tool-slot member (the layout exporter, the optimizers, the "
+    "batch ray trace, tolerancing, scale). Measured on a wedged engine and still "
+    "served: get_mtf, get_operand, check_clearance, a system-file and aperture read, "
+    "a lens-data (thickness) edit with read-back, "
+    "merit-function add, evaluate, save and load (save_merit, load_merit), and loading "
+    "a glass catalog. Other served tools are served but were not measured on a wedged "
+    "engine. Edits made after your last saved design file cannot be saved from this "
+    "session.\n"
+    "\n"
+    "REMEDY: the last design file saved BEFORE the wedge is intact on disk. So, restart "
+    "the MCP process — in Claude Code, restart the session or reconnect the "
+    "`optivibe` MCP server — then load_design that file, and re-apply any edits made "
+    "after it was saved.\n"
+    "\n"
+    "OptiVibe will no longer serve slot, save or load calls through this session. "
+    "The supported way back is a design file saved before the wedge. "
+)
+#: Arm 1 (``run_raised``) [measured: R-6, 6 of 6 raising runs wedged the slot; the
+#: save/load probe: SaveAs/LoadFile/New blocked or killed every wedged engine].
+_TOOLS_SLOT_OBS_RAISED = (
+    "run that RAISED. MEASURED on this class of fault: the slot stays held until a "
+    "new engine session, and saving, loading or starting a design (SaveAs, LoadFile, "
+    "New) blocks the engine or kills it, while get_mtf, get_operand, check_clearance, "
+    "a system-file and aperture read, a lens-data edit with read-back, merit-function add, evaluate, save and load, and loading a "
+    "glass catalog return normally.")
+#: Arm 2 (Close() -> False AND IsRunning -> True, no raise) [measured: the R-6
+#: post-raise signature; never observed on 12/12 healthy runs]. The refusal on
+#: this arm is POLICY by analogy -- the save/load hazard was measured on Arm 1.
+_TOOLS_SLOT_OBS_SIGNATURE = (
+    "tool whose Close() returned False and still reported running, without a raise. "
+    "That is the signature of the measured wedge, but this arm itself was not "
+    "measured: by POLICY, by analogy with a raising export, OptiVibe treats the engine "
+    "as wedged, where saving, loading or starting a design was measured to block the "
+    "engine or kill it.")
+_TOOLS_SLOT_CANNOT_NAME_TEMPLATE = _TOOLS_SLOT_PROSE_HEAD + _SAVE_FOLDER_CANNOT_NAME_TAIL
+
+_TOOLS_SLOT_NAMED_TEMPLATE = _TOOLS_SLOT_PROSE_HEAD + _SAVE_FOLDER_NAMED_TAIL
+
+#: The ARM-NEUTRAL CONSTANT fallback: no workspace_root and no arm is interpolated
+#: into it; its observation clause says only what every latch shares.
+TOOLS_SLOT_WEDGED_CANNOT_NAME_MESSAGE = _TOOLS_SLOT_CANNOT_NAME_TEMPLATE.format(
+    observation="tool that did not release the slot (which observation latched it "
+                "could not be read). By POLICY OptiVibe treats the engine as wedged, "
+                "where saving, loading or starting a design was measured to block the "
+                "engine or kill it.")
+
+# The three tool-slot observation verdicts. WEDGED is the ONLY one
+# that latches, and it latches only inside ``observe_tools_slot``.
+TOOLS_SLOT_WEDGED = "wedged"
+TOOLS_SLOT_CLEAR = "clear"
+TOOLS_SLOT_UNKNOWN = "unknown"
 
 
 def _run_with_watchdog(fn, timeout_s):
@@ -228,6 +326,14 @@ class ZemaxSession:
         # not by anything. Written at EXACTLY ONE site in this codebase: the
         # ``IsAlive is False`` branch of ``observe_channel`` (a static guard asserts it).
         self._channel_dead = False
+        # The engine's single TOOL SLOT was observed wedged. Written True
+        # at EXACTLY ONE site (``observe_tools_slot``); written False here and at the
+        # ONE clear, the open COMMIT in ``_open_locked`` (a new engine is a new slot
+        # [measured: R-6, "a NEW session" was the only recovering rung]). ``close()``
+        # never clears it. T-LATCH-7 pins the write sites.
+        self._tools_slot_wedged = False
+        # Which arm latched ("raised" | "signature"); written at the same sites.
+        self._tools_slot_arm = None
         self._closed = False
         self._tracked = {}  # {pid: create_time} — only PIDs WE spawned
         self._baseline = set()  # engine PIDs present before our spawn (never touch)
@@ -524,6 +630,103 @@ class ZemaxSession:
             return CHANNEL_DEAD_CANNOT_NAME_MESSAGE
         return CHANNEL_DEAD_CANNOT_NAME_MESSAGE
 
+    # ------------------------------------------------------------------ #
+    # The TOOL-SLOT latch (owner ruling option A, latch-and-refuse).
+    # ------------------------------------------------------------------ #
+    @property
+    def tools_slot_wedged(self) -> bool:
+        """True once a wedged tool slot was OBSERVED on this engine. A free flag read.
+
+        Set ONLY by ``observe_tools_slot``. Cleared ONLY by the open COMMIT in
+        ``_open_locked`` (a NEW engine), never by ``close()`` -- so the observable rule
+        is "a new ENGINE clears it" (owner ruling). Under the shipped MCP nothing
+        re-opens a live session mid-process, so the served remedy is a restart.
+        """
+        return self._tools_slot_wedged
+
+    def observe_tools_slot(self, *, run_raised, close_returned,
+                           is_running_after_close) -> str:
+        """Record ONE native-export slot observation; LATCH on positive evidence only.
+
+        Returns ``TOOLS_SLOT_{WEDGED,CLEAR,UNKNOWN}``. The SOLE writer of
+        ``self._tools_slot_wedged`` (the literal ``True``) and of ``_tools_slot_arm``.
+
+          wedged  iff ``run_raised is True``                              (Arm 1)
+                   or ``close_returned is False`` and
+                      ``is_running_after_close is True``                   (Arm 2)
+          unknown iff neither arm holds and ``close_returned is not True`` -- the
+                  ABSENT/UNREADABLE band (Close() raised, returned a non-bool, or
+                  returned False with IsRunning unreadable / not True): NO latch
+          clear   otherwise.
+
+        Arm 1 [measured: 6 of 6 raising runs wedged the
+        slot; 0 healthy runs raised]. Arm 2 [measured: the R-6 post-raise signature;
+        12/12 healthy runs Close() -> True and reading IsRunning after Close()
+        RAISES] exists so a raise a future path swallows still latches on the
+        signature. Every test is on a LITERAL (``is True`` / ``is False``): a truthy
+        stand-in is not an observation. A next-open ``None`` is CONFIRMATION, never a
+        trigger (the ordinary busy slot must keep reading native_unavailable).
+
+        THE VERDICT IS THE OBSERVATION, NEVER THE WRITE: a failed latch write (a
+        hostile ``__setattr__``) does not change the returned verdict; the write is
+        attempted twice, the second through ``object.__setattr__`` (the
+        ``observe_channel`` guard). Never raises an ordinary ``Exception``;
+        ``KeyboardInterrupt`` / ``SystemExit`` propagate. Takes no lock (the caller
+        runs inside ``Dispatcher.dispatch``, which holds ``self._lock``).
+        """
+        try:
+            if run_raised is True:
+                arm = "raised"
+            elif close_returned is False and is_running_after_close is True:
+                arm = "signature"
+            elif close_returned is not True:
+                return TOOLS_SLOT_UNKNOWN
+            else:
+                return TOOLS_SLOT_CLEAR
+        except Exception:  # noqa: BLE001 — a hostile stand-in is not an observation
+            return TOOLS_SLOT_UNKNOWN
+        # ---- THE ONLY TOOL-SLOT LATCH SITE (guarded; the verdict is fixed) ----
+        try:
+            self._tools_slot_wedged = True
+            self._tools_slot_arm = arm
+        except BaseException as _exc:  # noqa: BLE001 — hostile __setattr__; bypass it
+            if not isinstance(_exc, Exception):
+                raise
+            try:
+                object.__setattr__(self, "_tools_slot_wedged", True)
+                object.__setattr__(self, "_tools_slot_arm", arm)
+            except BaseException as _exc2:  # noqa: BLE001 — the verdict still stands
+                if not isinstance(_exc2, Exception):
+                    raise
+        return TOOLS_SLOT_WEDGED
+
+    def tools_slot_wedged_message(self) -> str:
+        """The ONE tool-slot refusal message. ISSUES NO FILESYSTEM CALL OF ITS OWN.
+
+        ``channel_dead_message``'s clone (the T-U17a allowlist: ``getattr``,
+        ``isinstance``, ``str.strip``, ``str.format``; no import). The observation
+        clause is selected by the RECORDED arm (``_tools_slot_arm``) -- an arm that
+        is neither recorded value returns the ARM-NEUTRAL constant, so an Arm-2 latch
+        never says "RAISED". ``workspace_root`` must be a NON-EMPTY str to be named; anything
+        else selects the cannot-name form, into which no part of the rejected value
+        is interpolated. Never raises an ordinary ``Exception``.
+        """
+        try:
+            arm = getattr(self, "_tools_slot_arm", None)
+            if arm == "raised":
+                observation = _TOOLS_SLOT_OBS_RAISED
+            elif arm == "signature":
+                observation = _TOOLS_SLOT_OBS_SIGNATURE
+            else:
+                return TOOLS_SLOT_WEDGED_CANNOT_NAME_MESSAGE
+            root = getattr(self, "workspace_root", None)
+            if isinstance(root, str) and root.strip():
+                return _TOOLS_SLOT_NAMED_TEMPLATE.format(
+                    observation=observation, root=root)
+            return _TOOLS_SLOT_CANNOT_NAME_TEMPLATE.format(observation=observation)
+        except Exception:  # noqa: BLE001 — the builder must never raise
+            return TOOLS_SLOT_WEDGED_CANNOT_NAME_MESSAGE
+
     @property
     def app(self):
         """The live ``IZOSAPI_Application`` handle.
@@ -720,6 +923,12 @@ class ZemaxSession:
                 # the ONE pre-spawn set; tracked is the accumulated union of every
                 # PID we spawned this open (this attempt + any prior un-reaped one).
                 self._app = app
+                # THE ONE CLEAR of the tool-slot latch -- a NEW engine is a
+                # new slot [measured: R-6, a new session was the only recovering rung].
+                # AFTER the licence check, on the line the handle is retained, so a
+                # failed open attempt never reaches it; ``close()`` never clears it.
+                self._tools_slot_wedged = False
+                self._tools_slot_arm = None
                 # Retain the connection: it carries ``IsAlive``, the one
                 # liveness signal, and used to be dropped as a local.
                 self._connection = connection

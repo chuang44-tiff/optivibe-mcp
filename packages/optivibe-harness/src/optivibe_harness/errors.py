@@ -88,6 +88,28 @@ class SessionChannelDeadError(SessionClosedError):
     error_family = "engine_channel_dead"
 
 
+class SessionToolsSlotWedgedError(SessionError):
+    """The engine's single TOOL SLOT was OBSERVED wedged for this session (INC-2b).
+
+    Raised by ``Dispatcher.dispatch``'s GATE A2 -- AFTER the channel gate, BEFORE any
+    handler -- for a tool in ``server.TOOLS_SLOT_TOOLS`` once
+    ``ZemaxSession.observe_tools_slot`` has latched. A ``SessionError`` (an engine-state
+    fault), deliberately NOT a ``SessionClosedError``: the session is OPEN and surface
+    reads are still served, so no ``except SessionClosedError`` site may catch it.
+    The refuse set also covers every tool that reaches an engine FILE call: on a wedged engine ``SaveAs`` / ``LoadFile`` / ``New`` were measured to
+    block or kill the engine, so a save or load is refused rather than hung.
+
+    Known wedge sources: (1) a RAISING ``OpenCrossSectionExport`` run [measured:
+    6 of 6 raising runs held the slot until a NEW session];
+    (2) the Hammer ``RunAndWaitWithTimeout`` / ``Cancel`` path, which production never
+    calls (pinned by the tests) -- recorded here, no latch arm is built for
+    it. The latch clears only when a NEW engine is opened; the remedy the message names
+    is a restart of the MCP process.
+    """
+
+    error_family = "engine_tools_slot_wedged"
+
+
 class SessionMisuseError(SessionError):
     """A session method was called in a way the contract forbids.
 

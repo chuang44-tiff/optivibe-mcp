@@ -11,10 +11,12 @@ Live ZOS-API integration: N/A this tier (pure-Python durability helpers; no
 backend). The probe findings (A2) that ground ``safe_repr`` are captured in a
 test fixture.
 """
+import errno
 import math
 import os
 import re
 import tempfile
+import time
 from datetime import datetime, timezone
 
 # fsync on by default — these modules are the durability substrate. Tests flip
@@ -246,11 +248,132 @@ def atomic_write_bytes(path, data: bytes) -> None:
             pass
 
 
+#: Seconds a writer spins for the per-file append lock before raising OSError (the
+#: raise channel every caller already handles). Measured: 8 contending writers x 1000
+#: fsynced appends complete in ~7-8 s on this box, so 30 s is a wedge, not contention.
+_APPEND_LOCK_TIMEOUT_S = 30.0
+
+#: Spin interval between non-blocking lock attempts.
+_APPEND_LOCK_SPIN_S = 0.0002
+
+#: The ONE byte the append lock covers: a SENTINEL far beyond any EOF this file will
+#: ever reach (2**62). On Windows a byte-range lock is MANDATORY -- a reader whose
+#: read() overlaps a locked byte gets PermissionError -- so the lock must sit where no
+#: reader ever reads. The unlocked readers (artifact_sink.load_manifest, journal.load,
+#: interaction_log.load) read [0, EOF) and never touch it. Measured: the
+#: sentinel lock is granted on an empty file, on a 17 MB file, and 8 writers x 1000
+#: appends with a reader looping load() beside them raised ZERO reader exceptions.
+_APPEND_LOCK_SENTINEL = 2 ** 62
+
+#: The errnos that mean "another holder has the lock" -- the ONLY ones the spin retries
+#:. Windows: ``msvcrt.locking`` raises
+#: EACCES (13) on an ``LK_NBLCK`` collision -- measured -- and EDEADLOCK (36) is its
+#: documented give-up code. POSIX: ``flock(LOCK_NB)`` raises EWOULDBLOCK / EAGAIN (EACCES
+#: kept for older kernels) -- REASONED, not measured. Any OTHER OSError (a bad fd, an
+#: unsupported filesystem) raises at once, before any byte is written.
+_APPEND_LOCK_CONTENTION_ERRNOS = (
+    frozenset({errno.EACCES, errno.EDEADLOCK}) if os.name == "nt"
+    else frozenset({errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}))
+
+
+def _append_lock_try(fd):
+    """ONE non-blocking attempt on the sentinel byte; raises OSError when held."""
+    if os.name == "nt":
+        import msvcrt
+        os.lseek(fd, _APPEND_LOCK_SENTINEL, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _append_lock(fh):
+    """Take the per-file append lock on ``fh`` (the SENTINEL byte, a mutex, not data).
+
+    Windows: ``msvcrt.locking(LK_NBLCK, 1)`` at ``_APPEND_LOCK_SENTINEL`` -- the fd is
+    ``os.lseek``'d there EXPLICITLY before every attempt (``_locking`` locks from the
+    CURRENT file position, so an implicit position would lock whatever byte the last
+    write left the pointer at). ``LK_LOCK`` is NOT used: its retry sleeps a full second
+    per collision. POSIX: ``fcntl.flock(LOCK_EX | LOCK_NB)`` -- whole-file, advisory, a
+    reader is never blocked; REASONED, not measured on this (win32) box.
+
+    Spins every ``_APPEND_LOCK_SPIN_S`` up to ``_APPEND_LOCK_TIMEOUT_S`` -- but ONLY while
+    the failure is lock CONTENTION (``_APPEND_LOCK_CONTENTION_ERRNOS``); any other
+    ``OSError`` re-raises on the first attempt. Either way the raise comes BEFORE any byte
+    is written.
+    """
+    fd = fh.fileno()
+    deadline = time.monotonic() + _APPEND_LOCK_TIMEOUT_S
+    while True:
+        try:
+            _append_lock_try(fd)
+            return
+        except OSError as exc:
+            if (exc.errno not in _APPEND_LOCK_CONTENTION_ERRNOS
+                    or time.monotonic() >= deadline):
+                raise
+            time.sleep(_APPEND_LOCK_SPIN_S)
+
+
+def _append_unlock(fh):
+    """Release the append lock taken by ``_append_lock`` -- does not propagate an OS unlock
+    failure when called on the live handle ``append_line_fsync`` supplies (a CLOSED handle's
+    ``fileno()`` raises ``ValueError``, which is not caught: no caller passes one).
+
+    Windows: the fd is ``os.lseek``'d to the IDENTICAL sentinel offset, then
+    ``LK_UNLCK, 1`` -- the unlock region must be the locked region, byte for byte.
+    POSIX: ``flock(LOCK_UN)``. An ``OSError`` here is SWALLOWED, deliberately: by the
+    time this runs the record is written, flushed and (if enabled) fsynced, and the OS
+    releases a byte-range lock when the handle is closed (measured: a second handle
+    takes the sentinel lock immediately after the first is closed without unlocking).
+    Raising would report a COMPLETED append (fsynced when enabled) as a failure -- and ``InteractionLog`` counts
+    a raise as a dropped record, which is the one lie this helper must not tell.
+    """
+    try:
+        fd = fh.fileno()
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, _APPEND_LOCK_SENTINEL, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
 def append_line_fsync(path, line: str) -> None:
     """Append ``line`` to ``path`` as exactly one utf-8 record + one ``\\n``.
 
-    Opens in append mode (utf-8, ``newline="\\n"``), writes the line with exactly
-    one trailing newline, flushes, then fsyncs (if enabled).
+    Opens in append mode (utf-8, ``newline="\\n"``), takes the per-file append lock
+    (``_append_lock`` -- a byte-range lock on the SENTINEL byte ``_APPEND_LOCK_SENTINEL``,
+    never on data), seeks to the end, writes the line with exactly one trailing newline,
+    flushes, fsyncs (if enabled), releases the lock.
+
+    PER-RECORD ATOMIC ACROSS COOPERATING WRITERS -- processes or threads that append
+    THROUGH THIS FUNCTION -- on a LOCAL Windows filesystem, and that is a MEASURED claim
+   : without the lock, Windows'
+    O_APPEND is seek-then-write and 8 writers x 1000 appends LOST 5104 of 8000 rows
+    (1471 torn), and a reader looping load() beside them RAISED on every read it made
+    during contention (a torn INTERIOR line); with it, 8000 of 8000, 0 torn, and the
+    same reader made 198 reads with 0 exceptions. A writer that does NOT take this lock
+    (a foreign process appending raw) is not serialized by it. A NETWORK SHARE (SMB / UNC /
+    NAS) is UNMEASURED: byte-range locking and flush there depend on the server.
+
+    WHAT IS AND IS NOT CLAIMED. A lock that cannot be taken within _APPEND_LOCK_TIMEOUT_S
+    raises OSError BEFORE any byte is written; so does a NON-contention lock failure, at
+    once. The cost of a wedge is paid PER APPEND: while a peer holds the lock (suspended,
+    or stuck in fsync on a stalled disk) EVERY append waits the full timeout and then
+    raises -- there is no memory of the wedge. A fault DURING write / flush / fsync (disk
+    full, a kill between the write and the newline) can still leave a torn FINAL line --
+    the lock prevents INTERLEAVING, it does not roll bytes back. The readers' torn-final-line
+    tolerance is KEPT, not replaced, and it covers a torn line that fails JSON DECODING
+    only: a tail torn INSIDE a multi-byte UTF-8 sequence (a non-ASCII record cut between
+    its bytes) makes ``artifact_sink.load_manifest``, ``journal.load`` and
+    ``interaction_log.load`` raise ``UnicodeDecodeError`` (pre-existing, the readers are
+    outside this fix; measured by constructing the tail, not by a live race). POSIX: ``fcntl.flock`` (whole-file,
+    advisory, readers never blocked) -- REASONED, not measured. Append-only; no rewrite
+    strategy.
 
     WARNING: callers MUST NOT pass a string with raw embedded newlines — an
     interior ``\\n`` splits one logical record into multiple physical JSONL lines
@@ -261,7 +384,12 @@ def append_line_fsync(path, line: str) -> None:
     if line.endswith("\n"):
         line = line[:-1]
     with open(path, "a", encoding="utf-8", newline="\n") as fh:
-        fh.write(line + "\n")
-        fh.flush()
-        if FSYNC_ENABLED:
-            os.fsync(fh.fileno())
+        _append_lock(fh)
+        try:
+            fh.seek(0, os.SEEK_END)
+            fh.write(line + "\n")
+            fh.flush()
+            if FSYNC_ENABLED:
+                os.fsync(fh.fileno())
+        finally:
+            _append_unlock(fh)

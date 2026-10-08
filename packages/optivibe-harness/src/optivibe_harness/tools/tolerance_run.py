@@ -322,58 +322,6 @@ def _author_tolerance_set(tde, operand_enum, authored):
             _cells.write_double_verified(op, _MAX_COL, "Max", float(entry["max"]))
 
 
-def _verify_int(field, intended, actual, token):
-    """DEAD as of the cell-writer migration. ZERO callers in ``src/``.
-
-    ROUND-10a — measured, not asserted: ``grep -rn _verify_int src/`` returns no CALL
-    site. (ROUND-13 CORRECTS the wording, not the conclusion: the original said it
-    "returns only this definition", and it returns THREE lines — the ``def``, this very
-    sentence, and the cross-reference in ``_verify_float``'s docstring below. A reader
-    re-running the command to check gets three hits and cannot tell whether the claim
-    rotted or was never true. The claim that matters — zero callers — holds.)
-    The integral-Surf-cell read-back proof it was written for is now enforced
-    by ``_tol_cells.write_int_cell`` on the author path (``_author_tolerances``), which is
-    what the integral-Surf-cell read-back test
-    actually exercises. That test's head comment still calls THIS function "LOAD-BEARING"
-    and claims deleting it would make the test falsely pass — both false; deleting it
-    changes nothing, which is exactly why the claim survived. The behaviour is real and
-    guarded; only the attribution is wrong.
-
-    Kept (not deleted) because the removal belongs with that test's prose correction in
-    ONE change, and the test file is outside this round's ownership.
-    """
-    try:
-        actual_int = int(actual)
-    except (TypeError, ValueError):
-        actual_int = None
-    if actual_int != int(intended):
-        raise _tc.ToleranceError(
-            f"{token}.{field} did not persist (intended {intended!r}, read back "
-            f"{actual!r}); the tolerance authoring was a silent no-op",
-            family="tolerancing_run",
-        )
-
-
-def _verify_float(field, intended, actual, token):
-    """DEAD as of the cell-writer migration. ZERO callers in ``src/``.
-
-    The sibling of ``_verify_int`` above and dead for the same reason: the double
-    read-back proof is enforced by ``_tol_cells.write_double_verified`` on the author
-    path.
-    """
-    try:
-        actual_f = float(actual)
-    except (TypeError, ValueError):
-        actual_f = None
-    if actual_f is None or not math.isclose(
-        actual_f, float(intended), rel_tol=1e-9, abs_tol=1e-12
-    ):
-        raise _tc.ToleranceError(
-            f"{token}.{field} did not persist (intended {intended!r}, read back "
-            f"{actual!r}); the tolerance authoring was a silent no-op",
-            family="tolerancing_run",
-        )
-
 
 def _strehl_nominal(session):
     """Read ONE nominal Strehl number ALONGSIDE (D8). NEVER fails the run.
@@ -1208,10 +1156,10 @@ TOLERANCE_SPEC = ToolSpec(
         "percentiles. tolerances is a list of {type:<TDE code>, surface, surface2?, "
         "code?, param?, roll_surf?, delta>0 | min+max}; the FULL operand vocabulary "
         "(radius/thickness/index/abbe, surface+element tilt/decenter, irregularity, "
-        "roll, ISO, ...) is supported — pass a RESOLVED code (ground tolerance intent "
-        "via lookup_operand with domain='tolerance', the structured tolerance catalog, "
-        "or search_reference for chapter context; calling lookup_operand without "
-        "domain='tolerance' mis-routes to merit operands; code-not-phrase). Range ops "
+        "roll, ISO, ...) is supported — pass a RESOLVED code, never a phrase. Ground "
+        "tolerance intent via lookup_operand with domain='tolerance' (the structured "
+        "tolerance catalog); calling lookup_operand without domain='tolerance' "
+        "mis-routes to merit operands. For chapter context use search_reference. Range ops "
         "need surface2; TEZI/TEXI (Zernike form error) additionally REQUIRE "
         "max_term+min_term (1-based Zernike-term indices, min<=max) — omitting them is "
         "refused (no inert 0/0 range). Deltas are "

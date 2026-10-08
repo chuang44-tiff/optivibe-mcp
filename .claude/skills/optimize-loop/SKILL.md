@@ -17,7 +17,8 @@ checkpoints first and attempts a best-restore if it comes out worse.
 
 The loop does not run start-to-finish unattended. Step 4 is a **midpoint pause**: you
 save a candidate, optionally ask for a look at its layout figure, and put what comes
-back to the user as suggestions before going further. A design can meet every number
+back to the user as suggestions before going further. When no human is there to steer
+(a headless run, or the user said to proceed without them), you are the steer. A design can meet every number
 you gave it and still be the wrong shape, and a merit function cannot see a defect
 nobody wrote a target for.
 
@@ -69,10 +70,12 @@ a per-pass `.zmx` trail.
    - `diverged` — the merit did not improve / an UNSTABLE configuration. Reload your
      Step-1 snapshot if the result is worse, and make a high-level design change
      (different form / starting point) rather than running more cycles.
-   - `optimize_merit_uncomputable` — a corner ray can't trace at full pupil (a
-     wide-field / fast merit). Apply corner vignetting with `set_vignetting`
-     (`from_rays`), then REBUILD the merit with `build_merit` and re-seed from a
-     gentler form before re-running.
+
+   `optimize` can also REFUSE instead of running: `ok=false` with error_family
+   `optimize_merit_uncomputable` and no verdict — a corner ray can't trace at full
+   pupil (a wide-field / fast merit). Apply corner vignetting with `set_vignetting`
+   (`from_rays`), then REBUILD the merit with `build_merit` and re-seed from a
+   gentler form before re-running.
 
 3. **Reality-check every `improved` verdict before you build on it.** A merit function
    is a proxy, and a mis-authored operand can make a destroyed lens score well. After
@@ -107,7 +110,8 @@ the verdict, the read-back merit, **and** the geometry read-back together.
 3. `save_candidate` the result. This is the checkpoint the pause is built on, and it is
    what makes a remark about the figure recordable: the candidate's `seq` and its
    `png_sha256` both come from this envelope.
-4. **The midpoint pause — ask, then stop.** With the candidate saved, you may invoke the
+4. **The midpoint pause — ask, then stop for the steer (the user's, or yours when no
+   human is there).** With the candidate saved, you may invoke the
    `design-vision-review` skill with that candidate's seq to get a second pair of eyes on
    its paired layout figure. Do it here, and whenever the user asks what you think of the
    layout.
@@ -115,8 +119,12 @@ the verdict, the read-back merit, **and** the geometry read-back together.
    **The reviewer is an ADVISOR, never an autopilot.** What it returns are SUGGESTIONS
    for the user and for you. Nothing it raises edits the design, authors a constraint, or
    re-enters the loop on its own. Present each remark with what was seen, where, the
-   levers that would address it, and the evidence — then **WAIT for the user's steer**
-   before optimizing again or promoting.
+   levers that would address it, and the evidence — then, while a human is there,
+   **WAIT for the user's steer** before optimizing again or promoting.
+
+   **With NO human to steer, do not wait.** Follow `design-vision-review`'s NO HUMAN
+   rule: act on the finding (one soft, low-weight constraint, then re-optimize and
+   re-measure every stated target), or decline it with a measured cost.
 
    A review that comes back silent is not a pass. Say the eye found nothing; silence
    never certifies.
@@ -176,8 +184,11 @@ a response exists for those ids, bound to those bytes, carrying a non-empty reas
 
 **Answering is not agreeing.** A rejection is a valid response — an obligation to
 respond is not an obligation to comply. Declining should be argued, and the argument is
-the reason you record. At the pause the user's steer IS the response: record it,
-whichever way it went.
+the reason you record. A decline names a MEASUREMENT that answers what the remark says —
+a passing floor does not answer a proportion remark — and a push-back to preserve
+performance names its cost in numbers, before and after. At the pause the user's steer
+IS the response: record it, whichever way it went. With no human there, your own
+recorded acted or declined response is.
 
 Record it rather than merely saying it. A remark you silently dropped and one you
 deliberately dismissed look identical afterwards, and prose in the reply scrolls past.
@@ -231,10 +242,11 @@ Then:
 - **Disclose any change of design class** — conics freed, glass substituted, element
   count changed — in the `Design class:` line of the report. Always, even when the
   user did not ask.
-- **The figure review is an ADVISOR, not an autopilot.** At the midpoint pause you
-  present its suggestions and WAIT for the user's steer; a lever is applied only when
-  the user picks it. Nothing it raises edits the design or re-enters the loop by
-  itself. When the user asks what you think of the layout, save a candidate and ask for
+- **The figure review is an ADVISOR, not an autopilot.** At the midpoint pause, while a
+  human is there, you present its suggestions and WAIT for the user's steer; a lever is
+  applied only when the user picks it. Nothing it raises edits the design or re-enters
+  the loop by itself. With NO human there, you are the steer: act, or decline with a
+  measured cost. When the user asks what you think of the layout, save a candidate and ask for
   a review of that seq — at any point in the session, not only at the pause.
 - **You cannot promote over an unanswered recorded finding.** `promote_best` refuses and
   names the open ids. Meeting every stated target is not the same as being finished:

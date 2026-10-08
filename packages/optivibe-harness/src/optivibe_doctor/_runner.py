@@ -470,6 +470,9 @@ def _plane_summary(facts, status, reason):
         return "no data file at %s" % (facts.get("path"),)
     if reason == "corrupt":
         return "present (%s bytes) but the opener refused it" % (facts.get("bytes"),)
+    if reason == "stale_build":
+        return ("present (%s bytes) and complete, but built by another builder version -- "
+                "rebuild it" % (facts.get("bytes"),))
     if reason == "unwired":
         return ("present and opens but the dispatcher did not wire it (%s is None)"
                 % (facts.get("conn_attr"),))
@@ -822,7 +825,8 @@ def _grade_plane(check, facts, *_rest_args):
     checkout_present = _rest_args[2] if len(_rest_args) > 2 else True
     status, reason = classify_plane(
         _tri(facts.get("present")), _tri(facts.get("opens")),
-        _tri(facts.get("wired")), _tri(facts.get("identity_ok")))
+        _tri(facts.get("wired")), _tri(facts.get("identity_ok")),
+        stale_build=_tri(facts.get("stale_build")))
     dispatcher_error = facts.get("dispatcher_error")
     if dispatcher_error and reason == "unwired":
         # Same verdict, different cause, different fix.  The pinned ``unwired`` remedy says

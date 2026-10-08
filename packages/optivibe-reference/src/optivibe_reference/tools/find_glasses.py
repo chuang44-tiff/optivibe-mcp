@@ -228,7 +228,7 @@ FIND_GLASSES_SPEC = ToolSpec(
         "At least one window bound is required. Gotcha: a glass whose computed "
         "field is out-of-band (null) never matches that window, and the delta-Pg,F "
         "bounds are raw manufacturer data (unvalidated). See find_glass_pair for "
-        "matched apochromat pairs and lookup_glass for one glass's full data."
+        "matched apochromat pairs. See lookup_glass for one glass's full data."
     ),
     kind="glass",
     param_types={

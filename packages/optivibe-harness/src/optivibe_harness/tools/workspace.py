@@ -95,6 +95,7 @@ from .clearance import check_clearance, check_clearance_floor_only, resolve_floo
 from . import _finding
 from . import _judgment
 from ._image_gate import _is_png
+from ._workspace_paths import RUN_ID_RULE, run_id_refusal
 # The bound-scorecard seam. ``loop/`` imports ``tools.*``
 # handlers and ``catalog.metrics``; it imports THIS module only LAZILY, inside
 # ``clearance_evidence``, so this module-level import closes no cycle and the MCP
@@ -180,8 +181,8 @@ def _path_state(path):
         return PATH_UNKNOWN
 
 
-# Production imports the REAL render tool per the pinned interface (Coder A owns
-# layout_render.py). A unit test may monkeypatch ``render_layout`` on THIS module.
+# Production imports the REAL render tool through its pinned interface: layout_render.py owns
+# the renderer; THIS module binds the name so a unit test may monkeypatch ``render_layout`` here.
 from .layout_render import render_layout
 
 
@@ -1349,7 +1350,19 @@ def _exact_int(value):
 
 
 def _is_hex64(value):
-    """True iff ``value`` is a 64-char lowercase-hex ``str`` (a sha256 digest)."""
+    """True iff ``value`` is a 64-char lowercase-hex ``str`` (a sha256 digest). A SHAPE test only.
+
+    DELIBERATE TWIN of ``loop/statuses._is_hex64`` (half A), not a fold: a published
+    build ships WITHOUT ``loop/`` (``release/reports/shipset.txt`` carries no ``loop/`` row) and
+    this module reaches ``loop`` only inside a guarded ``try``, so there is no object to bind
+    to in the tree this file is published into. The contract both copies keep: exact length
+    64 and the lowercase-hex charset, so ``"a"*64 + "\\n"`` is REFUSED (the trailing-newline
+    acceptance was the bug the fold closed). It says a value LOOKS like a digest, never that it
+    IS the digest of the bytes in hand. Pinned by: the
+    trailing-newline refusal, agreement with ``statuses._is_hex64`` over the misshapen corpus
+    (agreement is NOT provenance -- census M14), and an AST sweep that there are exactly TWO
+    definitions package-wide, so a third copy reddens.
+    """
     return (
         isinstance(value, str)
         and len(value) == 64
@@ -1447,8 +1460,8 @@ def _declared_parent(params):
     ``None`` for both, and only ``parent_source`` tells them apart.
 
     **BOTH HALVES OR NEITHER.** A bare ``parent_seq`` is the trap this rule exists
-    for: *a seq identifies a WORKSPACE candidate, not a design's candidate* (see this
-    module's header), so a lone seq names some other design's checkpoint. It is
+    for: *seq is the PER-DESIGN index save_candidate returned*, so a bare seq names no
+    particular checkpoint (it could be any design's). It is
     ``missing_pair``, never a half-recorded parent.
 
     **THE ORDERING IS THE GUARANTEE.** A malformed declaration is turned into
@@ -1518,7 +1531,8 @@ def _write_audit_record(zmx_dir, *, seq, design_name, filename, zmx_sha256,
             # taking it — no key-set-equality assertion exists anywhere in ``tests/``
             # on this row or on ``save_candidate``'s envelope (swept by every
             # assertion form: ``set(...)==``, ``sorted(...)==``, ``== {literal}``).
-            # Both halves are stored because a seq alone names a WORKSPACE candidate.
+            # Both halves are stored because seq is numbered PER DESIGN: without the
+            # design name it names no checkpoint.
             "parent": parent,
             "parent_source": parent_source,
             "audit": {
@@ -2729,6 +2743,13 @@ def _design_dir(session, design_name: str) -> str:
     ``<projects-root>/<safe-design-name>/`` nesting, UNCHANGED.
     """
     root, flat = _resolve_root(session)
+    return _design_dir_for(root, flat, design_name)
+
+
+def _design_dir_for(root: str, flat: bool, design_name: str) -> str:
+    """The design dir for an ALREADY-RESOLVED root. Reads nothing from the session, so a
+    caller that resolved the root once can derive every path from that one read
+   ."""
     if flat:
         return root
     return os.path.join(root, _safe_name(design_name))
@@ -2809,6 +2830,11 @@ def _design_name_error(design_name):
             f"Use {safe!r}."
         )
     return None
+
+
+# The producer's design-name rule as a predicate, injected into artifact_naming.legal_readings.
+def _design_ok(name):
+    return _design_name_error(name) is None
 
 
 def _save_as_seam(session):
@@ -2957,12 +2983,18 @@ def _resolve_candidate(zmx_dir: str, seq: int, design_name):
          evaluated, with no ordering between them, through the same
          ``candidate_index_of`` / ``is_legacy_name`` predicates the counter uses. Two
          schemes answering, or more than one hit within a scheme, REFUSES. A single v2
-         hit must additionally carry exactly ONE ``_\\d{3,}_`` delimiter
-         (``delimiter_count``) — ``alpha_001_001_x.zmx`` could be ``(alpha, 1,
-         "001_x")`` or ``(alpha_001, 1, "x")``, and with no row nothing can tell them
-         apart, so nothing is published for either claimant. That count is SYNTACTIC
-         and over-refuses; the sound legal-reading enumerator is ticketed and the
-         remedy today is to RE-SAVE, which restores the row.
+         hit must additionally have exactly ONE LEGAL ``(design, number, label)``
+         reading, and that reading must be THIS claimant's ``(design_name, seq)``
+         (``artifact_naming.legal_readings``, the producer's own validator injected). ``alpha_001_001_x.zmx``
+         reads as ``(alpha, 1, "001_x")`` AND ``(alpha_001, 1, "x")``, both legal, so
+         nothing is published for either claimant; ``alpha_001_note_002_x.zmx`` is
+         likewise two LEGAL readings (``alpha_001_note`` is a legal design — measured).
+         What the legal count rescues over the old syntactic one, measured: an
+         alternate design that is not a ``_safe_name`` fixed point (``alpha_001_x.``)
+         or is over 120 chars, and an alternate label that is empty
+         (``alpha_001_x_002_``). A sole legal reading that names ANOTHER design
+         refuses for this claimant. The remedy for a refusal is to RE-SAVE, which
+         restores the row.
 
     ``evidence`` is a frozen token: ``"manifest_row"`` / ``"owner_unrecorded"`` /
     ``"no_row_for_seq"`` / ``"manifest_absent"`` / ``"manifest_unreadable"``.
@@ -3256,14 +3288,15 @@ def _resolve_candidate(zmx_dir: str, seq: int, design_name):
             "promote_failed", f"no candidate with seq {seq}{trail_note}",
             [], absent_evidence)
     name = hits[0]
-    if v2_hits and _naming.delimiter_count(name) != 1:
+    legal = _naming.legal_readings(name, _design_ok)
+    if v2_hits and not (len(legal) == 1 and legal[0][:2] == (design_name, want)):
         return _refused(
             "promote_candidate_ambiguous",
-            f"REFUSED: {name!r} has more than one <_NNN_> delimiter, so with no "
-            f"manifest row it reads as more than one (design, number, label) "
-            f"triple and nothing can tell them apart. Nothing is published for any "
-            f"claimant. Re-save it under the design you mean, which restores the "
-            f"manifest row — the row, not the name, is the identity source.",
+            f"REFUSED: {name!r} has {len(legal)} legal (design, number, label) reading(s) "
+            f"and exactly one, naming {design_name!r} at {want}, is required: with no "
+            f"manifest row nothing else can say which design it belongs to, so nothing is "
+            f"published for this claimant. Re-save it under the design you mean, which "
+            f"restores the manifest row — the row, not the name, is the identity source.",
             [name],
         )
     return _resolved(name, None, absent_evidence)
@@ -3364,97 +3397,126 @@ def _max_ondisk_seq(zmx_dir: str) -> int:
     return max_seq
 
 
-def _get_sink(session, design_name: str):
-    """The sink ``save_candidate`` writes its keeper through. NOT the trail's.
+def _resolve_candidate_sink(session, design_name):
+    """The sink ``save_candidate`` writes its keeper through, AND the root it is under.
 
-    FLAT layout (``workspace_root`` set): the design dir IS the root, so this is the
-    one ``_get_candidate_sink``. LEGACY layout: the historical per-design
-    ``projects/<name>/candidates/zmx`` dir, cached per ``(session, design_name)``.
+    Returns ``(sink, root)``. ``_resolve_root`` is read EXACTLY ONCE here; the currency
+    check, the build and the returned ``root`` all derive from that one read, so
+    ``sink.run_dir`` is the run_dir a sink built for ``root`` carries -- a hit passes the
+    currency predicate, a build composes it -- and the artifact lands under ``root`` in
+    BOTH layouts. A root that answers differently on a later read cannot
+    make the caller report a root the file is not under.
 
-    Both construct with ``start_seq=0``. The instance counter is UNUSED — every
+    FLAT layout (``workspace_root`` set): the design dir IS the root, so this is the one
+    ``<root>/candidates/zmx`` sink. LEGACY layout: the per-design
+    ``<root>/<design>/candidates/zmx`` dir, cached per ``(session, design_name)`` and --
+    since (half b) -- current only for the root it was built under.
+
+    Both construct with ``start_seq=0``. The instance counter is UNUSED -- every
     ``save_candidate`` call supplies its own ``index`` and ``filename`` from
-    ``next_candidate_index`` + ``artifact_naming`` — and an explicit ``start_seq``
-    is what bypasses the sink's non-empty-run_dir collision guard, which a repeat
-    session would otherwise trip.
+    ``next_candidate_index`` + ``artifact_naming`` -- and an explicit ``start_seq`` is
+    what bypasses the sink's non-empty-run_dir collision guard, which a repeat session
+    (or a rebuild after a root change) would otherwise trip.
 
     ``candidates/png`` is NOT created: a new save's picture is the SIBLING of its
     ``.zmx``. Existing png directories and their files are left alone.
 
-    Raises ``PermissionError``/``OSError`` from ``os.makedirs`` up to the caller,
-    which envelopes it as ``workspace_unwritable`` — this helper itself does not
-    swallow the unwritable-root case (the caller needs the family).
+    Raises ``PermissionError``/``OSError`` from ``os.makedirs`` up to the caller, which
+    envelopes it as ``workspace_unwritable`` -- this helper does not swallow the
+    unwritable-root case (the caller needs the family).
     """
-    _root, flat = _resolve_root(session)
+    root, flat = _resolve_root(session)
+    cached = _sink_if_current(session, design_name, root, flat)
+    if cached is not None:
+        return cached, root
     if flat:
-        return _get_candidate_sink(session)
-
-    cache = getattr(session, "_workspace_sinks", None)
-    if cache is None:
-        cache = {}
-        session._workspace_sinks = cache
-    if design_name in cache:
-        return cache[design_name]
-
-    design_dir = _design_dir(session, design_name)
-    candidates_dir = os.path.join(design_dir, "candidates")
+        return _get_candidate_sink_at(session, root), root
     sink = ArtifactSink(
-        candidates_dir,
+        os.path.join(_design_dir_for(root, False, design_name), "candidates"),
         "zmx",
         _save_as_seam(session),
         min_snapshot_bytes=256,
         start_seq=0,
     )
-    cache[design_name] = sink
-    return sink
+    sinks = getattr(session, _WORKSPACE_SINKS_ATTR, None)
+    if not isinstance(sinks, dict):  # a junk/absent cache is REPLACED, never indexed
+        sinks = {}
+        setattr(session, _WORKSPACE_SINKS_ATTR, sinks)
+    sinks[design_name] = sink
+    return sink, root
 
 
-#: The flat-layout sink cache, and the ROOT it was built for. Two attributes that
-#: must move together -- named here so a future rename touches ONE place and the
-#: currency check cannot be left pointing at the old spelling (T1).
+def _get_sink(session, design_name: str):
+    """Back-compat: the sink only (direct test callers). New code calls
+    ``_resolve_candidate_sink``, which also returns the root the sink is under."""
+    return _resolve_candidate_sink(session, design_name)[0]
+
+
+#: The two sink caches, named here so a future rename touches ONE place (T1: the flat
+#: cache was once renamed and its invalidators went on nulling the old name).
 _CANDIDATE_SINK_ATTR = "_candidate_sink"
-_CANDIDATE_SINK_ROOT_ATTR = "_candidate_sink_root"
+_WORKSPACE_SINKS_ATTR = "_workspace_sinks"
 
 
-def _candidate_sink_if_current(session, root):
-    """The cached flat sink, but ONLY if it was built for ``root``. Else ``None``.
+def _sink_under(sink, expected_run_dir):
+    """True iff ``sink``'s ``run_dir`` IS ``expected_run_dir`` -- raw string equality on
+    the COMPOSED run-directory string (the constructor's own composition,
+    ``run_dir = join(base_dir, run_id)``). An object with no ``run_dir`` is NOT under
+    anything. NEVER raises."""
+    try:
+        return getattr(sink, "run_dir", None) == expected_run_dir
+    except Exception:  # noqa: BLE001 -- unknown currency is NOT a hit
+        return False
 
-    **THE DEFECT THIS EXISTS TO END (T1, found by the live gate).** The flat cache
-    key was renamed ``_default_sink`` -> ``_candidate_sink``. Every caller of the
-    deleted ``_get_default_sink`` failed LOUDLY at import, which is why the rename
-    was done that way on purpose -- but the INVALIDATORS did not reference the
-    function, they referenced the ATTRIBUTE NAME, so they went on nulling
-    ``session._default_sink``: a name nothing read any more. They failed SILENTLY.
-    Meanwhile ``promote_best`` re-resolves the root every call, so the writer and
-    the reader drifted apart and ``save_candidate`` returned ``ok: true`` with a
-    ``zmx_path`` under a workspace the caller had stopped using.
 
-    **So currency is no longer something a caller must REMEMBER to announce.** It is
-    DERIVED here, by comparing the root the sink was built for against the root
-    resolved now. A future rename cannot reintroduce this: there is no invalidator
-    left to forget, and a caller that nulls the old attribute is simply ignored
-    rather than silently believed.
+def _sink_if_current(session, design_name, root, flat):
+    """The cached sink THIS save would write through, ONLY if it is under ``root``. Else None.
 
-    NEVER raises. An unreadable cache is reported as ``None`` (rebuild), never as a
-    hit -- the safe direction is doing the work twice, not writing to a stale tree.
+    What this DECIDES, and only this: equality of the cached object's ``run_dir`` with
+    the run-dir STRING a sink built for ``root`` composes -- flat ``<root>/candidates/zmx``,
+    legacy ``<root>/<safe design>/candidates/zmx``. Equal -> HIT, including an object
+    this process did not build (its location is right by construction; its ``save_as``
+    seam is the injector's -- outside the single-user in-process threat model, stated,
+    not guarded). Different, or no ``run_dir`` -> MISS. It is not a provenance check.
+
+    WHY THE SINK'S OWN ``run_dir`` AND NOT A RECORD (half b). T1 (found by the live
+    gate) made flat currency DERIVED rather than announced: a cache key was once renamed
+    and its invalidators went on nulling the old attribute, so a writer and a reader
+    drifted apart and ``save_candidate`` returned ``ok: true`` under a workspace the
+    caller had stopped using. T1 derived currency from a sibling ROOT RECORD, and a
+    record can be stale or foreign independently of the sink it describes (a sink
+    injected under B beside a record naming A was a hit). The sink's own ``run_dir`` has
+    no separate record to go stale, on any layout, so the T1 record is retired.
+
+    ``D:\\ws`` and ``D:\\ws\\`` compose one string (a HIT, the same directory);
+    ``D:/ws`` or a case variant composes another (a MISS, a safe rebuild). Filesystem
+    identity is never consulted: a RELATIVE root re-anchored by a cwd change is a HIT
+    (a ticket is owed for this, filed at Completion Sync; no token is written
+    until it exists) -- the judgment belt in
+    ``save_candidate`` is the one place that matters. A false MISS rebuilds (safe); a
+    false HIT writes to a stale tree. NEVER raises -- an unreadable cache is a MISS.
     """
     try:
-        sink = getattr(session, _CANDIDATE_SINK_ATTR, None)
-        if sink is None:
-            return None
-        built_for = getattr(session, _CANDIDATE_SINK_ROOT_ATTR, None)
-        return sink if built_for == root else None
-    except Exception:  # noqa: BLE001 — unknown currency is NOT a hit
+        if flat:
+            sink = getattr(session, _CANDIDATE_SINK_ATTR, None)
+            expected = os.path.join(root, "candidates", "zmx")
+        else:
+            sink = (getattr(session, _WORKSPACE_SINKS_ATTR, None) or {}).get(design_name)
+            expected = os.path.join(
+                _design_dir_for(root, False, design_name), "candidates", "zmx")
+        return sink if sink is not None and _sink_under(sink, expected) else None
+    except Exception:  # noqa: BLE001 -- unknown currency is NOT a hit
         return None
 
 
 def _cached_sink_run_dir(session, design_name):
     """The run_dir of the sink THIS SAVE WILL WRITE THROUGH, if one is already cached.
 
-    READ-ONLY and NON-MUTATING: it peeks at the two caches ``_get_sink`` consults
-    (``session._candidate_sink`` for the flat layout, ``session._workspace_sinks``
-    keyed by design for the legacy one) and CREATES NOTHING. That is the whole point
-    -- the judgment block is validated PRE-MUTATION, so it may not call ``_get_sink``,
-    which makes directories.
+    READ-ONLY and NON-MUTATING: it peeks at the two caches ``_resolve_candidate_sink``
+    consults (``session._candidate_sink`` for the flat layout, ``session._workspace_sinks``
+    keyed by design and current only for the root it was built under -- 104b -- for the
+    legacy one) and CREATES NOTHING. That is the whole point -- the judgment block is
+    validated PRE-MUTATION, so it may not build a sink, which makes directories.
 
     WHY IT EXISTS (internal finding E). The judgment's ``finding_ids`` were
     resolved against a directory PREDICTED from ``_design_dir(session, …)``, while the
@@ -3467,19 +3529,17 @@ def _cached_sink_run_dir(session, design_name):
 
     So when the authority is already in hand, READ IT rather than re-derive it. When it
     is not cached there is nothing to read, the prediction is the best available answer,
-    and the post-``_get_sink`` re-verify is the belt for that case.
+    and the post-build re-verify is the belt for that case.
 
     NEVER RAISES: this runs outside every ``try`` in ``save_candidate``.
     """
     try:
         root, flat = _resolve_root(session)
-        # T1: read the sink only when it belongs to the CURRENT root. A stale one
-        # here does not merely mislead -- it produces the exact FALSE STATEMENT
-        # this helper's docstring is about, naming a directory the row will not
-        # land in. Unknown currency reads as no authority, which is the case the
-        # prediction path already handles.
-        sink = (_candidate_sink_if_current(session, root) if flat
-                else (getattr(session, "_workspace_sinks", None) or {}).get(design_name))
+        # Read the sink only when it is under the CURRENT root. A stale one here does
+        # not merely mislead -- it produces the exact FALSE STATEMENT this helper's
+        # docstring is about, naming a directory the row will not land in. Unknown
+        # currency reads as no authority, which the prediction path already handles.
+        sink = _sink_if_current(session, design_name, root, flat)
         run_dir = getattr(sink, "run_dir", None) if sink is not None else None
         return run_dir if isinstance(run_dir, str) else None
     except Exception:  # noqa: BLE001 — a degraded session yields NO authority, not a raise
@@ -3487,7 +3547,16 @@ def _cached_sink_run_dir(session, design_name):
 
 
 def _get_candidate_sink(session):
+    """The FLAT-layout keeper sink for the root resolved NOW. See
+    ``_get_candidate_sink_at``; a direct caller gets one ``_resolve_root`` read."""
+    return _get_candidate_sink_at(session, _resolve_root(session)[0])
+
+
+def _get_candidate_sink_at(session, root):
     """The FLAT-layout keeper sink: ``<root>/candidates/zmx``. Cached per session.
+
+    ``root`` is ALREADY RESOLVED by the caller, so this reads nothing from the session
+    but the cache (one read per sink operation).
 
     COLD-ENGINE / LAZY-OPEN: construction touches NO engine — only ``os.makedirs``
     (via the ArtifactSink ctor). ``session.system`` is NOT dereferenced here; the
@@ -3495,17 +3564,14 @@ def _get_candidate_sink(session):
     building this sink on a never-opened session does NOT grab the single (N=1)
     OpticStudio seat.
 
-    ROOT-KEYED SINCE T1. The cache is consulted only after the root is resolved, and
-    a sink built for a DIFFERENT root is not a hit. ``_get_sink`` already resolves
-    the root on every call before delegating here, so this costs attribute reads and
-    a ``join`` -- it is not a new failure mode, and it is the difference between
-    ``save_candidate`` writing where the caller asked and writing where the caller
-    asked several roots ago.
+    CURRENT ONLY FOR ``root`` (T1, structural since 104b): a cached sink whose
+    ``run_dir`` is not the one ``root`` composes is not a hit, and a sink is rebuilt --
+    the difference between writing where the caller asked and writing where the caller
+    asked several roots ago. The sink itself is the record; nothing else is written.
 
     Raises ``PermissionError``/``OSError`` from ``os.makedirs`` up to the caller.
     """
-    root, _flat = _resolve_root(session)
-    cached = _candidate_sink_if_current(session, root)
+    cached = _sink_if_current(session, None, root, True)
     if cached is not None:
         return cached
     sink = ArtifactSink(
@@ -3516,9 +3582,6 @@ def _get_candidate_sink(session):
         start_seq=0,
     )
     setattr(session, _CANDIDATE_SINK_ATTR, sink)
-    # Recorded in the SAME statement group that builds the sink, so the two can
-    # never be written apart -- the failure mode T1 was.
-    setattr(session, _CANDIDATE_SINK_ROOT_ATTR, root)
     return sink
 
 
@@ -3532,12 +3595,19 @@ def _get_trail_sink(session, run_id: str):
 
     NOT cached — a new run means a new directory. Raises up to the caller.
 
-    BACKSTOP: ``optimize`` refuses a non-plain ``run_id`` at its door; this re-asserts it
-    at the join, so no other caller can hand the sink a name that escapes the trail folder
-    (an absolute path discards the base in ``os.path.join``; ``..`` walks out of it).
+    BACKSTOP: ``optimize`` refuses a bad ``run_id`` at its door; this re-asserts the door's
+    WHOLE rule at the join, so no other caller can hand the sink a name that escapes the
+    trail folder (an absolute path discards the base in ``os.path.join``; ``..`` walks out of
+    it) or names a reserved / over-long / ``~`` alias folder. The exact-``str`` arm is here
+    (a ``str`` SUBCLASS is refused, as at the door); the four string reasons come from the
+    door's OWN predicate, ``_workspace_paths.run_id_refusal`` -- one copy, never a second
+    statement of the rule.
     """
-    if not isinstance(run_id, str) or _safe_name(run_id) != run_id:
+    if type(run_id) is not str:
         raise ValueError("trail run_id %r is not a plain directory name" % (run_id,))
+    why = run_id_refusal(run_id)
+    if why is not None:
+        raise ValueError("trail run_id %r %s. %s" % (run_id, why, RUN_ID_RULE))
     return ArtifactSink(
         os.path.join(_resolve_root(session)[0], "candidates", "trail"),
         run_id,
@@ -3552,12 +3622,19 @@ def _get_snapshot_sink(session):
     Seeded past its OWN directory's max (the existing FIX-4 posture, applied to this
     directory only): a crash that left a file with no manifest row must not be
     clobbered by a later session re-seeding onto it.
+
+    CURRENT ONLY FOR THE ROOT RESOLVED NOW (half b, snapshot analogue): ONE
+    ``_resolve_root`` read composes the run dir, and a cached sink whose ``run_dir`` is
+    not that string is rebuilt -- by the same structural predicate as the candidate
+    caches (``_sink_under``), with the same stated limit: an object whose ``run_dir``
+    equals the composed string is a hit whoever built it. A rebuild reseeds from THIS
+    directory's history, so a root that comes back continues past its own max.
     """
-    cached = getattr(session, "_snapshot_sink", None)
-    if cached is not None:
-        return cached
     trail_dir = os.path.join(_resolve_root(session)[0], "candidates", "trail")
     run_dir = os.path.join(trail_dir, "snapshots")
+    cached = getattr(session, "_snapshot_sink", None)
+    if cached is not None and _sink_under(cached, run_dir):
+        return cached
     existing_max = max(_max_existing_seq(run_dir), _max_ondisk_seq(run_dir))
     sink = ArtifactSink(
         trail_dir,
@@ -3649,7 +3726,12 @@ _FIGURE_ENVELOPE_KEYS = (
     "surface_labels",       # the surfaces DRAWN, stamped; NEVER the row count
     "n_surfaces",           # lde.NumberOfSurfaces read INSIDE that render; image = n-1
     "stop_label",           # which stamp is the stop, as drawn
-    "figure_disclosures",   # what the figure does NOT faithfully depict
+    "figure_disclosures",   # what the figure does NOT faithfully depict -- the boxes DRAWN
+    # How many
+    # disclosure boxes the canvas could NOT fit. ``figure_disclosures`` lists only what was
+    # drawn, so a non-zero count means that list is SHORT; 0 means it is complete. The
+    # per-surface channels that are complete by construction stay with 's class.
+    "disclosures_truncated",
     "flags",                # render-time flags (ray-trace degradations, etc.)
     "config_evaluated",     # the multi-config configuration this picture depicts
     # The element-outline CONVENTION this picture was drawn under. This is the one
@@ -3657,6 +3739,28 @@ _FIGURE_ENVELOPE_KEYS = (
     # provenance of the drawing convention actually matters: without it a reviewer
     # scoring the figure cannot tell which outline convention produced the ink.
     "element_outline",
+    # native-layout-retool:
+    # per field, how many SAMPLED rays reach the image -- a trace, not a reading of the
+    # ink (`basis` names the sample). Graded-clean fields and the no_rays_requested /
+    # unavailable statuses travel too: an empty failure set is not proof of clean rays,
+    # and `unavailable` means unknown. Every ok:true renderer exit binds it to a dict at
+    # 81d236d (a RENDERER contract, read there, not enforced here: this copy copies what
+    # it is given). Placed BEFORE the A5 triple so a test's
+    # [-3:] tail pin stays exact.
+    "ray_coverage",
+    # native-layout-retool dogfood F-2: the native cross-section's own facts about its
+    # stamps -- `registration` (how the stamps were registered to the exporter's ink;
+    # `ambiguous_surfaces` are the `k?` stamps) and `stamps_withheld` (why no surface
+    # number was drawn). Both are native-only and ABSENT on a self render, so the
+    # `if key in render_res` copy carries them only when the renderer set them. Placed
+    # BEFORE the A5 triple for the same [-3:] tail pin.
+    "registration",
+    "stamps_withheld",
+    # native-layout-retool (A5): WHICH renderer made this candidate's PNG, whether the default fell
+    # back and why, and which far ends are off-frame. `renderer` absent = a pre-retool self-render.
+    "renderer",
+    "renderer_fallback",
+    "far_object_excluded",
 )
 
 
@@ -3696,8 +3800,8 @@ def save_candidate(session, params):
 
     # V-INT Part 2 — the optional JUDGMENT block, validated BEFORE anything is created.
     #
-    # PRE-MUTATION ON PURPOSE. ``_get_sink`` below makes directories, so validating
-    # after it would leave a workspace half-built for a call that is going to be
+    # PRE-MUTATION ON PURPOSE. ``_resolve_candidate_sink`` below makes directories, so
+    # validating after it would leave a workspace half-built for a call that is going to be
     # refused. The caller fixes the block and re-calls, and nothing was lost.
     #
     # A MALFORMED JUDGMENT REFUSES THE SAVE rather than being dropped, and that is the
@@ -3743,7 +3847,7 @@ def save_candidate(session, params):
         # points at something.
         #
         # Falls back to the PREDICTION only when nothing is cached: there is then no
-        # second answer to disagree with, and the re-verify after ``_get_sink`` below
+        # second answer to disagree with, and the re-verify after the sink build below
         # covers a root that moves in between. Still PRE-MUTATION -- the peek reads the
         # caches and creates nothing.
         try:
@@ -3751,6 +3855,14 @@ def save_candidate(session, params):
             if _judgment_manifest_dir is None:
                 _judgment_manifest_dir = os.path.join(
                     _design_dir(session, design_name), "candidates", "zmx")
+            # ANCHORED AT CAPTURE TIME. A RELATIVE root would otherwise
+            # be anchored by the belt below under whatever the cwd is at COMPARISON
+            # time, on BOTH sides, so a cwd move between this validation and the sink
+            # build read as agreement. Absolute here, the belt's later ``abspath`` is
+            # idempotent on this side and anchors the sink side under the build-time
+            # cwd, so the move is a string disagreement. A ``ValueError`` (embedded NUL)
+            # falls into the ``except`` below -> UNKNOWN, the existing path.
+            _judgment_manifest_dir = os.path.abspath(_judgment_manifest_dir)
         except Exception:  # noqa: BLE001 — an unwritable/unresolvable root is UNKNOWN
             _judgment_manifest_dir = None
         judgment_req, judgment_err, judgment_family = _judgment.normalize_request(
@@ -3771,7 +3883,8 @@ def save_candidate(session, params):
             }
 
     try:
-        sink = _get_sink(session, design_name)
+        # ONE root read for the sink AND the root the envelope reports.
+        sink, _sink_root = _resolve_candidate_sink(session, design_name)
     except Exception as exc:  # noqa: BLE001 — unwritable root, etc. -> enveloped
         return {
             "ok": False,
@@ -3789,10 +3902,10 @@ def save_candidate(session, params):
     # === FINDING E — THE JUDGMENT WAS VALIDATED AGAINST A PREDICTED MANIFEST; PROVE
     # === THE PREDICTION MATCHED THE AUTHORITY. (internal E, ruled)
     #
-    # The judgment block is validated ABOVE, before ``_get_sink`` exists, and its
-    # ``finding_ids`` are resolved against a manifest directory PREDICTED from
-    # ``_design_dir(session, …)``. The row it will write goes to the sink's
-    # ``run_dir``. Both derive from ``_resolve_root(session)`` — but they READ IT AT
+    # The judgment block is validated ABOVE, before ``_resolve_candidate_sink`` builds
+    # the sink, and its ``finding_ids`` are resolved against a manifest directory
+    # PREDICTED from ``_design_dir(session, …)``. The row it will write goes to the
+    # sink's ``run_dir``. Both derive from ``_resolve_root(session)`` — but they READ IT AT
     # DIFFERENT TIMES, which is the two-independent-resolutions class this cycle closed
     # five other instances of. When they disagree the ids were resolved against
     # manifest A while the row lands in manifest B, so a judgment can CLAIM TO ANSWER A
@@ -3800,12 +3913,12 @@ def save_candidate(session, params):
     # false record. Refusing unresolvable ids is the resolver's entire purpose, so
     # letting that through defeats the feature at its own boundary.
     #
-    # ▶ WHY VALIDATION IS NOT SIMPLY MOVED BELOW ``_get_sink`` — DO NOT "SIMPLIFY" THIS
-    #   BACK. ``_get_sink`` MAKES DIRECTORIES. Validating after it would leave a
-    #   workspace half-built for a call that is going to be refused, and that
-    #   pre-mutation property was ITSELF an audit fix (see the validation site's own
-    #   note). Moving it would trade a silent-wrong for a half-built workspace and
-    #   re-open a closed finding — one audit fix paid for with another.
+    # ▶ WHY VALIDATION IS NOT SIMPLY MOVED BELOW ``_resolve_candidate_sink`` — DO NOT
+    #   "SIMPLIFY" THIS BACK. ``_resolve_candidate_sink`` MAKES DIRECTORIES. Validating
+    #   after it would leave a workspace half-built for a call that is going to be
+    #   refused, and that pre-mutation property was ITSELF an audit fix (see the
+    #   validation site's own note). Moving it would trade a silent-wrong for a
+    #   half-built workspace and re-open a closed finding (one audit fix paid for another).
     #
     # SCOPED TO THE MEASURED HARM, AND NO WIDER. It fires only when BOTH sides resolve
     # to real strings AND they disagree:
@@ -3815,13 +3928,27 @@ def save_candidate(session, params):
     #     that names one. Refusing here too would break the case that legitimately
     #     succeeds today: a judgment carrying NO ids on an unresolvable root.
     #
-    # REACHABILITY, STATED HONESTLY: the shipped entrypoint pins ``workspace_root`` ONCE
-    # to a plain string at launch (``__main__.py``), so on the shipped path the two
-    # reads cannot disagree and this NEVER fires. It guards a path that exists only
-    # when something has already gone wrong — a session whose root attribute answers
-    # differently on successive reads, or a ``chdir`` under the tier-4 cwd fallback,
-    # both of which were demonstrated against the real handler for the sibling
-    # ``promote_best`` disclosure.
+    # WHAT THIS DECIDES, STATED AS THE PREDICATE. Reached only
+    # after the preflight succeeded and the sink was acquired, with ``judgment_req``
+    # present (TRUE for an EMPTY-ids judgment too) and both paths strings, it decides
+    # whether the two are the SAME STRING after ``normcase(abspath(...))`` -- the
+    # captured side anchored at VALIDATION time (``abspath`` at capture, above), the
+    # sink side at BUILD time. It refuses a re-pointed root attribute that changes the
+    # normalised string, and a same-spelling RELATIVE root whose cwd moved between the
+    # two (the anchors differ; row T10b). It does NOT decide directory identity:
+    # (a) two distinct directories that normalise to one string (case-only spellings on
+    # a case-sensitive Windows tree) PASS; (b) one directory reached by two spellings
+    # (junction/symlink/8.3) is REFUSED; (c) a root change after the build is not seen;
+    # (d) no judgment, no check. A ticket is owed for (a)/(b), filed at Completion
+    # Sync; no ticket token is written here until it exists.
+    #
+    # REACHABILITY: on the shipped path ``workspace_root`` is pinned ONCE at launch
+    # (``__main__.py``). For an ABSOLUTE pinned root the two strings cannot disagree
+    # and this never fires. A RELATIVE ``OPTIVIBE_WORKSPACE_ROOT`` is a pinned
+    # attribute, not a pinned location: a cwd move between validation and the build
+    # now refuses here (it landed before this cycle). Otherwise it guards a session
+    # whose root attribute answers differently on successive reads, or a ``chdir``
+    # under the tier-4 cwd fallback.
     #
     # The family is the EXISTING ``judgment_unresolvable`` rather than a new one: the
     # condition genuinely is "these ids could not be resolved against the manifest this
@@ -3835,13 +3962,13 @@ def save_candidate(session, params):
                 "ok": False,
                 "error_family": "judgment_unresolvable",
                 "error": (
-                    f"REFUSED: the judgment's finding ids were resolved against "
+                    f"REFUSED: this judgment's manifest directory was captured as "
                     f"{_judgment_manifest_dir!r}, but this save writes its row to "
-                    f"{_sink_dir!r}. The workspace moved between the two reads, so the "
-                    f"ids were checked against a DIFFERENT manifest than the one the "
-                    f"judgment would land in and nothing here can say they resolve "
-                    f"there. Nothing was written. Re-issue the save with a stable "
-                    f"workspace root."),
+                    f"{_sink_dir!r}; the two do not name the same normalized path, so "
+                    f"nothing here can say the judgment belongs where the row would land. "
+                    f"No candidate file and no manifest row were written; directories under the "
+                    f"current root, up to the run directory, may have been created by the sink build. "
+                    f"Re-issue the save with a stable workspace root."),
                 "design_name": design_name,
                 "label": label,
                 "seq": None,
@@ -4133,6 +4260,12 @@ def save_candidate(session, params):
                     },
                     exact_path=_minted_png,
                 )
+            # A render that
+            # REFUSES returns ok:false with error_family + error; it used to reach the
+            # candidate as png_ok:false with render_error null. The reason travels now. A
+            # render that RAISES keeps the except-path text below; a mint failure keeps its own.
+            if render_res.get("ok") is False and render_error is None:
+                render_error = f"{render_res.get('error_family')}: {render_res.get('error')}"
             # "IS THERE A REAL PNG HERE" AND "DID THIS CALL PRODUCE IT" COLLAPSE
             # INTO ONE QUESTION **UNDER THE DECLARED SINGLE-WRITER MODEL**, because
             # this call CREATED the name. An earlier revision stated the collapse
@@ -4156,6 +4289,17 @@ def save_candidate(session, params):
             # A picture that passes the magic gate but will not digest has nothing to
             # bind, so nothing publishes: UNKNOWN stays unknown, never proof.
             png_produced_here = bool(_png_is_png and _png_sha_proved is not None)
+            if _png_is_png and _png_sha_proved is None and render_error is None:
+                # A real PNG was rendered but its digest could not be read, so nothing
+                # publishes. Say why, or png_ok:false reads as "nothing was rendered".
+                render_error = ("the rendered figure's digest could not be read, so the "
+                                "picture was not published")
+            if (render_res.get("ok") is True and _minted_png is not None
+                    and not _png_is_png and render_error is None):
+                # The renderer said it succeeded, but what is on disk now is not a PNG
+                # (missing, truncated or replaced). Same silent shape as above: say why.
+                render_error = ("the renderer reported success but its figure is not a "
+                                "readable PNG, so the picture was not published")
             if png_produced_here:
                 # DISCLOSURE ONLY, AND TRI-STATE. Whether a companion was already
                 # there is REPORTED, never relied on -- and an unreadable answer reads
@@ -4235,10 +4379,9 @@ def save_candidate(session, params):
             # render is a different picture), never a re-read of the LDE (that is the
             # temporal proxy again, inside one tool). Gated on ``png_ok`` because the
             # failure envelope carries ``surface_labels: []`` -- see
-            # ``_FIGURE_ENVELOPE_KEYS``. A key the renderer did not establish (e.g.
-            # ``config_evaluated`` after a configuration-read fault) stays ABSENT rather
-            # than arriving as None: absent is "not established", None would be a
-            # contract violation the analyzer must then fail closed on.
+            # ``_FIGURE_ENVELOPE_KEYS``. A key the renderer did not establish stays
+            # ABSENT rather than arriving as None: absent is "not established", None
+            # would be a contract violation the analyzer must then fail closed on.
             if png_ok:
                 _render_keys = {
                     key: render_res[key]
@@ -4635,46 +4778,46 @@ def save_candidate(session, params):
         # A1/A4/A5 disclosure: the per-design index, the scheme that named the file,
         # where it lives, and whether the label or the index had to move.
         "name_scheme": "v2",
-        # The root THIS SINK IS UNDER, from ``sink.run_dir``, NOT a second
-        # ``_resolve_root(session)``. The sink is CACHED per session: it can have been
-        # built against an earlier root while the session now resolves a different one,
-        # and the disclosure would then name a directory the artifact is NOT in --
-        # MEASURED by an audit with a cached sink under ``old-root``
-        # and ``workspace_root=new-root``. Fifth instance of the
-        # two-independent-resolutions class in this cycle; same fix every time, read
-        # the authority rather than re-derive. ``run_dir`` is
-        # ``<root>/candidates/zmx`` by construction in ``_get_candidate_sink``, so the
-        # root is its grandparent -- and it is the SAME authority ``candidates_dir``
-        # below already reports, so the two can no longer disagree.
-        #
-        # >> THE TWO TOOLS DERIVE THIS KEY DIFFERENTLY, AND THE DIVERGENCE IS
-        # >> DELIBERATE -- disclosed here after the brutal audit (A5) correctly called it
-        # >> undisclosed. ``save_candidate`` reads the SINK IT ACTUALLY WROTE TO (this
-        # >> line). ``promote_best`` re-derives with ``_resolve_root(session)[0]``.
-        # >> This one is the more truthful: it names the root the artifact is IN, and it
-        # >> is the fix. The other is the open half, recorded in
-        # >> a ticket, which also measures why it
-        # >> is not a one-liner -- that read sits on the REFUSAL path, above the point
-        # >> where any sink exists to read, and ``_design_dir`` is layout-dependent
-        # >> (FLAT returns the root itself, LEGACY returns ``<root>/<design>``), so
-        # >> recovering the root from it requires the very re-resolution being removed.
-        # >> **A reader comparing the two keys across tools should expect them to agree
-        # >> and should not assume they must.**
-        "workspace_root": os.path.dirname(os.path.dirname(sink.run_dir)),
-        "candidates_dir": _zmx_dirname,
+        # The root THIS ARTIFACT IS UNDER. Both location keys derive from
+        # the ONE ``_resolve_root`` read ``_resolve_candidate_sink`` performed: the sink
+        # it returned is under that root by construction (a build) or by the currency
+        # predicate (a hit), in BOTH layouts, so this names the directory the file is
+        # in -- the property, now held by construction rather than by walking up
+        # from ``run_dir`` (which was one level too deep in LEGACY, ``<root>/<design>``).
+        # ``promote_best`` reports the same one-read root; ``optimize``'s pair is the
+        # open remainder (PARTIAL). A
+        # within-call flap is pinned by T2.
+        # A root spelled with a trailing separator is echoed VERBATIM, as promote does.
+        "workspace_root": _sink_root,
+        # The sink composes with os.path.join
+        # onto the root STRING verbatim, so a forward-slash root yields `…/ws\candidates\…`.
+        # The three location DISCLOSURES are normpath-spelled here, at emission, and nowhere
+        # else: the sink's own paths, ``workspace_root`` (echoed verbatim -- test_t9's rule),
+        # the belt's normcase(abspath()) comparisons and every on-disk row are untouched.
+        # normpath, never abspath: a relative root stays relative (its anchoring is
+        # 's question, not this one's).
+        "candidates_dir": os.path.normpath(_zmx_dirname) if isinstance(_zmx_dirname, str) else _zmx_dirname,
         "label_sanitized": label_sanitized,
         # S-6: a LEGITIMATE label can compose a name that is unpromotable the moment
         # its manifest row is lost. ``label=<001_x>`` on design ``alpha`` composes
-        # ``alpha_001_001_x.zmx``, whose two ``_NNN_`` delimiters read as more than
-        # one (design, index, label) triple, so the orphan path refuses it FOREVER
+        # ``alpha_001_001_x.zmx``, which has TWO LEGAL (design, index, label) readings
+        # (``artifact_naming.legal_readings`` -- the orphan path's own rule, so the two
+        # cannot drift), so the orphan path refuses it FOREVER
         # (``promote_candidate_ambiguous``). That refusal is correct -- nothing can
-        # tell the triples apart -- but the owner was told nothing at SAVE time, and
+        # tell the readings apart -- but the owner was told nothing at SAVE time, and
         # ``label_sanitized`` reads False here because the label needed no sanitising.
+        # The saving design's own reading is always legal: its label is ``_safe_name``'s
+        # OUTPUT, and the label rule is the IMAGE of ``_safe_name`` (not its fixed points --
+        # truncation can expose a bare reserved word such as ``CON``, which is not a fixed
+        # point; a fixed-point rule made the owner's own reading illegal and let another
+        # design publish the file). So a count other than 1 is exactly "unpromotable by its
+        # own design without a row"; a label whose alternate reading is ILLEGAL
+        # (``x_002_``) reads False.
         # The row keeps it promotable today; this names what is lost if the row is.
         # Disclosure only: nothing refuses and the name is unchanged.
         "label_ambiguous_without_row": (
             isinstance(zmx_path, str)
-            and _naming.delimiter_count(os.path.basename(zmx_path)) > 1
+            and len(_naming.legal_readings(os.path.basename(zmx_path), _design_ok)) != 1
         ),
         # S-3: the picture this save certifies REPLACED one already at the path.
         # See the note at the proof site -- disclosed, not refused.
@@ -4691,9 +4834,9 @@ def save_candidate(session, params):
         **_mismatch_keys,
         **_zmx_error_keys,
         **_png_unproven_keys,
-        "zmx_path": zmx_path,
+        "zmx_path": os.path.normpath(zmx_path) if isinstance(zmx_path, str) else zmx_path,
         "zmx_ok": zmx_ok,
-        "png_path": png_path,
+        "png_path": os.path.normpath(png_path) if isinstance(png_path, str) else png_path,
         "png_ok": png_ok,
         # The renderer's exception, DISCLOSED. ``None`` on a normal return
         # (and when ``render=False``, where there was no renderer to raise).
@@ -4955,12 +5098,14 @@ def promote_best(session, params):
     artifact_sha256 = None
     png_identity = None
     best_png_reason = None
-    # KNOWN, UNDISCLOSED. ``_atomic_copy(src_zmx, best_zmx)`` runs INSIDE the one
-    # ``try``, so any fault after it returns ``promote_failed`` / ``best_zmx: null``
-    # while ``BEST_<design>.zmx`` ON DISK HAS ALREADY BEEN REPLACED — an envelope
-    # DENYING a mutation that happened. The shape is PRE-EXISTING (not introduced
-    # here); the disclosure key that would have surfaced it was cut for scope, so this
-    # stays a known gap. No test blesses it.
+    keeper_replaced = False
+    # DISCLOSED. ``_atomic_copy(src_zmx, best_zmx)``
+    # runs INSIDE the one ``try``, so any fault after it returns ``promote_failed`` /
+    # ``best_zmx: null`` while ``BEST_<design>.zmx`` ON DISK HAS ALREADY BEEN REPLACED. The
+    # net now reports ``keeper_replaced`` (set once, immediately after the copy returns), so
+    # the envelope no longer denies a mutation that happened; ``best_zmx`` stays null. X7c
+    # and the D group assert the filesystem AND the key.
+    # Ticket:.
 
     # FIX 7 (spec §9.6): reject a non-str / empty design_name BEFORE _safe_name.
     name_err = _design_name_error(design_name)
@@ -4991,7 +5136,13 @@ def promote_best(session, params):
                 **_pre_fork_identity_keys(),
             }
 
-        design_dir = _design_dir(session, design_name)
+        # ONE root read per call, threaded to the keeper path AND every disclosure below
+        # (promote half): a root that
+        # answers differently on a later read cannot make an exit report a root the
+        # keeper is not under. Never route this through ``_workspace_paths.workspace_root``
+        # -- it re-reads.
+        root, flat = _resolve_root(session)
+        design_dir = _design_dir_for(root, flat, design_name)
         zmx_dir = os.path.join(design_dir, "candidates", "zmx")
 
         # ONE resolver decides WHICH file and WHOSE it is. NO GLOB IS BUILT FROM A
@@ -5015,29 +5166,9 @@ def promote_best(session, params):
                 "best_zmx": None,
                 "best_png": None,
                 "png_promoted": False,
-                # MEASURED, and it CAN diverge -- this is a SIXTH instance
-                # of the two-independent-resolutions class, left in place DELIBERATELY
-                # because it is outside this cycle's charter (see the report; a ticket
-                # is owed and no ``TICKET-`` token is written here until it exists).
-                #
-                # ``promote_best`` resolves the root TWICE: once inside ``_design_dir``
-                # to build ``zmx_dir``, and again here for the disclosure.
-                # ``_resolve_root`` is a pure read, but it is not a read of a STABLE
-                # value. Two divergences were demonstrated against the real handler,
-                # both on a SUCCESSFUL promote (``ok:true``):
-                #   (A) tier 4 (no workspace_root, no projects_root, no sink) resolves
-                #       through ``os.getcwd()``. A ``chdir`` between the two calls made
-                #       the envelope report ``<away>/projects`` while the keeper was
-                #       published under ``<home>/projects/d``.
-                #   (B) a session whose root attribute answers differently on
-                #       successive reads published under root A and reported root B.
-                # BOTH ARE LATENT behind the shipped entrypoint, which pins
-                # ``workspace_root`` ONCE to a plain string at launch
-                # (``__main__.py``: ``os.environ.get("OPTIVIBE_WORKSPACE_ROOT") or
-                # os.getcwd()``), so no shipped caller reaches either today. That is why
-                # this is a ticket and not a fix -- unlike ``save_candidate``'s cached
-                # sink, which an audit reached and which IS fixed.
-                "workspace_root": _resolve_root(session)[0],
+                # The one-read root (see ``root`` above). The ``optimize`` pair is the
+                # open remainder of the ticket (PARTIAL).
+                "workspace_root": root,
                 **_pre_fork_identity_keys(),
             }
         best_zmx = os.path.join(design_dir, _naming.best_zmx_name(design_name))
@@ -5074,7 +5205,7 @@ def promote_best(session, params):
                 "best_zmx": None,
                 "best_png": None,
                 "png_promoted": False,
-                "workspace_root": _resolve_root(session)[0],
+                "workspace_root": root,
                 **_pre_fork_identity_keys(),
             }
         if _collision is not None:
@@ -5095,7 +5226,7 @@ def promote_best(session, params):
                 "best_zmx": None,
                 "best_png": None,
                 "png_promoted": False,
-                "workspace_root": _resolve_root(session)[0],
+                "workspace_root": root,
                 **_pre_fork_identity_keys(),
             }
 
@@ -5609,6 +5740,7 @@ def promote_best(session, params):
 
         # Atomic .zmx promote (the load-bearing artifact).
         _atomic_copy(src_zmx, best_zmx)
+        keeper_replaced = True  # the keeper on disk is now the candidate's bytes
 
         # The digest of the PUBLISHED file — DISCLOSURE ONLY. It is taken AFTER
         # the copy so the key is truthful about the destination, and NOTHING branches on
@@ -5696,6 +5828,11 @@ def promote_best(session, params):
         manifest_path = os.path.join(zmx_dir, "manifest.jsonl")
         note = None
         try:
+            # The PUBLISHED picture's digest,
+            # read from BEST_<design>.png AFTER the copy (the artifact_sha256 rule). The row
+            # carries the digest OR the reason there is none -- never neither: no picture
+            # (best_png_reason, the ladder's token) or a published file that would not read.
+            _row_png_sha = _sha256_file(best_png) if png_promoted else None
             row = {
                 "event": "promote",
                 "seq": seq,
@@ -5705,6 +5842,12 @@ def promote_best(session, params):
                 # The EVIDENCE a future "was this BEST_ mis-promoted?" consumer
                 # needs. Evidence cannot be retro-fitted; a consumer can.
                 "artifact_sha256": artifact_sha256,
+                "png_sha256": _row_png_sha,
+                "png_identity": png_identity,
+                "png_digest_reason": (
+                    None if _row_png_sha is not None
+                    else (best_png_reason if not png_promoted
+                          else "published_digest_unreadable")),
                 "clearance_source": clearance_source,
             }
             _io.append_line_fsync(
@@ -5752,8 +5895,10 @@ def promote_best(session, params):
             "ok": True,
             "design_name": design_name,
             "seq": seq,
-            "best_zmx": best_zmx,
-            "best_png": best_png,
+            # Same join, same
+            # root-string spelling, normalised at emission only -- see save_candidate.
+            "best_zmx": os.path.normpath(best_zmx) if isinstance(best_zmx, str) else best_zmx,
+            "best_png": os.path.normpath(best_png) if isinstance(best_png, str) else best_png,
             "png_promoted": png_promoted,
             # Round 4 (additive, disclosure-only): WHOSE candidate was published and on
             # WHAT evidence. ``candidate_owner: null`` reads "this artifact's provenance
@@ -5776,35 +5921,11 @@ def promote_best(session, params):
             # per-design ``<design>_<NNN>_<label>.zmx``, "legacy" for a
             # workspace-global ``<NNNN>_<label>.zmx``. Disclosure only.
             "name_scheme": cand_name_scheme,
-            # MEASURED, and it CAN diverge -- this is a SIXTH instance
-            # of the two-independent-resolutions class, left in place DELIBERATELY
-            # because it is outside this cycle's charter (see the report; a ticket
-            # is owed and no ``TICKET-`` token is written here until it exists).
-            #
-            # ``promote_best`` resolves the root TWICE: once inside ``_design_dir``
-            # to build ``zmx_dir``, and again here for the disclosure.
-            # ``_resolve_root`` is a pure read, but it is not a read of a STABLE
-            # value. Two divergences were demonstrated against the real handler,
-            # both on a SUCCESSFUL promote (``ok:true``):
-            #   (A) tier 4 (no workspace_root, no projects_root, no sink) resolves
-            #       through ``os.getcwd()``. A ``chdir`` between the two calls made
-            #       the envelope report ``<away>/projects`` while the keeper was
-            #       published under ``<home>/projects/d``.
-            #   (B) a session whose root attribute answers differently on
-            #       successive reads published under root A and reported root B.
-            # BOTH ARE LATENT behind the shipped entrypoint, which pins
-            # ``workspace_root`` ONCE to a plain string at launch
-            # (``__main__.py``: ``os.environ.get("OPTIVIBE_WORKSPACE_ROOT") or
-            # os.getcwd()``), so no shipped caller reaches either today. That is why
-            # this is a ticket and not a fix -- unlike ``save_candidate``'s cached
-            # sink, which an audit reached and which IS fixed.
-            #
-            # >> AND THIS IS THE OTHER HALF OF THE DIVERGENCE A5 NAMED: the sibling key
-            # >> on ``save_candidate`` is derived from the SINK
-            # >> (``dirname(dirname(sink.run_dir))``) rather than from a second
-            # >> resolution. The two can disagree, the sink-read is the truthful one,
-            # >> and closing this side is the filed ticket's work rather than a comment's.
-            "workspace_root": _resolve_root(session)[0],
+            # The one-read root this keeper was published under -- the same value
+            # every exit carrying ``workspace_root`` reports, and the root
+            # ``save_candidate`` reports for the candidate. ``optimize``'s pair is
+            # the open remainder (ticket PARTIAL).
+            "workspace_root": root,
             # Where the promoted PICTURE came from. The domain is now
             # "candidate_pair" | null — "live_session_render" is UNREACHABLE.
             "best_png_source": png_source,
@@ -5872,6 +5993,11 @@ def promote_best(session, params):
             "design_name": design_name,
             "seq": seq,
             "best_zmx": None,
+            # True means
+            # BEST_<design>.zmx was ALREADY replaced before the fault, so the keeper on disk IS
+            # the promoted candidate even though this call reports failure. best_zmx stays null:
+            # a consumer branching on it must never read a failed call as a success.
+            "keeper_replaced": keeper_replaced,
             "best_png": None,
             "png_promoted": False,
             # keep ``clearance_source`` present on EVERY promote exit path (success,
@@ -5955,7 +6081,16 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "the record — that picture is scratch and its digest is refused there "
         "(finding_figure_unbound). When a figure was rendered the envelope also carries "
         "that render's own facts about THESE bytes — surface_labels, n_surfaces, "
-        "stop_label, figure_disclosures, flags, config_evaluated, element_outline — "
+        "stop_label, figure_disclosures, disclosures_truncated (how many disclosure boxes the canvas could not fit: "
+        "figure_disclosures lists only the boxes DRAWN, so a non-zero count means that list is short, never that the "
+        "figure is clean), flags, config_evaluated, element_outline, "
+        "ray_coverage (per field, how many SAMPLED rays reach the image: a trace whose "
+        "basis names the sample, not a reading of the drawn ink; status unavailable "
+        "means unknown, not zero failures), registration and stamps_withheld (native "
+        "cross-section only: how the stamps were registered to the exporter's ink, its "
+        "ambiguous_surfaces being the k? stamps, and why no surface number was drawn), "
+        "renderer, renderer_fallback, "
+        "far_object_excluded — "
         "read inside the "
         "same render invocation that wrote them, so a reviewer's finding can be scored "
         "against the picture it was actually made about without pairing this PNG with a "
@@ -5963,8 +6098,9 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "produced; do not call render_layout to obtain them, because a second render is "
         "a different picture. "
         "Declare the checkpoint this one was derived from with parent_design_name AND "
-        "parent_seq TOGETHER (a seq alone names a WORKSPACE candidate, not this "
-        "design's, so a lone seq is refused): lineage is a DECLARED field, never "
+        "parent_seq TOGETHER (seq is the PER-DESIGN index save_candidate returned, so "
+        "it names a checkpoint only together with its design name, and a lone seq is "
+        "refused): lineage is a DECLARED field, never "
         "inferred from session state, and is recorded beside the bytes. Supplying "
         "neither is recorded as 'undeclared' — an honest no-claim, not a gap. The "
         "lineage key echoes 'declared' or 'rejected:<reason>' and is ABSENT when you "
@@ -6010,6 +6146,9 @@ PROMOTE_BEST_SPEC = ToolSpec(
     description=(
         "Atomically promote a caller-asserted candidate seq to the workspace root "
         "BEST_<design>.{zmx,png} (copy, not move; trail intact); NEVER raises. "
+        "A promote_failed envelope carries keeper_replaced:true when BEST_<design>.zmx had already been replaced "
+        "before the fault (best_zmx stays null; the keeper on disk is the candidate's bytes, and a "
+        "BEST_<design>.png beside it may still be the PREVIOUS keeper's picture: the net does not remove it). "
         "seq is the PER-DESIGN index save_candidate returned, not a workspace-global "
         "counter; name_scheme echoes whether the resolved file is a per-design ('v2') "
         "or a historical workspace-global ('legacy') name. When a number cannot be "

@@ -438,8 +438,9 @@ LIST_CATALOGS_SPEC = ToolSpec(
     description=(
         "List the material catalogs: in_use vs not_in_use (plus all = their union). "
         "not_in_use is the set you can load_catalog to make their glasses "
-        "authorable. Pair with load_catalog after find_glasses/lookup_glass "
-        "suggests a material whose catalog isn't loaded."
+        "authorable. Pair with load_catalog when a suggested material's catalog isn't "
+        "loaded. By name, lookup_glass suggests a material. By property, find_glasses "
+        "suggests one."
     ),
 )
 

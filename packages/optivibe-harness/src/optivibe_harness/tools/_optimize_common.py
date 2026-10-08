@@ -78,8 +78,15 @@ def _merit_is_uncomputable(merit):
     The 9e9 sentinel (Zemax's "could-not-compute" merit) and ~1e10 undefined-first-order
     operands land here; a buildable design's RMS merit never does (probe). DISJOINT from
     ``no_merit``: a NON-number / NON-finite / <=0 merit is NOT "uncomputable" here — the
-    existing ``no_merit`` gate owns those (it runs FIRST). Guarded so a non-number degrades
-    to ``False`` (never raises out of the NON-MUTATING preflight count).
+    existing ``no_merit`` gate owns those (it runs FIRST). Guarded so a NON-NUMBER degrades
+    to ``False`` (never raises an ``Exception`` for a non-number, a ``float`` or an ``int``
+    within float range). An ``int`` BEYOND float range (``10**400``) RAISES
+    ``OverflowError`` from ``math.isfinite`` -- measured; the engine's merit read is a
+    ``float``, and ``_preflight``'s own ``math.isfinite`` meets such an ``int`` first.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     The ``1e9`` ceiling cannot false-refuse a real design: ``CalculateMeritFunction()``
     returns a WEIGHT-NORMALIZED RMS — ``sqrt(Σwᵢ(vᵢ−tᵢ)² / Σwᵢ)`` — NOT an unnormalized
@@ -151,6 +158,10 @@ def _base_token(value):
       is an exact** ``str``, so no subclass comparison, hash or method can ride onward into a
       caller — and callers that promise "never raises" must therefore keep their
       ``_base_token`` calls INSIDE their guard (F-4 was one that did not).
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     **``_base_token(None)`` RETURNS THE STRING ``"None"``, DELIBERATELY.** Round 12 raised
     it as a possible ABSENT/present collapse at the ``_base_token(g.get("kind"))`` sites,
@@ -485,11 +496,15 @@ def _min_positive_target(mfe, token, *, last_surface, surface=None):
     (wave + weight + coherence). It remains available for the glass floors and for the
     box reader's row iteration.
 
-    NEVER raises. Per-row guarded (a flaky row is skipped, never counted); a total
+    NEVER raises an ``Exception``. Per-row guarded (a flaky row is skipped, never counted); a total
     scan failure (``NumberOfOperands`` throws) -> ``(None, FLOOR_UNESTABLISHED)`` -- a
     scan that could not run established nothing, and must not license a default. An inert
     ``Target 0`` floor does NOT count and is ABSENT, not UNESTABLISHED: it
     is a decision the author made on purpose.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     **THE WEIGHT CELL FOLLOWS THE SAME RULE, and did not until round 4.** A
     ``weight <= 0`` row is the DELIBERATE opt-out -> ABSENT, exactly like ``Target 0``; a
@@ -787,7 +802,11 @@ def _cell_is_double(cell):
     Double cell's Variable solve as a real continuous DOF; the engine SILENTLY accepts
     ``MakeSolveVariable()`` on an Integer cell (the Q5 phantom-DOF trap) but the optimizer
     does NOT count it. GUARDED: a ``.DataType`` read throw degrades to ``False`` (skip the
-    cell, never raise — this runs inside the NON-MUTATING preflight count).
+    cell, never raise an ``Exception`` — this runs inside the NON-MUTATING preflight count).
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
     """
     try:
         # R-B' (round 5, sweep-found — NOT on the audit's list). MEASURED: an ``Integer``
@@ -865,8 +884,12 @@ def _enumerate_asphere_variables(system, surf, variable_member, faults=None):
     gate for gated types (covers Even/Odd Par1..8 AND heavy-asphere gated
     Par15+), NEVER a 254-column brute scan. Returns a list of ``source=="asphere"`` items
     (shape: ``surface`` / ``term`` / ``par`` / ``value`` / ``solve``); possibly
-    empty; NEVER raises (every per-cell read guarded exactly as the counter is — a wedged
-    cell / Type-read throw contributes nothing).
+    empty; NEVER raises an ``Exception`` (every per-cell read guarded exactly as the counter is
+    — a wedged cell / Type-read throw contributes nothing).
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     ``faults`` (optional): when a list is passed, a per-surface DISCOVERY fault (the asphere
     ``asphere_type_of`` / gate read deterministically throwing -> the surface's asphere
@@ -942,7 +965,12 @@ def _safe_surface_index(surf):
     The LDE/asphere walks know the index from the loop; this is the fallback for the
     asphere emit-twin when called directly with a row (the count helper passes the row, not
     the index). A live ``ILDERow`` exposes ``SurfaceNumber``; a fake row exposes ``_index``.
-    Guarded — a missing accessor -> ``None`` (the diagnostic is best-effort, never raises).
+    Guarded — a missing accessor -> ``None`` (the diagnostic is best-effort,
+    never raises an ``Exception``).
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
     """
     for attr in ("SurfaceNumber", "_index", "RowIndex"):
         try:
@@ -962,7 +990,11 @@ def _count_asphere_variables(system, surf, variable_member):
     The count is now the LENGTH of the emit-twin ``_enumerate_asphere_variables`` (the
     counter and the inventory share ONE walk so the count and the inventory can NEVER
     diverge). The public contract + signature are UNCHANGED (it is imported by other tiers,
-    so it stays a named helper). Returns an int; NEVER raises.
+    so it stays a named helper). Returns an int; NEVER raises an ``Exception``.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
     """
     return len(_enumerate_asphere_variables(system, surf, variable_member))
 
@@ -1105,7 +1137,16 @@ def _safe_type_name(op):
 
 
 def _enumerate_mce_variables(system, variable_member, faults=None):
-    """Emit the inventory ITEMS for per-config MCE Variable cells (fail-safe). NEVER raises.
+    """Emit the inventory ITEMS for per-config MCE Variable cells (fail-safe).
+    NEVER raises an ``Exception`` once ``system.MCE`` has been read: every read after it is
+    guarded. The ``getattr(system, "MCE", None)`` read ITSELF is not -- ``getattr``'s
+    default absorbs ``AttributeError`` only, so a ``system`` whose ``MCE`` read raises any
+    other ``Exception`` PROPAGATES it (measured) to ``_variable_inventory`` and on to its
+    caller.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     The itemizing TWIN of ``_count_mce_variables`` (the count is now
     ``len(_enumerate_mce_variables(...))``). Walk ``system.MCE`` rows
@@ -1176,13 +1217,19 @@ def _enumerate_mce_variables(system, variable_member, faults=None):
 
 
 def _count_mce_variables(system, variable_member):
-    """Count Variable solves on per-config MCE cells (fail-safe). NEVER raises.
+    """Count Variable solves on per-config MCE cells (fail-safe). NEVER raises an ``Exception``
+    for a ``system`` whose ``MCE`` read succeeds (or is absent); a raising ``MCE`` read
+    PROPAGATES, exactly as in ``_enumerate_mce_variables`` (measured).
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     The count is now the LENGTH of the emit-twin ``_enumerate_mce_variables`` (the
     counter and the inventory share ONE walk). The public contract + signature are
     UNCHANGED (it is imported by other tiers). Only a Double cell's Variable solve is
     counted (the Q5 phantom-DOF filter); an Integer/String per-config cell set Variable is
-    NOT counted. Returns an int; NEVER raises.
+    NOT counted. Returns an int; NEVER raises an ``Exception`` past that one ``MCE`` read.
     """
     return len(_enumerate_mce_variables(system, variable_member))
 
@@ -1201,9 +1248,19 @@ def _scan_per_config_thin(system):
     ONLY a ``DataType == "Double"`` cell is read (an Integer/String per-config cell is not a
     thickness value — ``_cell_is_double``, the merit/MCE discriminator). ``surface`` is read
     from ``op.Param1`` (THIC ``takes_surface``), guarded -> ``None`` if unreadable. EVERY read
-    is GUARDED (a wedged MCE / row / cell contributes nothing) and a missing ``system.MCE``
-    (a non-MCE / single-config backend) -> ``[]`` — this runs inside the NON-MUTATING preflight
-    and must NEVER raise. Returns the offender list (possibly empty); the empty list means the
+    AFTER ``system.MCE`` is GUARDED (a wedged MCE / row / cell contributes nothing) and a
+    missing ``system.MCE`` (a non-MCE / single-config backend) -> ``[]`` — this runs inside
+    the NON-MUTATING preflight and must NEVER raise an ``Exception`` for a readable system.
+    The ``getattr(system, "MCE", None)`` read ITSELF is not guarded: ``getattr``'s default
+    absorbs ``AttributeError`` only, so an ``MCE`` read that raises any other ``Exception``
+    PROPAGATES (measured) -- and neither caller (``optimize_run.dry_run`` /
+    ``optimize``) wraps the call.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
+
+    Returns the offender list (possibly empty); the empty list means the
     gate does not fire (byte-identical to today for a single-config / non-zoom system).
     """
     mce = getattr(system, "MCE", None)
@@ -1213,7 +1270,8 @@ def _scan_per_config_thin(system):
     # by design (the fold leg), so a per-config THIC <= 0 is NOT unbuildable there — the
     # THIC<=0 audit is UNFOLDED-ONLY, exactly like check_clearance's per-gap thickness audit
     # (which reports folded gaps as informational, never a violation). Skip the scan on a
-    # folded system rather than hard-refuse a valid folded multi-config design. NEVER raises.
+    # folded system rather than hard-refuse a valid folded multi-config design. The fold read
+    # never raises an ``Exception`` out of here (the ``try`` below absorbs it).
     try:
         from . import _layout_geometry as _geom
         if _geom.system_is_folded(system):
@@ -1290,6 +1348,11 @@ _NUDGE_EPS = 0.001   # probe T1: lifts a collapsed THIC > 0 so the re-scan passe
 
 def _nudge_per_config_thin(system, offenders):
     """Mutate-and-continue nudge of collapsed per-config THIC cells (§2.2). NEVER raises.
+    NEVER raises an ``Exception``.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     ``offenders`` is the ``_scan_per_config_thin`` list ``[{row, surface, config, value}]``.
     Returns ``(nudged, un_nudgeable)``:
@@ -1489,7 +1552,12 @@ def _surface_is_inert(lde, surface):
 
 
 def _scan_inert_dofs(system):
-    """Scan for inert (air<->air) radius/conic Variable DOFs (S1 §4.1). NEVER raises.
+    """Scan for inert (air<->air) radius/conic Variable DOFs.
+    NEVER raises an ``Exception``.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     The new ``optimize_inert_dof`` preflight predicate (ONE shared locus consumed by
     BOTH ``dry_run`` and ``optimize``). Walks ``_variable_inventory`` and keeps an offender
@@ -1501,8 +1569,9 @@ def _scan_inert_dofs(system):
     The air<->air radius/conic Variable is a genuine zero-merit-sensitivity DOF (a flat
     zero-power surface contributes nothing to the merit), so the optimizer drifts it to
     garbage — the curved-stop silent-wrong (a dummy-stop radius made Variable). EVERY read is
-    GUARDED (this runs inside the NON-MUTATING preflight and must NEVER raise); an unreadable
-    LDE / inventory / surface contributes nothing (fail-closed — never refuse on a hiccup).
+    GUARDED (this runs inside the NON-MUTATING preflight and must
+    NEVER raise an ``Exception``); an unreadable LDE / inventory / surface contributes
+    nothing (fail-closed — never refuse on a hiccup).
     Returns the offender list (possibly empty); an empty list means the gate does not fire.
     """
     try:
@@ -1682,8 +1751,8 @@ def _safe_exception_text(exc, cap=_SCAN_FAULT_DETAIL_CAP):
     **AN ABORT RAISED BY THE EXCEPTION'S OWN ``__repr__`` TRAVELS -- DELIBERATELY, AND
     THIS IS A BEHAVIOUR CHANGE.** The catches below are ``Exception``, not
     ``BaseException``, so a ``__repr__`` that raises ``KeyboardInterrupt`` /
-    ``SystemExit`` / ``GeneratorExit`` escapes a function whose contract is *never
-    raises*. Before that input could not escape, because the outer ``except``
+    ``SystemExit`` / ``GeneratorExit`` escapes a function whose contract is *"never
+    raises"*. Before that input could not escape, because the outer ``except``
     returned the clean signal WITHOUT ever calling ``repr`` on the caught exception -- so
     this path exists only because a fault is now rendered. It was found by fuzzing rather
     than by reading, and it is KEPT rather than widened for two measured reasons:
@@ -1778,12 +1847,16 @@ def _scan_rayfree_merit(system):
     conic) variables -> geometry-collapse risk.
 
     **NEVER raises — and since a TOTAL fault is DISCLOSED rather than returned
-    as the clean signal.** It used to ``return None`` on any throw, which is byte-identical
-    to *"scanned, nothing to warn about"*: the twin defect ``_scan_malformed_ranges``
-    carried, and the reason that ticket is scoped to BOTH scanners. It now returns the
-    SHARED scan-fault sentence (``_scan_fault_disclosure``), which every call site already
-    merges into its non-blocking ``warning`` channel — so the disclosure reaches a reader
-    with NO call-site change, and ``ok``/``verdict`` stay untouched.
+    than returned as the clean signal.** It used to ``return None`` on any throw, which is
+    byte-identical to *"scanned, nothing to warn about"*: the twin defect
+    ``_scan_malformed_ranges`` carried, and the reason that ticket is scoped to BOTH scanners.
+    It now returns the SHARED scan-fault sentence (``_scan_fault_disclosure``), which every
+    call site already merges into its non-blocking ``warning`` channel — so the disclosure
+    reaches a reader with NO call-site change, and ``ok``/``verdict`` stay untouched.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     **THE ASYMMETRY WITH THE TWIN IS STATED BECAUSE IT IS NOT A GAP IN THE FIX.**
     ``_scan_malformed_ranges`` returns ``(sentence, record)`` and so discloses a fault in
@@ -2296,9 +2369,13 @@ def _resolve_last_surface(system):
     docstring. The consumer-policy table now lives in ``_min_positive_target``; read it
     there rather than re-deriving a direction here.
 
-    NEVER raises. Rejects a throw, a bool, a non-numeric, a non-finite, a non-integral
-    and a non-positive count -- every one of which would otherwise yield a plausible
+    NEVER raises an ``Exception``. Rejects a throw, a bool, a non-numeric, a non-finite, a
+    non-integral and a non-positive count -- every one of which would otherwise yield a plausible
     wrong domain rather than an honest refusal to classify.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     **EXTERNAL REVIEW — "NEVER raises" IS NOW TRUE BY CONSTRUCTION, NOT BY
     INSPECTION.** The domain-coercion ``except`` below caught ``(OverflowError,
@@ -2352,9 +2429,16 @@ def _resolve_last_surface(system):
 def _range_cell_int(entry):
     """The integral surface index in one ``read_param_map`` entry, or ``None``.
 
-    ``None`` covers every not-an-integer case: a missing/non-dict entry, a bool (``True``
-    is not surface 1), a non-numeric wire sentinel (``"nan"`` / ``"inf"`` / ``"-inf"``),
-    a non-finite, and a NON-INTEGRAL float.
+    ``None`` covers every not-an-integer case: a missing/non-dict entry, a bool handed to
+    this entry DIRECTLY (``resolve_integral`` refuses one), a non-numeric wire sentinel
+    (``"nan"`` / ``"inf"`` / ``"-inf"``), a non-finite, and a NON-INTEGRAL float.
+
+    A bool read from an ENGINE CELL is the exception: ``read_param_map`` ->
+    ``_merit_cells.read_cell`` coerces ``int(cell.IntegerValue)`` upstream, so a cell
+    serving ``True`` arrives here as ``1`` and resolves as surface 1. NARROWED:
+    an ``Int32`` cell cannot
+    hold a bool, and the writer's ``int`` arm (``coerce_param_value``) refuses a
+    caller-supplied one, so that coerced path has no producer.
 
     **An ``int`` resolves EXACTLY, at any magnitude, and that is a CORRECTNESS fix, not
     an optimisation.** This used to route every value --
@@ -2478,7 +2562,11 @@ def _read_range_pair(op):
     author would already be broken.
 
     Returns ``RANGE_WELL_FORMED`` in the state slot to mean "both cells read as integers"
-    -- the caller applies the domain conjunct. NEVER raises.
+    -- the caller applies the domain conjunct. NEVER raises an ``Exception``.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
     """
     try:
         from . import _merit_cells as _mc
@@ -2592,10 +2680,15 @@ def resolve_range_state(op, last_surface):
     range-shaped row only**: a row with no range is ``NOT_APPLICABLE`` whether or
     not the domain reads, and saying otherwise drains the disclosure channel.
 
-    NEVER RAISES. ``read_param_map`` raises ``SurfaceWriteError`` on a cell throw (the
+    NEVER RAISES an ``Exception``. ``read_param_map`` raises ``SurfaceWriteError`` on a cell
+    throw (the
     ``_merit_cells`` firewall); that is caught here and routed to UNCLASSIFIED.
     Letting it escape would convert an ADVISORY into a REFUSAL at an optimize/dry_run
     preflight -- the worst failure this layer can have.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     The four-revision history, kept because it is this change's lesson: ``surf1 >= 1``
     (missed ``4 -> 2``; FALSE-POSITIVE on ``0 -> 3``) -> ``surf2 >= 1`` (admitted
@@ -2799,7 +2892,11 @@ def classify_range_pair(surf1, surf2, last_surface):
     authoring door via ``check_authoring_range`` (which applies its own ``N-2``
     ceiling ON TOP, from ``last_constrainable_surface``). Neither re-implements it.
 
-    No engine touch, no cell read, NEVER raises.
+    No engine touch, no cell read, NEVER raises an ``Exception``.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     **CONJUNCT ORDER -- the domain-FREE test runs FIRST, and that is a behaviour
     change, not a refactor.** The shipped predicate evaluated
@@ -2925,6 +3022,10 @@ def range_headers_supplied(supplied):
     is the RAW caller object (``optimize_merit.py:2466``, no copy), so the input class
     is caller-reachable.
 
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
+
     **The fix is STRUCTURAL, not a widened ``try``**: the membership test below is
     ``dict.__contains__(supplied, h)`` -- an unbound slot call that cannot dispatch to
     subclass code -- which is the ``str.__str__(repr(v))`` criterion applied to a
@@ -2991,7 +3092,12 @@ _RANGE_DOOR_UNSTABLE_VALUE = (
 
 
 def writer_would_refuse(header, kind, value):
-    """Would ``coerce_param_value`` REFUSE this value into this cell? Never raises.
+    """Would ``coerce_param_value`` REFUSE this value into this cell?
+    Never raises an ``Exception``.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     **PRECONDITION, stated because the claim below was measured to overstate
     itself, and NARROWED here because a later fix shrank it: the answer is a
@@ -3163,7 +3269,11 @@ def check_authoring_range(param_map, supplied, last_surface, *, operand_token):
                      is derived INSIDE via ``last_constrainable_surface`` -- one site.
 
     -> ``{"code", "refuse", "reason", "surf1", "surf2", "ceiling", "clamp_expected",
-          "effective", "flags"}``. NEVER raises; reads no engine; writes nothing.
+          "effective", "flags"}``. NEVER raises an ``Exception``; reads no engine; writes nothing.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     **``supplied`` is the CALLER'S dict and never the live cells, and that is
     load-bearing.** At the ``add_operand`` guard point the freshly-typed row's cells
@@ -3517,12 +3627,16 @@ def _scan_malformed_ranges(system, last_surface=_UNSET_LAST_SURFACE):
 
     NEVER raises. **A total-scan throw is now DISCLOSED, not returned as the clean
     signal.** It used to return ``(None, None)`` -- which IS the
-    clean signal -- so a scan that could not run was byte-identical to one that ran and
+    IS the clean signal -- so a scan that could not run was byte-identical to one that ran and
     found nothing. It now returns ``(fault_sentence, fault_record)`` from
     ``_scan_fault_disclosure``; both consumers already pass the structured value through
     and merge the sentence, so the disclosure reaches the envelope with NO call-site
     change. This still GATES NOTHING: ``ok`` and ``verdict`` are never touched
     (analytic checks are flags, never verdicts).
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     The fault record is DISJOINT from the census record: it carries ``scan_completed:
     False`` and OMITS ``rows`` / ``by_operand`` / ``unclassified`` / ``n_operands``
@@ -4060,9 +4174,19 @@ def _enumerate_lde_variables(system, variable_member, faults=None):
     Walk the INTERIOR surfaces ``1..NumberOfSurfaces-2`` (OBJECT s0 + IMAGE sN-1 EXCLUDED —
     matches ``_count_variables`` + ``set_variable``'s geometry firewall) and emit one
     ``source=="lde"`` item per ``RadiusCell``/``ThicknessCell``/``ConicCell`` set Variable.
-    Surface-ascending; every read guarded (a missing surface / cell contributes nothing);
-    NEVER raises. An MCE-overridden LDE cell reads ``Fixed`` at the LDE level (probe note A)
-    so the LDE walk won't double-report it — only the MCE walk does (no special-casing).
+    Surface-ascending; every PER-SURFACE / per-cell read guarded (a missing surface / cell
+    contributes nothing); NEVER raises an ``Exception`` for a READABLE ``system.LDE``. The two
+    opening reads -- ``system.LDE`` and ``int(lde.NumberOfSurfaces)`` -- are NOT guarded: a
+    raising read there PROPAGATES (measured) to ``_variable_inventory`` and on to its caller
+    (the in-module callers ``_scan_inert_dofs``, ``_scan_rayfree_merit``,
+    ``_disclose_inherited_variables`` and ``_clear_all_variables_core`` absorb it). An
+    MCE-overridden LDE cell reads ``Fixed`` at the LDE level
+    (probe note A) so the LDE walk won't double-report it — only the MCE walk does (no
+    special-casing).
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     ``faults`` (optional): a per-surface ``GetSurfaceAt`` throw (the surface's LDE coverage
     silently dropped) is RECORDED when a list is passed; ``faults is None`` (the counters) ->
@@ -4095,7 +4219,12 @@ def _enumerate_lde_variables(system, variable_member, faults=None):
 
 
 def _enumerate_grin_variables(system, surf, variable_member, faults=None):
-    """Emit the inventory ITEMS for a surface's GRIN Par cells (fail-safe). NEVER raises.
+    """Emit the inventory ITEMS for a surface's GRIN Par cells (fail-safe).
+    NEVER raises an ``Exception``.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     The per-interior-surface GRIN arm of ``_variable_inventory`` (§4.1). Walks ALL 8
     Double GRIN Par cells of the RESOLVED type (``info.params`` — Gradient2 Par1..Par8
@@ -4220,7 +4349,12 @@ def _enumerate_grin_variables(system, surf, variable_member, faults=None):
 def _count_grin_variables(system, surf, variable_member):
     """Count Variable solves on a surface's GRIN Par cells (the filtered view; §4.1).
 
-    ``len(_enumerate_grin_variables(...))`` — never a summand anywhere. NEVER raises.
+    ``len(_enumerate_grin_variables(...))`` — never a summand anywhere.
+    NEVER raises an ``Exception``.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
     """
     return len(_enumerate_grin_variables(system, surf, variable_member))
 
@@ -4232,7 +4366,18 @@ def _variable_inventory(system, variable_member=None, faults=None):
     ``cell.GetSolveData().Type`` read across all three sources). Returns a ``list[dict]`` of
     inventory ITEMS (shape: ``source``-discriminated; IDENTIFIERS not .NET
     proxies; a value-read failure -> ``value:None``, the item NEVER dropped). Possibly
-    empty; NEVER raises (every per-cell read guarded exactly as the three counters are).
+    empty; NEVER raises an ``Exception`` for a READABLE system (every per-cell read guarded
+    exactly as the three counters are). NOT guarded, and so PROPAGATING to the caller
+    (measured): a raising read of ``system.LDE`` / ``NumberOfSurfaces`` (here and in
+    ``_enumerate_lde_variables``), a raising ``system.MCE`` read (``getattr``'s default
+    absorbs ``AttributeError`` only), and -- when ``variable_member`` is omitted --
+    ``_solve_type_variable_enum``'s ``ToolParamError``. The in-module callers
+    ``_scan_inert_dofs``, ``_scan_rayfree_merit``, ``_disclose_inherited_variables`` and
+    ``_clear_all_variables_core`` absorb it; every other caller owns its own guard.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     Order: LDE items (surface-ascending), then per-interior-surface asphere + GRIN items
     (surface-ascending), then the SYSTEM-GLOBAL MCE items. ``len(_variable_inventory(...))``
@@ -4344,14 +4489,18 @@ def _disclose_inherited_variables(system):
     (the L26 sibling of the ``cleared_all`` fix): thread a fresh ``faults``
     list so a DETERMINISTIC per-source discovery fault (asphere Type-read throws / MCE read
     throws) is SURFACED, not silently fail-safe-skipped. ``_variable_inventory`` swallows a
-    discovery fault (returns a partial list, never raises), so the bare-``try`` here would
-    NOT fire — it would ship a non-None UNDERCOUNT with NO warning while a real inherited
+    PER-SOURCE discovery fault (returns a partial list, never raises an ``Exception`` for
+    it), so the bare-``try`` here would NOT fire — it would ship a non-None UNDERCOUNT with NO
     Variable solve hides behind the fault (the same silent-wrong class closed for
-    ``clear_all_variables``, on the disclosure path). When the enumeration is INCOMPLETE
-    (``faults`` non-empty) we return ``([items], None)`` — the ``None`` makes the EXISTING
+    class closed for ``clear_all_variables``, on the disclosure path). When the
+    enumeration is INCOMPLETE (``faults`` non-empty) we return ``([items], None)`` — the
     warning<->None sync (load_design / lens_spec) stamp ``inherited_variables_warning``
-    instead of shipping a short count. The happy path (no fault) is byte-identical
-    (``(items, len(items))``, no warning).
+    ``inherited_variables_warning`` instead of shipping a short count. The happy path (no
+    fault) is byte-identical (``(items, len(items))``, no warning).
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
     """
     try:
         member = _solve_type_variable_enum(system)
@@ -4373,7 +4522,11 @@ def _refetch_inventory_cell(system, item):
     NOT a stored proxy (a proxy goes stale across a load): the cell is re-fetched from
     ``source`` + ``surface``/``par``/``row``/``config``. Returns the live cell, or ``None``
     if the re-fetch throws (the bulk clear treats a None as a per-cell failure, leaving the
-    residual for the read-back proof to catch). NEVER raises.
+    residual for the read-back proof to catch). NEVER raises an ``Exception``.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
     """
     try:
         source = item.get("source")
@@ -4441,8 +4594,13 @@ def _clear_all_variables_core(system):
        checkpoint). The ``MakeSolveFixed`` bool is NEVER the proof; the re-enumerate-to-0 is.
 
     ``n_before == 0`` is a valid success (nothing was Variable). Returns the success/refusal
-    envelope dict. NEVER raises past its boundary (L26 — a generic engine throw -> the
+    envelope dict. NEVER raises an ``Exception`` past its boundary (a generic engine
+    throw -> the
     ``variable_lifecycle`` family with the residual disclosed if readable).
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
     """
     try:
         member = _solve_type_variable_enum(system)
@@ -4584,10 +4742,15 @@ def _uncomputable_row_diagnostics(system, cap=_UNCOMPUTABLE_ROW_CAP):
     reuses ``_merit_cells.read_param_map``), suspect-ranks zero-value corner rays, and
     returns a single structured diagnostic dict.
 
-    NEVER raises -> returns ``{}`` on ANY fault (missing/wedged MFE, a ``NumberOfOperands``
-    throw, a total-scan fault, an empty MFE). A single per-row read fault degrades THAT row
-    (``param_read_error``) without aborting the scan. Contract mirrors ``_edge_audit_warnings``
-    (optimize_run.py — the whole body wrapped in one outer try/except -> ``{}``).
+    NEVER raises an ``Exception`` -> returns ``{}`` on ANY fault (missing/wedged MFE, a
+    ``NumberOfOperands`` throw, a total-scan fault, an empty MFE). A single per-row read fault
+    degrades THAT row (``param_read_error``) without aborting the scan. Contract mirrors
+    ``_edge_audit_warnings`` (optimize_run.py — the whole body wrapped in one outer try/except
+    -> ``{}``).
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
 
     Suspect predicate (§2.5): ``is_ray AND value == 0.0 AND (weight finite AND > 0)``. The
     extremity test is the RANKING key only, NOT the predicate. Ranking (§2.5): suspects sorted
@@ -4787,7 +4950,12 @@ def _read_operand_number(op, attr):
     ``wire`` is the JSON-safe value (``safe_float``: a non-finite float becomes an "inf"/"nan"
     string) for the envelope; ``num`` is the raw finite python float (or ``None`` when the read
     throws / is non-numeric / non-finite) for the suspect predicate's exact-``0.0`` /
-    ``weight > 0`` comparisons (which must NEVER compare against a string sentinel). NEVER raises.
+    ``weight > 0`` comparisons (which must NEVER compare against a string sentinel).
+    NEVER raises an ``Exception``.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
     """
     try:
         raw = getattr(op, attr)
@@ -5191,9 +5359,13 @@ def _stamp_prior_solve_unchecked(result, cell_family):
     overwritten, so disclosing "the prior solve was not checked" there would be noise
     attached to an operation that changed nothing.
 
-    NEVER RAISES and never fabricates a shape: a non-dict or non-``ok`` result is returned
-    untouched, because a disclosure helper must not be able to convert a tool's answer
+    NEVER RAISES an ``Exception`` and never fabricates a shape: a non-dict or non-``ok`` result
+    is returned untouched, because a disclosure helper must not be able to convert a tool's answer
     into something else.
+
+    A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
+    an abort is not a degraded reading
+   .
     """
     if not isinstance(result, dict) or result.get("ok") is not True:
         return result

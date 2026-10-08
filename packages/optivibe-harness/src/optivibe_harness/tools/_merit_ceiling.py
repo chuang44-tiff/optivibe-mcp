@@ -167,10 +167,20 @@ def ceiling_budget_s():
     budget entirely (``perf_counter() >= nan`` is False -> unbounded). Any of those
     falls back to the default.
 
-    HEADROOM, stated as the single measurement it is: 227 ms bought 211 operands, so
-    2.0 s covers roughly 1800 -- an order of magnitude above the largest merit measured,
-    on one merit and one machine. The default is a backstop, not a characterised
-    distribution (spec section 8.3).
+    HEADROOM, as MEASURED (two runs, ``BEST_zoom3x_mech.zmx``, 14 surfaces, 328
+    operands, six consecutive reads each): the first with a FOREIGN engine open -- 3.30
+    ms/operand (1.08 s, spread 1.04x; whether those reads were warm is not recorded);
+    the second on a CLEAN seat -- 2.572 ms/operand (median; 0.844 s, spread 1.081x), six
+    WARM reads that followed a first (cold) read whose time was not recorded. A LINEAR
+    ESTIMATE from the second run's warm reads puts the 2.0 s
+    budget at roughly 777 operands -- an extrapolation from one 328-operand design, not a
+    tested size; the largest tracked merit is 328. The cost is mostly real work (four cell
+    reads per boundary row plus the verify pass): contention was UP TO ~22% of the
+    first run's 3.30 figure (an upper bound -- the two runs may also differ warm vs cold).
+    2.0 s is KEPT as a backstop; a merit that exhausts it gets no ceiling,
+    fail-closed and disclosed; raise ``OPTIVIBE_MERIT_CEILING_BUDGET_S`` for a larger
+    merit. The default is a backstop, not a characterised distribution -- one design, one
+    machine (spec section 8.3).
     """
     raw = os.environ.get(_BUDGET_ENV)
     if raw is None:

@@ -245,12 +245,11 @@ LOOKUP_GLASS_SPEC = ToolSpec(
         "that collides across catalogs returns an ambiguous_glass candidate list "
         "(qualify it), an out-of-band wavelength is refused rather than "
         "extrapolated, and an in-band wavelength with no computable index returns "
-        "a typed index_unavailable envelope - never a silent value. See "
-        "find_glasses and find_glass_pair to select glasses by property. "
-        "WHICH DOOR: glass by NAME comes here. Glass by property or by intent ('a crown "
-        "for this achromat') goes to find_glasses or find_glass_pair -- a different door "
-        "than lookup_glass, and asking here for an intent gets you nothing. This lookup "
-        "takes no engine seat."
+        "a typed index_unavailable envelope - never a silent value. "
+        "WHICH DOOR: glass by NAME comes here, and asking here for an intent gets you "
+        "nothing. Glass by property goes to find_glasses. A matched pair for an intent "
+        "('a crown for this achromat') goes to find_glass_pair. This lookup takes no "
+        "engine seat."
     ),
     kind="glass",
     param_types={

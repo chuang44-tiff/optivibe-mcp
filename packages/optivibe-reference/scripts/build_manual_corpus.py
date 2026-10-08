@@ -33,9 +33,6 @@ from optivibe_reference import manual_build, manual_enrich  # noqa: E402
 _CAPTURES = os.path.join(_PKG_ROOT, "scripts", "captures")
 _RAW_EXTRACT_PATH = os.path.join(_CAPTURES, "operand_raw_descriptions.json")
 _TOL_RAW_EXTRACT_PATH = os.path.join(_CAPTURES, "tolerance_raw_descriptions.json")
-# F7: the tolerance operand INVENTORY (the authoritative 62-code set) — passed to the
-# tolerance pairer so a phantom/swallowed heading token is dropped at source.
-_TOL_INVENTORY_PATH = os.path.join(_CAPTURES, "tolerance_inventory_62.json")
 
 
 def _find_manual_pdf():
@@ -104,8 +101,7 @@ def _emit_raw(pdf_path):
     # F7: pass the tolerance INVENTORY code set so a phantom heading token
     # (``IMPORTANT NOTE``) or a swallowed title word is dropped at source, never
     # admitted as a bogus code into the raw oracle.
-    tol_inv = json.load(open(_TOL_INVENTORY_PATH, encoding="utf-8"))
-    tol_valid_codes = {m["code"] for m in tol_inv["members"]}
+    tol_valid_codes = set(manual_enrich.load_tolerance_operand_inventory())
     tol_pages = manual_enrich.iter_tolerance_operand_pages(pdf_path)
     tol_entries, tol_order = manual_enrich.pair_tolerance_operands(
         tol_pages, valid_codes=tol_valid_codes

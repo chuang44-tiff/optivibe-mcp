@@ -33,7 +33,7 @@ fixture-seeded fakes reproducing the probe shapes.
 from contextlib import contextmanager
 
 from .._io import safe_float
-from ..errors import AnalysisResultError
+from ..errors import AnalysisResultError, SessionClosedError, map_dotnet_exception
 
 # Lens-unit enum member name -> the unit string the analysis tools report. The baseline
 # Cooke reads in millimetres (mm) for linear quantities; the spot radius is
@@ -216,16 +216,25 @@ def _units_member(system):
 
 
 def _lens_units_string(system):
-    """Derive the LINEAR (X/Y/Z/opd, frequency-base) unit string from the lens unit.
+    """Derive the LINEAR (X/Y/Z/opd) unit string from the lens unit (never an MTF frequency unit:
+    the FFT MTF abscissa is cycles/mm whatever the lens unit).
 
     Reads ``SystemData.Units.LensUnits`` (§6); maps its
-    member name (Millimeters/Centimeters/Inches/Meters) to mm/cm/in/m. An
-    unknown/absent member yields ``"unknown"`` (never raises).
+    member name (Millimeters/Centimeters/Inches/Meters) to mm/cm/in/m. An unknown /
+    absent member, or one whose ``str`` raises, yields ``"unknown"`` -- except that a transport loss
+    raised by the member's ``str`` is re-raised unchanged (one raised by the ``LensUnits`` getter itself
+    is absorbed by ``_units_member`` and reads ``"unknown"``)
+    (0.1.13 E5).
     """
     member = _units_member(system)
     if member is None:
         return "unknown"
-    name = str(member)
+    try:
+        name = str(member)
+    except Exception as exc:  # noqa: BLE001 — a hostile token reads as "unknown"; a transport loss is NEVER swallowed
+        if isinstance(map_dotnet_exception(exc), SessionClosedError):
+            raise
+        return "unknown"
     return _LINEAR_UNIT_BY_LENS_UNIT.get(name, name)
 
 
@@ -234,12 +243,19 @@ def _spot_units_string(system):
 
     SpotData exposes no unit member, so the spot-radius unit is
     derived from ``SystemData.Units.LensUnits`` here — micrometres (``"um"``) for
-    the baseline mm lens. An unknown/absent member yields ``"unknown"``.
+    the baseline mm lens. An unknown/absent member yields ``"unknown"`` (or one whose
+    ``str`` raises -- except that a transport loss raised by the member's ``str`` is re-raised
+    unchanged; one raised by the getter itself is absorbed by ``_units_member``).
     """
     member = _units_member(system)
     if member is None:
         return "unknown"
-    name = str(member)
+    try:
+        name = str(member)
+    except Exception as exc:  # noqa: BLE001 — a hostile token reads as "unknown"; a transport loss is NEVER swallowed
+        if isinstance(map_dotnet_exception(exc), SessionClosedError):
+            raise
+        return "unknown"
     return _SPOT_UNIT_BY_LENS_UNIT.get(name, name)
 
 

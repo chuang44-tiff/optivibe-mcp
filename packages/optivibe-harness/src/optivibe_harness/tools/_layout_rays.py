@@ -59,6 +59,27 @@ from .analysis_raytrace import _opd_mode_member, _rays_type_enum
 # The three meridional pupil rays per field (label, Py). Px = 0 (meridional plane).
 _PUPIL_RAYS = (("chief", 0.0), ("upper_marginal", 1.0), ("lower_marginal", -1.0))
 
+# WHY each ray's polyline ended -- the frozen 8-token ``terminated_by``
+# set. ``reached_image`` / ``error`` / ``vignette`` are GRADED (a trace fact);
+# ``frame`` / ``read_fault`` / ``budget`` / ``nonfinite`` / ``not_traced`` are UNGRADED
+# terminal reasons that carry no failure code and no success [inferred: the four
+# code-less stops of this reader, #7 + re-verify fix (b)].
+RAY_REACHED_IMAGE = "reached_image"
+RAY_ERROR = "error"
+RAY_VIGNETTE = "vignette"
+RAY_FRAME = "frame"
+RAY_READ_FAULT = "read_fault"
+RAY_BUDGET = "budget"
+RAY_NONFINITE = "nonfinite"
+RAY_NOT_TRACED = "not_traced"
+RAY_TERMINATIONS = (RAY_REACHED_IMAGE, RAY_ERROR, RAY_VIGNETTE, RAY_FRAME,
+                    RAY_READ_FAULT, RAY_BUDGET, RAY_NONFINITE, RAY_NOT_TRACED)
+# The run-level ``termination``.
+RUN_COMPLETED = "completed"
+RUN_BUDGET_EXHAUSTED = "budget_exhausted"
+RUN_TOTAL_FAILURE = "total_failure"
+RUN_TERMINATIONS = (RUN_COMPLETED, RUN_BUDGET_EXHAUSTED, RUN_TOTAL_FAILURE)
+
 
 def _finite_num(x):
     """Return ``float(x)`` iff ``x`` is a finite, non-bool number, else ``None``."""
@@ -193,6 +214,14 @@ def read_field_rays(system, wave=1, deadline=None):
     - A multi-wavelength system appends ``"primary wavelength only"``.
     - A TOTAL failure returns ``{"fields": [], "flags": ["ray trace unavailable:
       ..."]}`` so the caller still draws the geometry.
+
+    (ADDITIVE -- polylines and flags byte-identical, with ONE exception
+    since INC-3b: a failed field none of whose failed rays has a drawable segment
+    (>= 2 points) reads "... before any drawable segment — nothing drawn for this
+    field" instead of "... drawn to the last valid surface"): the result ALSO
+    carries ``"coverage"`` -- one ``{field_index, label, terminated_by, at_k, err,
+    vig}`` per ray, ``terminated_by`` in ``RAY_TERMINATIONS`` -- and a run-level
+    ``"termination"`` in ``RUN_TERMINATIONS``.
     """
     flags = []
     try:
@@ -236,6 +265,11 @@ def read_field_rays(system, wave=1, deadline=None):
         # truncates (errorCode/vignette/frame), it is DONE — no resume at k+1.
         polylines = [[] for _ in ray_specs]
         ray_done = [False for _ in ray_specs]
+        # Why each ray stopped (None = not yet), where, and its codes.
+        why = [None for _ in ray_specs]
+        at_k = [None for _ in ray_specs]
+        codes = [(None, None) for _ in ray_specs]
+        traced = [False for _ in ray_specs]
 
         budget_exhausted = False
         # k = 1 .. N-1 (skip object k=0 — its frame is the at-infinity sentinel;
@@ -259,49 +293,70 @@ def read_field_rays(system, wave=1, deadline=None):
             for ri, _spec in enumerate(ray_specs):
                 if ray_done[ri]:
                     continue
+                traced[ri] = True
                 res = None if results is None else results[ri]
                 if res is None:
                     # Cannot trace this ray to k (or the whole surface failed): truncate.
                     ray_done[ri] = True
+                    why[ri], at_k[ri] = RAY_READ_FAULT, k
                     continue
                 err, vig, lx, ly, lz = res
+                codes[ri] = (err, vig)
                 if err != 0 or vig != 0:
                     # A1: a vignetted (obscuration-blocked) OR errored ray is physically
                     # stopped at k — truncate at the last good surface (the gap-#6 fix).
                     ray_done[ri] = True
+                    why[ri] = RAY_ERROR if err != 0 else RAY_VIGNETTE   # error wins
+                    at_k[ri] = k
                     continue
                 if not frame_ok:
                     # An un-transformable global frame: never plot a raw-local point at a
                     # bogus global place — truncate here.
                     ray_done[ri] = True
+                    why[ri], at_k[ri] = RAY_FRAME, k
                     continue
                 gx, gy, gz = _geom.point_to_global(
                     frame["R"], frame["vertex"], lx, ly, lz
                 )
                 if not (math.isfinite(gz) and math.isfinite(gy)):
                     ray_done[ri] = True
+                    why[ri], at_k[ri] = RAY_NONFINITE, k   # healthy codes, no point
                     continue
                 # Emit (z, y) so the draw code reads p[0]=z, p[1]=y (UNCHANGED).
                 polylines[ri].append((float(gz), float(gy)))
+                if k == n - 1:
+                    why[ri] = RAY_REACHED_IMAGE
 
         # Assemble per-field output + flags.
         out_fields = []
         for fi in range(n_fields):
             rays = {}
             field_failed = False
+            n_failed_drawable = 0
             for ri, (spec_fi, label, _hy, _py) in enumerate(ray_specs):
                 if spec_fi != fi:
                     continue
                 rays[label] = polylines[ri]
                 if ray_done[ri]:
                     field_failed = True
+                    if len(polylines[ri]) >= 2:
+                        n_failed_drawable += 1
             if field_failed:
                 # User-facing field number is 1-based to match ZOS GetField;
                 # `field_index` below stays 0-based for internal indexing.
-                flags.append(
-                    f"field {fi + 1} (Y={raw_y[fi]:g}): a ray was truncated "
-                    "(vignette/error/frame/read failure) — drawn to the last valid surface"
-                )
+                if n_failed_drawable == 0:
+                    # No failed ray of this field has a drawable segment,
+                    # so "drawn to the last valid surface" would over-claim.
+                    flags.append(
+                        f"field {fi + 1} (Y={raw_y[fi]:g}): a ray was truncated "
+                        "(vignette/error/frame/read failure) before any drawable "
+                        "segment — nothing drawn for this field"
+                    )
+                else:
+                    flags.append(
+                        f"field {fi + 1} (Y={raw_y[fi]:g}): a ray was truncated "
+                        "(vignette/error/frame/read failure) — drawn to the last valid surface"
+                    )
             out_fields.append(
                 {
                     "field_index": fi,
@@ -319,9 +374,24 @@ def read_field_rays(system, wave=1, deadline=None):
                 "single in-flight trace (a single batch open cannot be interrupted)."
             )
 
-        return {"fields": out_fields, "flags": flags}
+        coverage = []
+        for ri, (spec_fi, label, _hy, _py) in enumerate(ray_specs):
+            reason = why[ri]
+            if reason is None:
+                # the ray was never stopped and never reached the image: the budget
+                # broke the loop (after its first open -> budget, before -> not_traced)
+                reason = (RAY_BUDGET if (budget_exhausted and traced[ri])
+                          else RAY_NOT_TRACED)
+            coverage.append({"field_index": spec_fi, "label": label,
+                             "terminated_by": reason, "at_k": at_k[ri],
+                             "err": codes[ri][0], "vig": codes[ri][1]})
+        return {"fields": out_fields, "flags": flags, "coverage": coverage,
+                "termination": (RUN_BUDGET_EXHAUSTED if budget_exhausted
+                                else RUN_COMPLETED)}
     except BaseException as exc:  # noqa: BLE001 — total failure -> geometry-only
         return {
             "fields": [],
             "flags": [f"ray trace unavailable: {type(exc).__name__}: {exc}"],
+            "coverage": [],
+            "termination": RUN_TOTAL_FAILURE,
         }

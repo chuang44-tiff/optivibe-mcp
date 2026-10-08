@@ -26,22 +26,47 @@ it, and matches the shape the package already uses for ``_image_gate``,
 
 THE DEFERRED IMPORT STAYS, and stays HERE. It is the cycle break, not a leftover: this
 module is imported by ``optimize_run`` / ``layout_render`` / ``analysis_graphic`` at
-module level, and it reaches ``workspace`` only at call time.
+module level, and it reaches ``workspace`` only at call time. ``workspace`` now imports
+THIS module at module level too (for ``run_id_refusal`` / ``RUN_ID_RULE``) -- a leaf edge,
+no cycle, because nothing here imports ``workspace`` at module level.
 
 **WHAT THIS DOES NOT FIX.** Each function here still performs ONE resolution per call,
 so a caller that wants the root AND a path derived from it still asks twice and can
 still get two answers if ``_resolve_root`` is not a stable read. That is the open
 two-independent-resolutions class, and consolidating the four copies into one does not
-close it — it makes it fixable in one place instead of four. The two tickets
-(``promote-best-resolves-the-root-twice``, ``render-layout-resolves-the-root-twice``)
-remain the record of the unclosed half.
+close it — it makes it fixable in one place instead of four. The ``promote_best``
+half is CLOSED in ``workspace`` (0.1.13 batch B: one ``_resolve_root`` read per call,
+threaded to the keeper path and every disclosure, never through this module), and
+``save_candidate`` reads once through ``_resolve_candidate_sink``. The consumers of THIS
+module -- ``optimize_run`` and ``layout_render`` -- remain the unclosed record, in the
+two tickets (``promote-best-resolves-the-root-twice``, now PARTIAL with the
+``optimize`` pair as its remainder, and ``render-layout-resolves-the-root-twice``).
 """
 import os
 import uuid
 
 from .._io import safe_repr
-from ..artifact_sink import _safe_name
+from ..artifact_sink import _MAX_STEM_CHARS, _safe_name
 from ..errors import OptimizeError
+
+#: Folder names a trail run may NOT take. ``snapshots`` is a REAL sibling (save_snapshot's
+#: run folder is candidates/trail/snapshots, workspace._get_snapshot_sink). ``zmx`` is POLICY:
+#: the keepers live in candidates/zmx (workspace._get_candidate_sink, under candidates/, NOT
+#: under candidates/trail/). Compared casefolded (NTFS). Pinned to the REAL sinks' run_id by a
+#: test.
+_RESERVED_RUN_IDS = frozenset({"snapshots", "zmx"})
+
+#: The ONE statement of the run_id rule: served in the ``optimize`` description AND quoted
+#: in every refusal of a STRING run_id, so the two cannot drift apart. The non-string
+#: type refusal ("'run_id' must be a string, ...") does not quote it.
+RUN_ID_RULE = (
+    f"run_id is optional (omitted or empty -> a generated optimize_<hex> id). It names the trail folder "
+    f"candidates/trail/<run_id>, so it must be a plain directory name of at most "
+    f"{_MAX_STEM_CHARS} characters: no slash, backslash, colon, tilde (~) or other illegal character, "
+    f"not . or .., no trailing dot or space, not a reserved device name, and not "
+    f"{' or '.join(sorted(_RESERVED_RUN_IDS))} (reserved folder names, any case). A bad "
+    f"run_id is REFUSED (optimize_param) with nothing written -- never rewritten."
+)
 
 
 def workspace_root(session):
@@ -130,6 +155,28 @@ def trail_sink(session, run_id):
     return _get_trail_sink(session, run_id)
 
 
+def run_id_refusal(value):
+    """The door's own four-way rule over a STRING run_id: the refusal reason, or ``None`` when admitted.
+
+    First failure wins: reserved (casefolded) -> length -> ``~`` -> the ``_safe_name`` fixed
+    point. ONE copy: ``trail_run_id`` (the optimize door) and ``workspace._get_trail_sink``
+    (the backstop at the join) both call this, so neither can drift from the other. The
+    non-string refusal stays at each caller.
+    """
+    if value.casefold() in _RESERVED_RUN_IDS:
+        return ("names a reserved folder: candidates/trail/snapshots is save_snapshot's folder"
+                if value.casefold() == "snapshots"
+                else "names a reserved folder: zmx is the keepers' folder name (candidates/zmx)")
+    if len(value) > _MAX_STEM_CHARS:
+        return f"is {len(value)} characters, over the {_MAX_STEM_CHARS}-character limit"
+    if "~" in value:
+        return ("contains '~', the NTFS short-name alias character: on a volume with 8.3 names "
+                "SNAPSH~1 IS candidates/trail/snapshots, so the folder used would not be the one named")
+    if _safe_name(value) != value:
+        return "is not a plain directory name"
+    return None
+
+
 def trail_run_id(params):
     """The optimize trail's ``run_id``: the caller's, or a generated one. A bad one -> ``optimize_param``.
 
@@ -147,6 +194,18 @@ def trail_run_id(params):
     empty and become ``snapshot``, and a reserved device name gains a prefix. Read EARLY,
     beside the other gate-before-anything params, so a bad id refuses with ZERO mutation.
 
+    Four further refusals, first-failure-wins, each naming its OWN reason: a name in
+    ``_RESERVED_RUN_IDS`` (casefolded) -- ``snapshots`` is save_snapshot's real sibling folder
+    ``candidates/trail/snapshots``, ``zmx`` is the keepers' folder name ``candidates/zmx``
+    (policy, not a sibling); then a name longer than ``_MAX_STEM_CHARS`` (``_safe_name``
+    would truncate it, and the refusal says so by length instead of "not plain"); then any
+    ``~`` -- every GENERATED NTFS 8.3 short-name alias contains one (a name that already fits
+    8.3 is its own short name), and on a volume with 8.3 names ``SNAPSH~1``
+    IS ``candidates/trail/snapshots`` (``_safe_name`` admits it, the filesystem rewrites it), so
+    refusing the CHARACTER closes every 8.3 alias of every folder, not one instance; then the
+    fixed-point check above. Every refusal of a string ``run_id`` quotes ``RUN_ID_RULE``; the
+    non-string type refusal does not.
+
     LIVES HERE, not in ``optimize_run``: that module is at its statement band with zero
     spare, and this is the same question this module answers -- where a run's output lives.
     """
@@ -156,13 +215,9 @@ def trail_run_id(params):
     if not isinstance(value, str) or type(value) is not str:
         raise OptimizeError(
             f"'run_id' must be a string, not {type(value).__name__}", family="optimize_param")
-    safe = _safe_name(value)
-    if safe != value:
-        raise OptimizeError(
-            f"'run_id' {safe_repr(value)} is not a plain directory name -- it names the trail "
-            f"folder under candidates/trail/, so it may not contain a slash, backslash, colon or other illegal "
-            f"characters, be . or .., end in a dot or space, or be a reserved device name. "
-            f"Nothing was written. Use a plain name such as {safe_repr(safe)}, or omit "
-            f"run_id to get a generated one.",
-            family="optimize_param")
-    return value
+    why = run_id_refusal(value)
+    if why is None:
+        return value
+    raise OptimizeError(
+        f"'run_id' {safe_repr(value)} {why}. {RUN_ID_RULE} Omit run_id to get a generated one.",
+        family="optimize_param")

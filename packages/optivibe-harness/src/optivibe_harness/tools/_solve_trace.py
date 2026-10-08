@@ -146,9 +146,10 @@ _SEMANTICS = {
 _GATES_FROM_ROW = frozenset({"traced_match", "traced_mismatch"})
 
 #: canonical -> the MEASURED reason no oracle exists. EXACTLY FOUR, and the distinction
-#: this table carries is load-bearing: these four were ATTEMPTED and REJECTED; everything
-#: else was never attempted. Collapsing the two would report a measured dead end and an
-#: unexplored one as the same fact.
+#: this table carries is load-bearing. An absent (cell, type) pair is ONE of THREE facts:
+#: one of these four types, ATTEMPTED and REJECTED; a type with a measured oracle on ANOTHER
+#: cell (``_ORACLE_ELSEWHERE``, keyed on ``ORACLES``); or a type never attempted
+#: (``_NEVER_ATTEMPTED``). Collapsing any two would report different facts as the same one.
 #:
 #: THIS TABLE AND ITS EXACT-SET PIN ARE ONE CHANGE-UNIT: a row and its pin move
 #: together or not at all.
@@ -169,6 +170,12 @@ NO_ORACLE_REASON = {
 
 #: What every other type gets. NOT the same claim as a ``NO_ORACLE_REASON`` row.
 _NEVER_ATTEMPTED = "no oracle has been ATTEMPTED for this type."
+
+#: The THIRD absent case (0.1.13 E5): the
+#: TYPE has a measured, working oracle on ANOTHER cell. Keyed on the ``ORACLES`` key set at call time --
+#: never on a copied name list -- so a row added to or dropped from ``ORACLES`` moves this sentence with it.
+_ORACLE_ELSEWHERE = ("an oracle IS catalogued and measured for a %s solve on the %s cell, but not on the "
+                     "'%s' cell; this pair was never attempted.")
 
 #: The measurement envelope, served on every traced verdict. ``%s`` is the RESOLVED
 #: primary wavelength index the read actually used — never a literal.
@@ -261,10 +268,14 @@ ORACLES = {
         "rel_tol": 1e-6,
         "abs_tol": 1e-7,
         "gates": True,
-        # every ChiefRayAngle target ever authored: +/-0.02 .. +/-0.3, 0.05 .. 0.2, 0.1
-        # and 10.0. Angle = 0.0 (image-space telecentricity) is OUTSIDE it and is declined
+        # every ChiefRayAngle target authored before (+/-0.02 .. +/-0.3, 0.05 .. 0.2, 0.1, 10.0), PLUS
         # BY RULE, not by threshold.
-        "domain": (0.02, 10.0),
+        # surface 6, primary wavelength, the law AGREED at Angle = 0.0 (residual 1.6021435655166496e-09,
+        # M = 62.42x), 0.001 (1.5968645652748165e-09, 62.62x), +20.0 (1.294275797647515e-11, 7.717e+04x)
+        # and -20.0 (1.3341772131525431e-11, 7.486e+04x); M = tol / residual against this row's
+        # tolerances, admitted at M >= 10. The domain is SET FROM those points by a rule fixed before the
+        # sweep; the targets between them were not each measured.
+        "domain": (0.0, 20.0),
         "domain_abs": True,
     },
     "ThicknessCell.MarginalRayHeight": {
@@ -359,11 +370,19 @@ def relation_semantics(state, gates):
 
 
 def _no_oracle_reason(cell_token, canonical):
-    """The ABSENT reason: measured-and-rejected, or never attempted. Never the same word."""
+    """The ABSENT reason -- one of THREE, never the same word: measured-and-rejected (``NO_ORACLE_REASON``),
+    catalogued-on-another-cell (the ``ORACLES`` key set, by type), or never attempted."""
+    served = {_sc._column_of(token): token for token in _sc.TOKEN_TO_COLUMN}  # "RadiusCell" -> "radius"
+    elsewhere = sorted("'%s'" % served.get(key.split(".", 1)[0], key.split(".", 1)[0])
+                       for key in ORACLES if key.split(".", 1)[1] == canonical)
+    if canonical in NO_ORACLE_REASON:
+        why = NO_ORACLE_REASON[canonical]
+    elif elsewhere:
+        why = _ORACLE_ELSEWHERE % (canonical, " / ".join(elsewhere), cell_token)
+    else:
+        why = _NEVER_ATTEMPTED
     return ("no relation oracle is catalogued for a %s solve on the '%s' cell, so its "
-            "TYPE is proven and its CONSEQUENCE is not: %s"
-            % (canonical, cell_token,
-               NO_ORACLE_REASON.get(canonical, _NEVER_ATTEMPTED)))
+            "TYPE is proven and its CONSEQUENCE is not: %s" % (canonical, cell_token, why))
 
 
 def _decline_reason(spec, canonical, resolved, prior_type):
@@ -407,9 +426,11 @@ def _decline_reason(spec, canonical, resolved, prior_type):
         # their plain ``%r``. ``target`` does not: it passed ``_is_finite_number``, which
         # is ``isinstance``-based and therefore admits a ``float`` SUBCLASS with a hostile
         # ``__repr__`` (measured — it also passes ``math.isfinite`` and ``math.isclose``).
-        return ("the %s oracle is DECLINED: it is measured ONLY for %s in [%r, %r] and "
-                "you asked for %s. Outside that range neither the law nor its tolerance "
-                "has been measured, so no verdict is available and nothing was read."
+        return ("the %s oracle is DECLINED: its domain is %s in [%r, %r], set from targets "
+                "measured to agree on one design, and you asked for %s. This tool "
+                "certifies the relation only inside that domain; a target outside it is not "
+                "certified here (it may or may not hold -- no claim either way), so no verdict "
+                "is served and nothing was read."
                 % (canonical,
                    ("|%s|" if spec["domain_abs"] else "%s") % (spec["field"],),
                    lo, hi, _ss._safe_repr(target)))

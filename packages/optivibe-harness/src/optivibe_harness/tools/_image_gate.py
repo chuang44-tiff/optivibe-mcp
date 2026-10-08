@@ -36,3 +36,24 @@ def _is_png(path) -> bool:
             return fh.read(8) == _PNG_MAGIC
     except (OSError, TypeError, ValueError):
         return False
+
+
+def _png_ihdr(path):
+    """``(width, height)`` from the PNG's IHDR chunk, else ``None``. NEVER raises.
+
+    The native-layout retool gates an exported raster on its
+    DIMENSIONS as well as its magic: the overlay registration is computed for the
+    size that was requested, so a real PNG of another size is as unusable as a
+    text file. ``None`` for a non-PNG, a file shorter than the IHDR, an IHDR that
+    is not the first chunk, or any read fault (the ``_is_png`` contract).
+    """
+    try:
+        if not os.path.isfile(path):
+            return None
+        with open(path, "rb") as fh:
+            head = fh.read(24)
+    except (OSError, TypeError, ValueError):
+        return None
+    if len(head) < 24 or head[:8] != _PNG_MAGIC or head[12:16] != b"IHDR":
+        return None
+    return (int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big"))

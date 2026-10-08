@@ -1,6 +1,7 @@
 """PURE half of ``render_mtf_vs_field``: reference validation + digest,
 plot MODEL, Agg render + atomic save. NO engine/clr/ZOSAPI import. Generated text names vignetting
-SURFACES, never a cause [SA-8]; provenance + engine messages pass VERBATIM. Markers: computed FILLED,
+SURFACES, never a cause [SA-8]; provenance + engine messages pass VERBATIM (an engine message the font
+cannot draw is repaired in the footer line only, and flagged — see _drawable). Markers: computed FILLED,
 vignetted chief OPEN, reference none [CR-Q1-6][P-6] — segments between markers are NOT computed."""
 import contextlib
 import hashlib
@@ -15,6 +16,11 @@ from ._image_gate import _is_png
 
 REFERENCE_KINDS = ("published", "synthetic", "other")
 _INVISIBLE = frozenset({"Cf", "Cc", "Zs", "Zl", "Zp"})  # a text needs >= 1 char outside [P2R3-5]
+#: Code points in a VISIBLE Unicode category that render BLANK in common fonts
+#: (0.1.13 E5): U+115F / U+1160 Hangul choseong / jungseong
+#: filler, U+3164 Hangul filler, U+FFA0 halfwidth Hangul filler, U+2800 Braille pattern blank. KNOWN
+#: members only -- fonts differ, so this set cannot be complete; the category rule stays the primary test.
+_BLANK_GLYPHS = frozenset({"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800"})
 MEASUREMENT_BASES = ("lens_only", "system", "unknown")
 ORIENTATIONS = ("tangential", "sagittal")
 _REQUIRED_KEYS = ("source", "kind", "aperture", "extraction", "spectral_weighting", "measurement_basis",
@@ -59,6 +65,24 @@ def _one_of(value, key, allowed, why=""):
     return tok
 
 
+def _read(mapping, key, where):
+    """ONE guarded read of the caller's mapping (0.1.13 E5): a
+    key the object says it has and then fails to produce is a BAD REFERENCE, never ``internal``. In-process only --
+    over MCP a reference is a plain ``dict`` from ``json.loads``."""
+    try:
+        return mapping[key]
+    except Exception:  # noqa: BLE001 — a hostile __getitem__ / __hash__ / KeyError alike: the caller's object
+        raise ReferenceInvalid(f"reference.{where}: required key missing or unreadable") from None
+
+
+def _get(mapping, key, where):
+    """The optional-key twin of ``_read``: ``dict.get`` on a subclass can raise too."""
+    try:
+        return mapping.get(key)
+    except Exception:  # noqa: BLE001
+        raise ReferenceInvalid(f"reference.{where}: key unreadable") from None
+
+
 def _points(points, where):
     if not isinstance(points, list) or not _MIN_POINTS <= len(points) <= _MAX_POINTS:
         raise ReferenceInvalid(f"reference.{where}.points: need {_MIN_POINTS}–{_MAX_POINTS} pairs")
@@ -85,19 +109,25 @@ def validate_reference(ref, *, frequencies, lens_unit, frequency_units):
     points}``, or ``ReferenceInvalid(msg)`` naming the field. Unknown keys are DROPPED — the digest covers
     what was validated and drawn, and no copy/serialiser sees caller-shaped depth [P2R1-9]. NOTHING from the
     caller's object is stored: membership fields hold the CANONICAL token, text fields ``str.__str__`` of the
-    value (an exact ``str``); every text is UTF-8-encodable and capped [P2R2-5][P2R2-6]."""
+    value (an exact ``str``); every text is UTF-8-encodable and capped [P2R2-5][P2R2-6]; every key of the
+    caller's object is fetched by ONE guarded ``__getitem__`` (``_read`` / ``_get``) and validated from the cache
+    (``note`` is first probed by one guarded ``__contains__``)."""
     if lens_unit in _UNRESOLVED_UNITS:
         raise ReferenceInvalid(f"the design's lens unit could not be resolved ({safe_repr(lens_unit)}); "
                                "an overlay cannot be unit-checked")
     if not isinstance(ref, dict):
         raise ReferenceInvalid("reference: must be an object")
-    for key in _REQUIRED_KEYS:
-        if key not in ref:
-            raise ReferenceInvalid(f"reference.{key}: required key missing")
+    raw = {key: _read(ref, key, key) for key in _REQUIRED_KEYS}  # ONE guarded dunder read per key
+    try:
+        has_note = "note" in ref
+    except Exception:  # noqa: BLE001 — a __contains__ that raises is the caller's object, never internal
+        raise ReferenceInvalid("reference.note: key unreadable") from None
+    if has_note:
+        raw["note"] = _read(ref, "note", "note")
     texts = (("source", 300), ("aperture", 300), ("extraction", 300), ("spectral_weighting", 300))
     out = {}
-    for key, cap in texts + ((("note", 500),) if "note" in ref else ()):
-        value = ref[key]  # ONE read of the caller's mapping [round 5]
+    for key, cap in texts + ((("note", 500),) if has_note else ()):
+        value = raw[key]  # validated from the CACHE: the caller's object is never asked again [round 5]
         if not isinstance(value, str):  # isinstance cannot dispatch to the caller's code
             raise ReferenceInvalid(f"reference.{key}: must be a non-empty string")
         text = str.__str__(value)  # canonical FIRST: every check below runs on `text` [P2R3-5]
@@ -107,7 +137,7 @@ def validate_reference(ref, *, frequencies, lens_unit, frequency_units):
             str.encode(text, "utf-8")
         except UnicodeEncodeError:
             raise ReferenceInvalid(f"reference.{key}: contains a lone surrogate — not drawable text") from None
-        if not any(unicodedata.category(ch) not in _INVISIBLE for ch in text):
+        if not any(unicodedata.category(ch) not in _INVISIBLE and ch not in _BLANK_GLYPHS for ch in text):
             raise ReferenceInvalid(f"reference.{key}: contains no visible character")
         out[key] = text
     for key, allowed, why in (
@@ -116,8 +146,8 @@ def validate_reference(ref, *, frequencies, lens_unit, frequency_units):
             ("x_units", (lens_unit,), " (the design's lens unit; no conversion is done)"),
             ("frequency_units", (frequency_units,), " (the tool's frequency unit)"),
             ("modulation_scale", ("fraction",), " (modulation must be a 0..1 fraction)")):
-        out[key] = _one_of(ref[key], key, allowed, why)
-    curves = ref["curves"]
+        out[key] = _one_of(raw[key], key, allowed, why)
+    curves = raw["curves"]
     if not isinstance(curves, list) or not 1 <= len(curves) <= _MAX_CURVES:
         raise ReferenceInvalid(f"reference.curves: need 1–{_MAX_CURVES} curves")
     requested = [float(f) for f in frequencies]
@@ -126,18 +156,20 @@ def validate_reference(ref, *, frequencies, lens_unit, frequency_units):
         where = f"curves[{i}]"
         if not isinstance(curve, dict):
             raise ReferenceInvalid(f"reference.{where}: must be an object")
-        freq = _number(curve.get("frequency"), where + ".frequency")
+        freq = _number(_get(curve, "frequency", where + ".frequency"), where + ".frequency")
         if freq not in requested:
             raise ReferenceInvalid(f"reference.{where}.frequency {freq:g} not requested {requested}")
-        raw = curve.get("orientation")
-        orient = next((o for o in ORIENTATIONS if isinstance(raw, str) and str.__eq__(o, raw) is True), None)
+        raw_orient = _get(curve, "orientation", where + ".orientation")
+        orient = next((o for o in ORIENTATIONS if isinstance(raw_orient, str)
+                       and str.__eq__(o, raw_orient) is True), None)
         if orient is None:
-            raise ReferenceInvalid(f"reference.{where}.orientation {safe_repr(raw)}: need one of {ORIENTATIONS}")
+            raise ReferenceInvalid(f"reference.{where}.orientation {safe_repr(raw_orient)}: need one of "
+                                   f"{ORIENTATIONS}")
         if (freq, orient) in seen:
             raise ReferenceInvalid(f"reference.{where}: duplicate (frequency, orientation)")
         seen.add((freq, orient))
         out["curves"].append({"frequency": freq, "orientation": orient,
-                              "points": _points(curve.get("points"), where)})
+                              "points": _points(_get(curve, "points", where + ".points"), where)})
     return out
 
 
@@ -149,6 +181,20 @@ def reference_digest(ref):
 
 def _finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _drawable(text):
+    """``(text, False)`` when ``text`` is UTF-8-encodable, else ``(repaired, True)`` where every lone
+    surrogate is U+FFFD and a two-unit surrogate pair is the one character it encodes
+    (``utf-16``/``surrogatepass`` round-trip, ``errors="replace"``). The Agg text path
+    (``FT2Font.set_text``) rejects a ``str`` carrying a lone surrogate, so the footer would
+    fail AFTER the engine work; the envelope's ``messages`` key stays VERBATIM (the MCP wire is
+    ``repr``, which escapes it)."""
+    try:
+        str.encode(text, "utf-8")
+    except UnicodeEncodeError:
+        return text.encode("utf-16", "surrogatepass").decode("utf-16", "replace"), True
+    return text, False
 
 
 def _footer(fields, header, x_units, reference):
@@ -171,12 +217,13 @@ def _footer(fields, header, x_units, reference):
     messages = list(header.get("messages") or ())
     if any(_SAMPLING_TOKEN in m for m in messages):
         lines.append(SAMPLING_WARNING)
-    lines.extend(f"engine message: {m}" for m in messages)
+    drawable = [_drawable(m) for m in messages]
+    lines.extend(f"engine message: {m}" for m, _ in drawable)
     if x_units in _UNRESOLVED_UNITS:
         lines.append(UNIT_UNRESOLVED)
     if reference:
         lines.append(REFERENCE_FOOTER)
-    return lines
+    return lines, any(flag for _, flag in drawable)
 
 
 def plot_model(points, fields, frequencies, reference, x_units, header):
@@ -227,10 +274,12 @@ def plot_model(points, fields, frequencies, reference, x_units, header):
     if reference:
         legend.append(f"reference: {reference['source']}, {reference['aperture']}")
     synthetic = reference is not None and reference.get("kind") == "synthetic"
+    footer_lines, footer_replaced = _footer(fields, header, x_units, reference)
     return {"lines": lines, "title": title, "x_label": f"real image height ({x_units})",
             "y_label": "modulation (0..1)", "y_limits": y_limits,
-            "frequency_units": header.get("frequency_units") or f"cycles/{x_units}",
-            "footer_lines": _footer(fields, header, x_units, reference),
+            # the computed legend: the FFT MTF abscissa is cycles/mm for EVERY lens unit
+            "frequency_units": header.get("frequency_units") or "cycles/mm",
+            "footer_lines": footer_lines, "footer_text_replaced": footer_replaced,
             "legend_groups": legend, "beyond_reference_extent": beyond,
             "synthetic_banner": SYNTHETIC_BANNER if synthetic else None}
 
@@ -245,7 +294,9 @@ def exclusive_temp(d, mkdir=False):
     ``OSError`` stops at once, re-raised naming ``d``; exhaustion raises ``FileExistsError``. The name
     ``.mtf_vs_field_tmp_<12 hex>`` has NO ``.png`` suffix: no ``.png`` name appears in a user folder
     before its bytes are gated (``savefig(format="png")`` is explicit). The fd is closed at once;
-    the caller's ``finally`` owns the created path on every exit."""
+    the caller's ``finally`` owns the created path on every exit. A close that fails unlinks the
+    name here first; if that unlink fails too, the raised error NAMES the file left behind, so no exit
+    leaves a file the caller was never told about."""
     for _ in range(3):
         name = os.path.join(d, ".mtf_vs_field_tmp_" + secrets.token_hex(6))
         try:  # the name is created in ONE atomic call (O_EXCL / mkdir) — never re-derived
@@ -253,12 +304,27 @@ def exclusive_temp(d, mkdir=False):
                 os.mkdir(name)
             else:
                 fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0))
-                os.close(fd)  # closed at once; the caller's `finally` owns the created path
+                try:
+                    os.close(fd)  # closed at once; the caller's `finally` owns the created path
+                except BaseException as close_exc:  # (0.1.13 E5)
+                    try:  # the name never reaches the caller: reap it HERE
+                        os.unlink(name)
+                    except FileNotFoundError:  # the name is GONE: reaped, never reported as left
+                        pass
+                    except (OSError, ValueError) as reap_exc:  # a reap that fails is DISCLOSED, naming the file left behind
+                        if isinstance(close_exc, Exception):
+                            left = OSError(f"the private temp {name!r} could not be closed or removed and "
+                                           f"was LEFT in place: {safe_exc(reap_exc)}")
+                            left.left_in_place = name  # the caller records it in its cleanup list
+                            raise left from None
+                    raise
             return name
         except FileExistsError:
             continue
         except OSError as exc:  # PermissionError (the ACL) included: stop NOW, no retry loop
-            raise OSError(f"the directory {d!r} refused a private temp: {safe_exc(exc)}") from None
+            err = OSError(f"the directory {d!r} refused a private temp: {safe_exc(exc)}")
+            err.left_in_place = getattr(exc, "left_in_place", None)  # a temp it could not reap
+            raise err from None
     raise FileExistsError(f"3 random temp names in {d!r} already existed; nothing was created")
 
 
@@ -325,12 +391,14 @@ def _build_figure(model):
     return fig, plt
 
 
-def render_png(model, out_path):
+def render_png(model, out_path, cleanup=None):
     """``(path, sha256, None, None)`` | ``(None, None, fault, published)``; NEVER raises. A bounded
     ``exclusive_temp`` beside
     ``out_path`` → savefig → close → ``_is_png(tmp)`` → ``os.replace`` → ``_is_png(final)`` → FINAL-byte
     digest. [R-D] the destination is the caller's pathname: a post-publication fault discloses
-    ``published`` (= ``out_path``) and NEVER unlinks it; ``published`` is ``None`` before the replace."""
+    ``published`` (= ``out_path``) and NEVER unlinks it; ``published`` is ``None`` before the replace.
+    ``cleanup`` (a list, optional): a temp this call could not reap is APPENDED to it
+    (0.1.13 E5); the return shape is unchanged."""
     fig = plt = tmp = published = stage = None
     try:
         fig, plt = _build_figure(model)
@@ -348,11 +416,16 @@ def render_png(model, out_path):
         with open(out_path, "rb") as fh:
             return out_path, hashlib.sha256(fh.read()).hexdigest(), None, None
     except Exception as exc:  # noqa: BLE001 — every fault is a render_failed tuple.
+        if cleanup is not None and getattr(exc, "left_in_place", None):  # the SAME channel as a
+            cleanup.append(exc.left_in_place)  # reap failure below, not only the error prose
         return None, None, f"render_failed: {safe_exc(exc, repr_form=True)}" + (
             f" after publication at stage {stage}; the file was LEFT at the caller's path"
             if published else ""), published
     finally:
         _close(plt, fig)
         if tmp and os.path.exists(tmp):
-            with contextlib.suppress(OSError):
+            try:
                 os.remove(tmp)
+            except OSError:  # a failed reap is DISCLOSED to the caller, never swallowed
+                if cleanup is not None:
+                    cleanup.append(tmp)

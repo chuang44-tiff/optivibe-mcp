@@ -47,31 +47,6 @@ def _solve_type_name(cell):
     return str(cell.GetSolveData().Type)
 
 
-def _require_replace_solve(params):
-    """Pull + validate ``replace_solve``. STRICT ``is True``; a non-bool is a param error.
-
-    The ``promote_best`` ``force`` precedent. ``1``, ``"true"``, ``"yes"`` and ``[]`` must
-    NOT force — a destructive override reached by truthiness is an override nobody chose.
-    But a non-bool is not silently read as "no" either: that would let a caller who meant
-    to override believe they had, and then destroy the solve on a later retry with a
-    different spelling. It is refused, loudly, before any engine touch.
-
-    WHICH LINE DECIDES, stated because a mutation measured it: the ``isinstance`` REFUSAL
-    is what enforces strictness — replacing the ``is True`` below with ``bool(value)`` is
-    INERT, because by then the domain is already exactly ``{True, False}``. The ``is True``
-    is a redundant backstop that becomes load-bearing only if the refusal is ever relaxed.
-    Recorded rather than claimed the other way round.
-    """
-    value = params.get("replace_solve", False)
-    if not isinstance(value, bool):
-        raise ToolParamError(
-            f"replace_solve must be a boolean (true/false), got "
-            f"{type(value).__name__} {value!r}; it is refused rather than read as "
-            "false, because a caller who meant to override must not silently not have"
-        )
-    return value is True
-
-
 def set_variable(session, params):
     """Make a surface's radius/thickness cell a Variable, with read-back proof.
 
@@ -115,7 +90,7 @@ def set_variable(session, params):
     surface = _lc._require_int_index(params, "surface")
     _lc._require_geometry_index(surface, n)
     cell_token = _require_cell(params)
-    replace_solve = _require_replace_solve(params)
+    replace_solve = _lc._require_bool_param(params, "replace_solve", intent="override")
 
     prior_solve = None
     probe = _sc.refuse_if_driven(system, lde, surface, cell_token)

@@ -57,7 +57,13 @@ FIELD_TYPES = ("Angle", "ObjectHeight", "ParaxialImageHeight", "RealImageHeight"
 SAMPLE_SIZES, DEFAULT_FREQUENCIES, MAX_FREQUENCIES, MAX_MINT_ATTEMPTS = (64, 128, 256, 512), \
     (10.0, 20.0, 40.0), 6, 3
 _DIFF_RE = re.compile(r"^Field:\s*Diffraction limit$", re.IGNORECASE)
-_DESC_RE = re.compile(r"^Field:\s*([-+]?\d+(?:\.\d+)?)\s(mm|\(deg\))$")
+#: printed Description unit -> the lens-unit token ``_lens_units_string`` returns. MEASURED spellings only
+#:: the engine prints ``mm`` / ``cm`` / ``in`` / ``M`` in a height field's Description
+#: for a Millimeters / Centimeters / Inches / Meters lens -- a unit absent here is REFUSED before any engine work.
+_PRINTED_UNIT = {"mm": "mm", "cm": "cm", "in": "in", "M": "m"}
+_BINDABLE_UNITS = frozenset(_PRINTED_UNIT.values())
+_DESC_RE = re.compile(r"^Field:\s*([-+]?\d+(?:\.\d+)?)\s(%s|\(deg\))$"
+                      % "|".join(re.escape(u) for u in sorted(_PRINTED_UNIT, key=len, reverse=True)))
 _MINT_RE = re.compile(r"^mtf_vs_field_(\d{4,9})\.png$", re.IGNORECASE)  # the formatter's set
 _NONFINITE = "non-finite modulation at the interpolation point"
 _RMTREE_HOOK = "onexc" if sys.version_info >= (3, 12) else "onerror"
@@ -73,6 +79,19 @@ NEXT_SAMPLE_SIZE = {64: 256, 128: 256, 256: 512}  # the note names the NEXT size
 DEFAULT_SAMPLE_SIZE = 256  # [P2R6-OWN-1] owner ruling: the default is WRITTEN (S_256x256), never the engine's
 OBJECT_HEIGHT_HINT = ("; the field type is ObjectHeight, and on an infinite-conjugate object "
                       "the FFT MTF returns 0 series with no message")
+
+
+def _describe(printed_unit):
+    """The served description, naming EXACTLY the lens-unit tokens the binder can bind (0.1.13
+    E5): derived from the map so a widened map can never be served under a narrower sentence."""
+    units = "/".join(sorted(set(printed_unit.values()), key=lambda u: (u != "mm", u)))
+    return ("MTF vs REAL image height (geometric chief ray; %s lens or Angle fields); T solid, S dashed. "
+            "Only defined fields, no segments between. Bound by content (ties: list order, flagged); "
+            "diffraction limit apart. Missing never drawn as 0. Untraceable chief ray REFUSES "
+            "(chief_ray_failed). Engine messages verbatim ('Sampling too low': pass sample_size). "
+            "Reference: context only. ACTIVE config named (set_current_configuration switches). PNG "
+            "minted in <workspace_root>/evaluation/ (no overwrite); path *.png = file, else a folder. "
+            "Not the reviewable figure: save_candidate's png_sha256 PNG is." % units)
 
 
 def _transport_loss(exc):
@@ -126,7 +145,7 @@ class _Refuse(Exception):
 
 
 def _validate_frequencies(value):
-    """``_validate_at_frequencies`` THEN each ``> 0``, at most six, unique (cycles/lens unit)."""
+    """``_validate_at_frequencies`` THEN each ``> 0``, at most six, unique (cycles/mm, every lens unit)."""
     if value is None:
         return list(DEFAULT_FREQUENCIES)
     try:  # TOTAL: a 400-digit int / hostile subclass is a refusal, never `internal`
@@ -467,13 +486,15 @@ def _bind_series(series, fields, lens_unit, field_type):
         m = _DESC_RE.match(d) if isinstance(d, str) and "diffraction" not in d.lower() else None
         # The printed unit is part of the content proof, and that wins over the fallback:
         # only an Angle design keeps the no-reference fallback when the lens unit is unread.
-        if m is not None and m.group(2) != unit and field_type != "Angle" \
+        if m is not None and _PRINTED_UNIT.get(m.group(2), m.group(2)) != unit and field_type != "Angle" \
                 and lens_unit in ("unknown", None, ""):
             refuse(f"series {k} Description {d!r} prints unit {m.group(2)!r} but the design's "
                    "lens unit could not be read (Units.LensUnits → 'unknown'); the unit "
                    "proof cannot be made")
-        if m is None or m.group(2) != unit:
-            refuse(f"series {k} Description {d!r} is not 'Field: <value> {unit}'")
+        if m is None or _PRINTED_UNIT.get(m.group(2), m.group(2)) != unit:
+            refuse(f"series {k} Description {d!r} does not read as 'Field: <value> {unit}' -- the binder "
+                   f"recognises the printed units {sorted(_PRINTED_UNIT)} and (deg) only; the design's lens "
+                   f"unit reads {lens_unit!r}")
         dec = len(m.group(1).partition(".")[2])
         if abs(float(m.group(1)) - f["y"]) > 0.5 * 10 ** -dec + 1e-9:
             refuse(f"series {k} Description {d!r} does not print field {k}'s Y {f['y']!r}")
@@ -658,7 +679,10 @@ def _publish_exclusive(tmp_png, out_dir):
             try:
                 view = memoryview(data)
                 while view:
-                    view = view[os.write(fd, view):]
+                    n = os.write(fd, view)
+                    if n <= 0:  # (0.1.13 E5): never spin on a 0-byte write
+                        raise OSError(f"zero-progress write into {final!r} (os.write returned {n!r})")
+                    view = view[n:]
                 os.fsync(fd)
             finally:
                 try:
@@ -688,11 +712,12 @@ def _publish_exclusive(tmp_png, out_dir):
 
 
 def _publish(model, target, minted):
-    """``(final, sha256, overwrote, fault, cleanup_failures)``: render, gate, publish."""
+    """``(final, sha256, overwrote, fault, cleanup_failures)``: render, gate, publish. A publish
+    failure of any type returns with the cleanup list that the ``finally`` still appends to."""
     if not minted:  # [R-D] the caller's pathname: disclosed, never unlinked
-        overwrote = os.path.exists(target)
-        final, sha, fault, published = render_png(model, target)
-        return final, sha, overwrote, (("render_failed", fault, published) if fault else None), []
+        overwrote, cleanup = os.path.exists(target), []
+        final, sha, fault, published = render_png(model, target, cleanup=cleanup)
+        return final, sha, overwrote, (("render_failed", fault, published) if fault else None), cleanup
     try:  # BOUNDED (round 5): an ACL-denied folder returns this fault, never a TMP_MAX retry loop
         tmp_dir = exclusive_temp(target, mkdir=True)
     except OSError as exc:  # nothing was created, so nothing is owned; the fault RETURNS, never raises
@@ -700,18 +725,23 @@ def _publish(model, target, minted):
     cleanup = []
     try:  # (no .png name in out_dir) the private dir is an OWNED resource: disclosed [A3]
         tmp = os.path.join(tmp_dir, "render.png")
-        fault = render_png(model, tmp)[2]  # the 4th element: the private temp, reaped below
+        fault = render_png(model, tmp, cleanup=cleanup)[2]  # the 4th element: the private temp, reaped below
         if fault or not _is_png(tmp):
             return None, None, None, ("render_failed", fault or "temp failed the PNG gate"), \
                 cleanup
         final, sha, fault, owned = _publish_exclusive(tmp, target)
         cleanup += owned
         return final, sha, None, fault, cleanup
+    except Exception as exc:  # noqa: BLE001 — the fault RETURNS with the SAME list the finally still appends to
+        # (sibling, 0.1.13 E5): a raise would lose the rmtree failure
+        return None, None, None, ("render_failed", safe_exc(exc, repr_form=True)), cleanup
     finally:
         failed = []  # appended after `return`: the returned tuple holds THIS list object
         shutil.rmtree(tmp_dir, **{_RMTREE_HOOK: lambda *_: failed.append(1)})
         if failed:
             cleanup.append(tmp_dir)
+        # a temp inside the private dir that the rmtree DID remove is not a cleanup failure
+        cleanup[:] = [p for p in cleanup if not p.startswith(tmp_dir) or os.path.exists(p)]
 
 
 def render_mtf_vs_field(session, params):
@@ -729,7 +759,7 @@ def render_mtf_vs_field(session, params):
         return _ac.error_envelope(TOOL, r.family, str(r), **r.extra)
 
 
-def _geometry(session, system):
+def _geometry(session, system, lens_unit):
     """Steps 5-7: fields, type, primary, image surface, formula ray, the one trace."""
     try:
         field_type = _field_type_token(system)
@@ -740,6 +770,13 @@ def _geometry(session, system):
         raise _Refuse("field_read_failed", f"the field type could not be read: {safe_exc(exc, repr_form=True)}") from None
     if field_type not in FIELD_TYPES:
         raise _Refuse("field_unsupported", f"field type {field_type!r} not in {list(FIELD_TYPES)}")
+    if field_type != "Angle" and lens_unit != "unknown" and lens_unit not in _BINDABLE_UNITS:
+        raise _Refuse("series_identity_unproven",
+                      f"the design's lens unit reads {lens_unit!r} and the field type is {field_type}: the "
+                      f"engine's printed Description unit is measured only for {sorted(_BINDABLE_UNITS)}, so "
+                      f"a height-type field cannot be bound by content on this lens -- set the lens unit to one "
+                      f"of those, or use Angle fields; nothing was run",
+                      lens_unit=lens_unit, field_type=field_type)
     fields = _read_fields_strict(system)
     primary, pfault = _primary_wave(system)
     image_surf = image_surface_index(system)
@@ -760,7 +797,7 @@ def _geometry(session, system):
 
 def _render(session, frequencies, sample_size, path, reference):
     system = session.system
-    try:  # the fenced helper's str(member) can raise on a hostile/dead token [#6]
+    try:  # the helper re-raises only a transport loss (E5); this wrapper relays it via _transport_loss [#6]
         lens_unit = _ac._lens_units_string(system)
     except Exception as exc:  # noqa: BLE001 — the documented unresolved-unit path
         t = _transport_loss(exc)
@@ -769,7 +806,8 @@ def _render(session, frequencies, sample_size, path, reference):
         lens_unit = "unknown"
     if lens_unit == "unknown":  # the fenced helper may have swallowed a dead engine
         _confirm_engine_alive(system)
-    frequency_units, ref, ref_digest = f"cycles/{lens_unit}", None, None
+    # the FFT MTF abscissa is cycles/mm for EVERY lens unit, measured mm/cm/in/m
+    frequency_units, ref, ref_digest = "cycles/mm", None, None
     if reference is not None:
         try:
             ref = validate_reference(reference, frequencies=frequencies, lens_unit=lens_unit,
@@ -783,7 +821,7 @@ def _render(session, frequencies, sample_size, path, reference):
     ident = _config_identity(system)
     flags = ident.pop("flags") + (["lens_unit_unresolved"] if lens_unit == "unknown" else []) + (
         ["workspace_root_unresolved"] if rfault else [])  # an absolute path published regardless
-    field_type, fields, primary, image_surf, waves, wfault, heights = _geometry(session, system)
+    field_type, fields, primary, image_surf, waves, wfault, heights = _geometry(session, system, lens_unit)
     if heights["failed"]:  # [P-5][CR-Q1-8]: harvest messages; the FFT's own verdict discloses
         try:  # ONE window; its outcome — success, refusal OR throw — is a DISCLOSURE
             disc = _run_fftmtf(system, frequencies, sample_size, harvest=True)
@@ -830,6 +868,8 @@ def _render(session, frequencies, sample_size, path, reference):
         ident, frequency_units=frequency_units, curve_note=curve_note, missing=missing,
         messages=fft["messages"], sampling=sampling, modulation_out_of_range=(
             oor_flags[0]["modulation_out_of_range"] if oor_flags else [])))
+    if model["footer_text_replaced"]:
+        flags.append("footer_text_replaced")
     try:  # a publish fault of ANY type is render_failed, disclosed by type
         final, sha, overwrote, fault, cleanup = _publish(model, target, minted)
     except Exception as exc:  # noqa: BLE001
@@ -881,15 +921,7 @@ RENDER_MTF_VS_FIELD_SPEC = ToolSpec(
     required_params=(),
     param_types={"frequencies": "array", "sample_size": "integer", "path": "string",
                  "reference": "object"},
-    description=(
-        "MTF vs REAL image height (geometric chief ray, lens units); T solid, S dashed. Only "
-        "defined fields computed, not segments between. Bound by content (ties: "
-        "list order, flagged); diffraction limit apart. Missing never drawn as 0. "
-        "Untraceable chief ray REFUSES (chief_ray_failed). Engine messages verbatim ('Sampling "
-        "too low': pass sample_size). Reference: context, no comparison. ACTIVE config named "
-        "(set_current_configuration switches). PNG minted in <workspace_root>/evaluation/ "
-        "(no overwrite); path *.png = file, else a folder. Not the reviewable figure: "
-        "save_candidate's png_sha256 PNG is."),
+    description=_describe(_PRINTED_UNIT),
 )
 
 TOOL_SPECS = (RENDER_MTF_VS_FIELD_SPEC,)

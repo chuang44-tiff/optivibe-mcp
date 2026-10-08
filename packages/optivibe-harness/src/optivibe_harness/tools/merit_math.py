@@ -522,9 +522,8 @@ ADD_MATH_CONSTRAINT_SPEC = ToolSpec(
         "sign_convention cross-check, owns the label->row bookkeeping, and authors via "
         "the merit recipe. dry_run=true previews the recipe + cross-check verdicts + "
         "resolved refs without mutating. Pass config=k to wrap the whole constraint "
-        "block in a per-config CONF k bracket. Takes a CODE, never a phrase (you do the "
-        "grounding via lookup_operand). See add_operand, apply_merit_recipe, "
-        "build_merit."
+        "block in a per-config CONF k bracket. Takes a CODE, never a phrase. Ground the code "
+        "with lookup_operand first. See add_operand, apply_merit_recipe, build_merit."
     ),
 )
 

@@ -2,12 +2,46 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.1.12`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.1.13`). Each tag points at the merge
 commit that published that version, and every tag was verified against the four version
 literals in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.13] — 2026-10-07
+
+- **The layout review changes the lens.** In a small A/B test (three design runs per arm, same
+  brief, same model), every run that used the layout-figure review produced a shorter lens than
+  every run without it: 70–100 mm total track against 140–221 mm. Its thinnest elements were
+  thicker, axial Strehl stayed at 0.93 or better at every wavelength, and no lens had a
+  clearance violation. Three runs per arm is a pattern, not a rate, and the review was tested
+  together with the brief's wording, not apart from it. The full comparison is in
+  [`demos/vision-ab/`](demos/vision-ab/README.md).
+- **`render_layout` draws with OpticStudio's own layout by default**, with the surface labels
+  placed on it. `renderer="native_3d"` and `renderer="native_shaded"` add 3-D views, and the
+  previous self-drawn figure is still available with `renderer="self"`.
+- The layout figure reports which of the rays OptiVibe traces reach the image (`ray_coverage`),
+  and `save_candidate` stores that with the candidate. On the default native drawing these are
+  OptiVibe's own sampled rays, not a reading of the rays OpticStudio drew. When a render is
+  refused, or its picture cannot be published, `save_candidate` says why (`render_error`).
+- A stuck OpticStudio analysis window now makes further analysis calls refuse with a clear error
+  instead of hanging.
+- `optimize-loop` and `design-vision-review` skills: with no human to steer, the agent acts on a
+  review finding or declines it with a measurement that answers it, instead of waiting.
+- **Fix:** the FFT MTF frequency axis is cycles/mm for every lens unit. `get_mtf` and
+  `render_mtf_vs_field` previously labelled it cycles per lens unit, which was wrong for lenses
+  not in millimetres. `render_mtf_vs_field` now also accepts cm, inch and metre field heights.
+- **Fix:** on Windows, concurrent writers no longer lose or tear lines in the append-only JSONL
+  logs.
+- `add_operand` and `edit_operand` disclose that a target reads back at 15 significant figures.
+- **Upgrade step: rebuild the manual corpus once.** Its table-of-contents pages no longer become
+  search hits, so `search_reference` answers from the body of the manual. The corpus format moved
+  to version 4, and a corpus built by an earlier release is refused (`corpus_unavailable`) until
+  you rerun `packages/optivibe-reference/scripts/build_manual_corpus.py` and restart the MCP
+  server.
+- Smaller fixes across the workspace and candidate naming, the MCP server's start-up, the doctor
+  and the reference layer.
 
 ## [0.1.12] — 2026-09-26
 
@@ -97,6 +131,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Initial public release of optivibe-mcp.
 
+[0.1.13]: ../../compare/v0.1.12...v0.1.13
 [0.1.12]: ../../compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/chuang44-tiff/optivibe-mcp/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/chuang44-tiff/optivibe-mcp/compare/v0.1.9...v0.1.10

@@ -43,7 +43,7 @@ DOMAIN_PIN_MODE = ("floor", "exact")
 # ---------------------------------------------------------------------------
 # plane
 # ---------------------------------------------------------------------------
-def classify_plane(present, opens, wired, identity_ok):
+def classify_plane(present, opens, wired, identity_ok, stale_build=None):
     """Grade one reference data plane over ``present x opens x wired x identity_ok``.
 
     ``identity_ok`` is the plane's own *provenance* fact — the pinned identity token read
@@ -55,10 +55,16 @@ def classify_plane(present, opens, wired, identity_ok):
     Returns ``(Status, reason)``.  ``present`` is boolean by construction (it is an
     ``isfile`` result read in a worker); the tri-states carry ``None`` for "the worker
     could not measure this", which is doctor's own failure and therefore UNKNOWN.
+
+    ``stale_build`` (True only when the worker proved the opener refused a corpus whose ONLY
+    defect is the builder version) turns an ``opens is False`` into ``stale_build`` instead
+    of ``corrupt`` -- same verdict, a different cause and a different fix.
     """
     if present is not True:
         return (Status.WARN, "absent_expected")
     if opens is False:
+        if stale_build is True:
+            return (Status.FAIL, "stale_build")
         return (Status.FAIL, "corrupt")
     if opens is not True:
         return (Status.UNKNOWN, "opener_unreadable")
@@ -358,6 +364,7 @@ _REMEDY_FAMILY = {
     ("version", "version_skew"): "reinstall",
     ("plane", "absent_expected"): _VENDOR_DATA,
     ("plane", "unwired"): "unwired",
+    ("plane", "stale_build"): "stale_build",
     ("tool", "plane_absent"): _VENDOR_DATA,
     ("tool", "present_but_unwired"): "unwired",
 }

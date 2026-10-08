@@ -315,14 +315,13 @@ def _add_coordinate_break_impl(session, params, committed, attempted,
     }
     # Validated UNCONDITIONALLY (before the risk is even read) so a
     # caller who spelled the override wrong is told so instead of silently not having
-    # overridden — the reason ``_require_replace_solve`` refuses a non-bool rather than
+    # overridden — the reason ``_require_bool_param`` refuses a non-bool rather than
     # reading it as false. Reused, never re-implemented: ONE definition of what
     # counts as a deliberate destructive opt-in across every door that has one.
-    from .optimize_variable import _require_replace_solve
     # ``solve_audit`` is filled BY the guard, at the point it permits the
     # retype to proceed — see ``_cb_solve_guard.precheck``.
     risk = _solve_loss_precheck(system, lde, surface,
-                                _require_replace_solve(params), "add_coordinate_break",
+                                _lc._require_bool_param(params, "replace_solve", intent="override"), "add_coordinate_break",
                                 solve_audit)
     if risk["refuse"]:
         return risk["envelope"]
@@ -1128,9 +1127,8 @@ def _add_return_cb_impl(session, params, committed, attempted,
         # decision function. This arm retypes in place exactly as ``add_coordinate_break``
         # does, and the probe measured it destroying a radius SurfacePickup on the return
         # surface with ``ok:true`` and ``changed_type:true``.
-        from .optimize_variable import _require_replace_solve
         risk = _solve_loss_precheck(system, lde, return_surface,
-                                    _require_replace_solve(params), "add_return_cb",
+                                    _lc._require_bool_param(params, "replace_solve", intent="override"), "add_return_cb",
                                     solve_audit)
         if risk["refuse"]:
             return risk["envelope"]

@@ -885,8 +885,7 @@ def _validate_fold_params(session, params):
     # THE SAME VALIDATOR THE DOORS USE, not a second reading of what a deliberate
     # override is. A truthy-but-non-bool must refuse identically here and there; two
     # readings of "did the caller opt in" is how one of them starts accepting ``"no"``.
-    from .optimize_variable import _require_replace_solve
-    replace_solve = _require_replace_solve(params)
+    replace_solve = _lc._require_bool_param(params, "replace_solve", intent="override")
 
     return surface, angle, axis, direction, restore_axis, replace_solve
 

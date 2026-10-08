@@ -32,11 +32,16 @@ from .errors import (
     PARTIAL_STATE_ATTR,
     HarnessError,
     SessionChannelDeadError,
+    SessionToolsSlotWedgedError,
     ToolParamError,
     UnknownToolError,
     map_dotnet_exception,
 )
-from .session import CHANNEL_DEAD, CHANNEL_DEAD_CANNOT_NAME_MESSAGE
+from .session import (
+    CHANNEL_DEAD,
+    CHANNEL_DEAD_CANNOT_NAME_MESSAGE,
+    TOOLS_SLOT_WEDGED_CANNOT_NAME_MESSAGE,
+)
 
 
 def _channel_dead_refusal_text(session):
@@ -285,6 +290,183 @@ def _channel_gate(session):
         return None
     # A DEAD observation completed and returned normally.
     return SessionChannelDeadError(_channel_dead_refusal_text(session))
+
+
+# =========================================================================== #
+# The TOOL-SLOT gate (GATE A2).
+# =========================================================================== #
+#: The 13 modules holding the 16 ``Tools.Open*`` / ``Tools.Layouts.Open*`` call sites (14 + 's two 3-D exporters)
+#: (grep + AST; FROZEN -- a census test pins this
+#: set by EQUALITY and the site count at 14, so a fifteenth opener reddens and a human
+#: re-derives the refuse set below).
+_TOOLS_SLOT_MODULES = frozenset({
+    "analysis_raytrace",      # OpenBatchRayTrace
+    "_beam_reach",            # OpenBatchRayTrace
+    "_layout_rays",           # OpenBatchRayTrace
+    "asphere_surface",        # OpenLocalOptimization (the opt.Variables proof)
+    "cb_surface",             # OpenLocalOptimization
+    "grin_surface",           # OpenLocalOptimization
+    "mce_config",             # OpenLocalOptimization
+    "variable_lifecycle",     # OpenLocalOptimization
+    "_optimize_common",       # OpenLocalOptimization + OpenHammerOptimization
+    "scale_lens",             # OpenScale
+    "_tolerance_common",      # OpenTolerancing
+    # OpenQuickFocus in ``_quickfocus_poly``: reached by NO shipped tool (every
+    # ``with_best_focus`` caller passes poly=False and an integer wave) -- counted
+    # because the site exists; see _TOOLS_SLOT_IMPORT_ONLY.
+    "_measurement_common",
+    "_layout_native",         # Layouts.OpenCrossSectionExport (via a local alias)
+})
+
+#: REFUSED at dispatch while the session's tool-slot latch is set -- 26 names: the 22 (the earlier 19:
+#: +``vary``, +``get_first_order``,
+#: +``analyze_strehl``, +``analyze_wavefront``, -``clear_all_variables``) PLUS the
+#: MEASURED delta of the second sink class -- ``apply_lens_spec``, ``load_design``,
+#: ``save_candidate``, ``save_snapshot``: tools that reach an engine FILE call
+#: (``SaveAs`` / ``LoadFile`` / ``New``), which on a wedged engine BLOCKS or kills it
+#: (captures/probe_wedged_save*.json). Derived by the module-resolved TRANSITIVE reach
+#: census (every hop opened at its line) and kept true by
+#: a census test, which re-walks the call graph over BOTH sink
+#: classes and asserts reach(manifest) == TOOLS_SLOT_TOOLS | _TOOLS_SLOT_DEGRADERS by
+#: EQUALITY.
+#: A NAME set, not a ToolSpec field (the IDENTITY_PRESERVING_TOOLS precedent). The gate
+#: cannot see params, so ``set_zoom`` (slot only in array mode), ``set_vignetting`` (slot
+#: only with ``config`` / taper) and ``fold_beam`` (slot only with restore_axis=False, the
+#: default) are refused in EVERY mode while wedged -- owner-RULED accepted.
+TOOLS_SLOT_TOOLS = frozenset({
+    "analyze_strehl", "analyze_wavefront", "fold_beam", "get_first_order", "get_spot",
+    "list_variables", "optimize", "place_element", "ramp_aperture", "render_mtf_vs_field",
+    "scale_lens", "set_asphere_variable", "set_cb_variable", "set_config_variable",
+    "set_grin_variable", "set_vignetting", "set_zoom", "tolerance", "trace_rays", "vary",
+    "verify_beam_path", "verify_collimation",
+    # The file-hazard delta (reach SaveAs / LoadFile, none reaches an opener)
+    "apply_lens_spec", "load_design", "save_candidate", "save_snapshot",
+})
+
+#: NOT refused: the slot use is AUXILIARY and the handler DISCLOSES instead.
+#: ``render_layout`` skips the native export AND the ray read on a latched session
+#: (geometry-only, flagged). It reaches no file-hazard sink (census C5).
+_TOOLS_SLOT_DEGRADERS = frozenset({"render_layout"})
+
+#: The THIRD partition set: tools whose handler module's import
+#: closure reaches a slot module but whose handler reaches NO opener on any call path.
+#: At HEAD every manifest tool's closure reaches a slot module (module granularity is an
+#: over-approximation), so this is the census's 66 NO-REACH tools
+#: less the three file-hazard tools it held (63), each with its one-line reason.
+#: C3 fails CLOSED on a tool in none of the three sets; C5's static reach walker proves
+#: none of these reaches an opener OR a file-hazard sink.
+_TOOLS_SLOT_IMPORT_ONLY = {
+    name: reason
+    for reason, names in (
+        ("analysis_measure: only get_first_order / analyze_strehl / analyze_wavefront call "
+         "_is_collimated_output; this handler reaches no opener",
+         ("analyze_aspheric_profile", "analyze_axial_color", "analyze_distortion",
+          "analyze_grin_profile", "analyze_lateral_color",
+          "analyze_relative_illumination")),
+        ("a read / analysis handler with no call path to an opener",
+         ("capture_graphic", "describe_configurations", "describe_surfaces",
+          "get_mtf", "get_operand", "get_system_info", "list_catalogs",
+          "list_glass_catalog", "read_lens_spec", "read_surface", "surface_count",
+          "verify_zoom")),
+        ("the clearance gate is clearance._impl, a geometry read; promote_best neither "
+         "renders nor traces",
+         ("check_clearance", "promote_best")),
+        ("writes a finding row only; never touches session.system",
+         ("record_findings",)),
+        ("delegates to _optimize_common._clear_all_variables_core (inventory + "
+         "MakeSolveFixed); no opener",
+         ("clear_all_variables",)),
+        ("opens NOTHING: _preflight is a read", ("dry_run",)),
+        ("optimize_variable imports _optimize_common for _count_variables only",
+         ("clear_variable", "set_variable")),
+        ("merit authoring touches the MFE only; _optimize_common._render (:3080) is a "
+         "local string formatter, not analysis_mtf_field._render",
+         ("add_math_constraint", "add_operand", "apply_merit_recipe", "build_merit",
+          "clear_merit", "dump_merit_function", "edit_operand", "load_merit",
+          "remove_operand", "save_merit", "serialize_merit")),
+        ("an LDE / system-data mutator with no call path to an opener",
+         ("clear_solve", "freeze_semidiameters", "insert_surface",
+          "load_catalog", "normalize_stop", "remove_surface", "set_aperture",
+          "set_field", "set_ray_aiming", "set_solve", "set_stop_surface",
+          "set_surface", "set_surface_aperture", "set_wavelength", "substitute_glass")),
+        ("a surface-type author; only its *_variable / fold_beam sibling opens a member",
+         ("add_coordinate_break", "add_return_cb", "set_asphere",
+          "set_diffraction_grating", "set_grin", "set_mirror")),
+        ("MCE: only set_config_variable opens LocalOptimization",
+         ("add_configuration", "remove_configuration", "reset_to_single_config",
+          "set_config_operand", "set_config_value", "set_current_configuration")),
+    )
+    for name in names
+}
+
+
+def _tools_slot_refusal_text(session):
+    """``_channel_dead_refusal_text``'s clone. NEVER raises an ordinary ``Exception``;
+    ALWAYS returns a non-empty str.
+
+    Composition is ``ZemaxSession.tools_slot_wedged_message``'s job; this function
+    SELECTS the module constant ``TOOLS_SLOT_WEDGED_CANNOT_NAME_MESSAGE`` when that
+    composition cannot be used (absent method, a throw, a non-str / blank return). It
+    assembles no prose of its own. An abort (a non-``Exception``) keeps travelling.
+    """
+    try:
+        text = session.tools_slot_wedged_message()
+        if isinstance(text, str) and text.strip():
+            return text
+    except BaseException as exc:  # noqa: BLE001 — a failed build must never serve
+        if not isinstance(exc, Exception):
+            raise
+    return TOOLS_SLOT_WEDGED_CANNOT_NAME_MESSAGE
+
+
+def _wedge_recorded(session):
+    """True iff a WEDGED tool-slot observation is ON RECORD. ``_dead_recorded``'s twin.
+
+        ABSENT      -> "not applicable" -> False (PROCEED -- the bare-double guarantee)
+        UNREADABLE  -> "unknown"        -> True  (REFUSE)
+
+    Consults the public property AND the recorded field; a non-``Exception`` raised by
+    either read RE-RAISES (the abort-travel rule).
+    """
+    unreadable = False
+
+    def _abort_or_unknown(exc):
+        if not isinstance(exc, Exception):
+            raise exc
+        return True  # PRESENT but threw -> unknown
+
+    try:
+        if session.tools_slot_wedged is True:
+            return True
+    except AttributeError:
+        pass  # ABSENT -> not applicable; the field below decides
+    except BaseException as exc:  # noqa: BLE001
+        unreadable = _abort_or_unknown(exc)
+
+    try:
+        if getattr(session, "_tools_slot_wedged", False) is True:
+            return True
+    except BaseException as exc:  # noqa: BLE001
+        unreadable = _abort_or_unknown(exc)
+
+    return unreadable
+
+
+def _tools_slot_gate(session, tool_name):
+    """Return a ``SessionToolsSlotWedgedError`` to RAISE, or ``None`` to proceed.
+
+    Refuses iff ``tool_name`` is in ``TOOLS_SLOT_TOOLS`` AND a wedged observation is on
+    record (``_wedge_recorded``). Never touches the engine. A name OUTSIDE the set is
+    never refused, whatever the latch reads. An abort from the arbiter propagates.
+    """
+    try:
+        if tool_name not in TOOLS_SLOT_TOOLS:
+            return None
+    except Exception:  # noqa: BLE001 — an unhashable name cannot be a slot tool
+        return None
+    if _wedge_recorded(session):
+        return SessionToolsSlotWedgedError(_tools_slot_refusal_text(session))
+    return None
 
 
 def _safe_error_text(exc) -> str:
@@ -644,6 +826,15 @@ class Dispatcher:
                 # the existing ``except`` arm, which envelopes it with the right
                 # family and message — zero envelope-building code here.
                 gate = _channel_gate(self._session)
+                if gate is not None:
+                    raise gate
+
+                # GATE A2: refuse a tool-slot tool on a session whose
+                # slot was OBSERVED wedged -- AFTER GATE A (a dead channel is the wider
+                # fault and wins) and BEFORE any handler, because 12 tools are
+                # ``@_never_raise`` swallowers that would turn an in-handler refusal
+                # into an inner family under an outer ``ok:true``.
+                gate = _tools_slot_gate(self._session, tool_name)
                 if gate is not None:
                     raise gate
 

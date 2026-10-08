@@ -32,6 +32,7 @@ mock-divergence guard — the four REDDEN axes).
 """
 from ..errors import SurfaceWriteError, ToolParamError
 from ..server import ToolSpec
+from . import _lens_common as _lc
 from . import _optimize_common as _oc
 from . import optimize_variable as _var
 from ._analysis_common import error_envelope
@@ -195,7 +196,7 @@ def vary(session, params):
     # malformed CALL: refuse the whole thing, mutate nothing, rather than discover it
     # pair-by-pair after some pairs have already been written.
     try:
-        _var._require_replace_solve(params)
+        _lc._require_bool_param(params, "replace_solve", intent="override")
     except ToolParamError as exc:
         return error_envelope("vary", _FAMILY, str(exc))
 
