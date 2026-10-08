@@ -70,10 +70,12 @@ a per-pass `.zmx` trail.
    - `diverged` — the merit did not improve / an UNSTABLE configuration. Reload your
      Step-1 snapshot if the result is worse, and make a high-level design change
      (different form / starting point) rather than running more cycles.
-   - `optimize_merit_uncomputable` — a corner ray can't trace at full pupil (a
-     wide-field / fast merit). Apply corner vignetting with `set_vignetting`
-     (`from_rays`), then REBUILD the merit with `build_merit` and re-seed from a
-     gentler form before re-running.
+
+   `optimize` can also REFUSE instead of running: `ok=false` with error_family
+   `optimize_merit_uncomputable` and no verdict — a corner ray can't trace at full
+   pupil (a wide-field / fast merit). Apply corner vignetting with `set_vignetting`
+   (`from_rays`), then REBUILD the merit with `build_merit` and re-seed from a
+   gentler form before re-running.
 
 3. **Reality-check every `improved` verdict before you build on it.** A merit function
    is a proxy, and a mis-authored operand can make a destroyed lens score well. After

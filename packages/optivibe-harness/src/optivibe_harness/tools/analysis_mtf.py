@@ -180,8 +180,8 @@ def get_mtf(session, params):
 
     ``series`` (int | None, default None=all) restricts the output to one series
     (field); ``max_frequency`` (number, optional) sets the FFT spatial-frequency
-    grid ceiling via ``IAS_FftMtf.MaximumFrequency`` (default: engine default,
-    typically ~150 cyc/mm). A zero ``NumberOfDataSeries`` returns the
+    grid ceiling via ``IAS_FftMtf.MaximumFrequency`` (default: the engine default,
+    probe-measured at 30 cyc/mm -- ``_MTF_DEFAULT_GRID_MAX``). A zero ``NumberOfDataSeries`` returns the
     ``analysis_empty`` envelope (§d).
 
     SUMMARY MODE (``at_frequencies``, a list of finite numbers >= 0): instead of

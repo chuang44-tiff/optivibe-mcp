@@ -4289,6 +4289,11 @@ def save_candidate(session, params):
             # A picture that passes the magic gate but will not digest has nothing to
             # bind, so nothing publishes: UNKNOWN stays unknown, never proof.
             png_produced_here = bool(_png_is_png and _png_sha_proved is not None)
+            if _png_is_png and _png_sha_proved is None and render_error is None:
+                # A real PNG was rendered but its digest could not be read, so nothing
+                # publishes. Say why, or png_ok:false reads as "nothing was rendered".
+                render_error = ("the rendered figure's digest could not be read, so the "
+                                "picture was not published")
             if png_produced_here:
                 # DISCLOSURE ONLY, AND TRI-STATE. Whether a companion was already
                 # there is REPORTED, never relied on -- and an unreadable answer reads

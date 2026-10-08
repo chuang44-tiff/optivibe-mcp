@@ -29,7 +29,7 @@ install.
 ## Demo
 
 [Does the agent design a better lens when it can see the drawing?](demos/vision-ab/README.md)
-The same lens task, run six times with no human in the loop: every run that used the layout
+The same lens task, run with no human in the loop until each arm had three finished lenses: every run that used the layout
 review produced a shorter lens than every run that worked from numbers alone (70–100 mm
 against 140–221 mm), and every vision lens held an on-axis Strehl ratio of 0.93 or better at
 all four wavelengths.

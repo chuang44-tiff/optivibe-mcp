@@ -21,8 +21,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`render_layout` draws with OpticStudio's own layout by default**, with the surface labels
   placed on it. `renderer="native_3d"` and `renderer="native_shaded"` add 3-D views, and the
   previous self-drawn figure is still available with `renderer="self"`.
-- The layout figure reports which rays it drew (`ray_coverage`), and `save_candidate` stores that
-  with the candidate. When a render is refused, `save_candidate` says why (`render_error`).
+- The layout figure reports which of the rays OptiVibe traces reach the image (`ray_coverage`),
+  and `save_candidate` stores that with the candidate. On the default native drawing these are
+  OptiVibe's own sampled rays, not a reading of the rays OpticStudio drew. When a render is
+  refused, or its picture cannot be published, `save_candidate` says why (`render_error`).
 - A stuck OpticStudio analysis window now makes further analysis calls refuse with a clear error
   instead of hanging.
 - `optimize-loop` and `design-vision-review` skills: with no human to steer, the agent acts on a

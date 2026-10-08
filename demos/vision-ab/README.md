@@ -13,7 +13,8 @@ Three runs per arm is a pattern, not a rate. Read the limits at the end before y
 
 ## The test
 
-One design task, run six times with no human in the loop:
+One design task, run with no human in the loop until each arm had three finished lenses (nine
+attempts in all; see "Failed runs" below):
 
 - **The task.** Start from a 60× dry apochromat and rework it into a **10× / NA 0.45** microscope
   objective with **at least 5 mm working distance**, keeping **14 elements**.
