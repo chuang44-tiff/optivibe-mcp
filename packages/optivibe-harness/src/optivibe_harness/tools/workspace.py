@@ -4294,6 +4294,12 @@ def save_candidate(session, params):
                 # publishes. Say why, or png_ok:false reads as "nothing was rendered".
                 render_error = ("the rendered figure's digest could not be read, so the "
                                 "picture was not published")
+            if (render_res.get("ok") is True and _minted_png is not None
+                    and not _png_is_png and render_error is None):
+                # The renderer said it succeeded, but what is on disk now is not a PNG
+                # (missing, truncated or replaced). Same silent shape as above: say why.
+                render_error = ("the renderer reported success but its figure is not a "
+                                "readable PNG, so the picture was not published")
             if png_produced_here:
                 # DISCLOSURE ONLY, AND TRI-STATE. Whether a companion was already
                 # there is REPORTED, never relied on -- and an unreadable answer reads
