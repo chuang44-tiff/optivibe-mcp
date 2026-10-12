@@ -1373,10 +1373,23 @@ def worker_reap():
         create_time = float(raw_create_time) if raw_create_time else None
     except BaseException:                                          # noqa: BLE001
         create_time = None
+    # ABSENCE and a PARSE FAILURE are different facts. An unset/empty baseline is the
+    # documented "nothing was running before" and reads ``[]`` (the guard is simply
+    # inactive). A baseline that is SET but cannot be read leaves the "was this PID
+    # already running?" guard UNKNOWN -- and an unknown guard must not become an
+    # inactive one, so the reap is REFUSED before ``terminate_tracked``. ``Exception``,
+    # not ``BaseException``: a deliberate abort must travel.
+    # The only producer (``_runner``) writes ``json.dumps(list_of_int_pids)``, so anything else
+    # is unreadable: a JSON STRING "1234" would otherwise iterate into [1, 2, 3, 4] and hide
+    # PID 1234 from the guard. Exact ``list`` of exact ``int`` only.
     try:
-        baseline = [int(item) for item in json.loads(os.environ.get(REAP_BASELINE_ENV) or "[]")]
-    except BaseException:                                          # noqa: BLE001
-        baseline = []
+        baseline = json.loads(os.environ.get(REAP_BASELINE_ENV) or "[]")
+        if type(baseline) is not list or any(type(item) is not int for item in baseline):
+            raise ValueError("baseline is not a JSON list of integer pids")
+    except Exception:                                              # noqa: BLE001
+        emit("engine.reaped", pid=pid, ok=False, gone=None,
+             detail="the pre-start engine baseline could not be read, so no reap was attempted")
+        return
     if pid in baseline:
         # A PID that was already running before doctor started is somebody else's engine.
         # Never a PID doctor did not itself open, and never a name sweep.

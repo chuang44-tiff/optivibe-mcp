@@ -37,7 +37,7 @@ here against the fixture-seeded MUTATING fake optimizer.
 import math
 from contextlib import contextmanager
 
-from .._io import safe_float
+from .._io import is_finite_number, safe_float
 from ..enums import _resolve_enum
 from ..errors import OptimizeError, SurfaceWriteError, ToolParamError
 from ._analysis_common import error_envelope  # noqa: F401 — re-export for the optimize tools
@@ -79,10 +79,9 @@ def _merit_is_uncomputable(merit):
     operands land here; a buildable design's RMS merit never does (probe). DISJOINT from
     ``no_merit``: a NON-number / NON-finite / <=0 merit is NOT "uncomputable" here — the
     existing ``no_merit`` gate owns those (it runs FIRST). Guarded so a NON-NUMBER degrades
-    to ``False`` (never raises an ``Exception`` for a non-number, a ``float`` or an ``int``
-    within float range). An ``int`` BEYOND float range (``10**400``) RAISES
-    ``OverflowError`` from ``math.isfinite`` -- measured; the engine's merit read is a
-    ``float``, and ``_preflight``'s own ``math.isfinite`` meets such an ``int`` first.
+    to ``False`` (never raises an ``Exception`` for a non-number, a ``float`` or an ``int``).
+    An ``int`` BEYOND float range (``10**400``) is not finite and likewise degrades to
+    ``False`` (``is_finite_number`` catches the ``OverflowError`` ``math.isfinite`` raises).
 
     A ``BaseException`` -- a ``KeyboardInterrupt`` / ``SystemExit`` -- TRAVELS, deliberately:
     an abort is not a degraded reading
@@ -104,8 +103,8 @@ def _merit_is_uncomputable(merit):
     # ready->hard-fail this predicate exists to stop. ``isfinite`` is normalized in the
     # SAME expression (round 7's ordering lesson: a lying ``__float__`` returning inf
     # would disqualify a real finite reading before any comparison ran).
-    if not math.isfinite(merit := float.__float__(merit) if isinstance(merit, float)
-                         else int.__index__(merit)):
+    if not is_finite_number(merit := float.__float__(merit) if isinstance(merit, float)
+                            else int.__index__(merit)):
         return False
     return merit >= _MERIT_UNCOMPUTABLE_CEILING
 
@@ -1842,6 +1841,63 @@ def _scan_fault_disclosure(scan_name, stage, exc, *,
     return sentence, record
 
 
+# ONE guard for the operand COUNT, shared by the three scanners that walk the merit
+# (``_scan_negative_weights``, ``_scan_rayfree_merit``, ``_scan_malformed_ranges``) so a
+# fractional count cannot truncate any of them. The rationale below moved here
+# with the guard. It raises; each scanner's own ``except`` turns the raise into its
+# disclosed scan fault.
+def _usable_operand_count(raw_n):
+    # A NON-INTEGRAL COUNT IS A FAULT, NOT A CEILING. ``int(1.9)`` is 1, which would
+    # walk one row of a two-row merit, find no offender, and return
+    # ``scan_completed: True`` -- a TRUNCATED scan wearing a completed scan's
+    # answer, with the offender at row 2 lost and the run allowed to proceed. The
+    # ray-free and range scanners are advisory and once truncated here silently (a
+    # 1.9 count served a fabricated finding); all three now share this one rule.
+    if isinstance(raw_n, bool) or not isinstance(raw_n, (int, float)):
+        raise TypeError("NumberOfOperands is not a number: %r" % (raw_n,))
+    # THROUGH THE BASE SLOT, for the same reason the weight predicate above does it,
+    # and it is here because the first version of this guard did NOT. Testing
+    # ``float(raw_n) != int(raw_n)`` dispatches BOTH conversions to the object, so a
+    # subclass whose ``__float__`` returns 1.0 and ``__int__`` returns 1 approves
+    # itself and restores the very truncation this guard was added to stop --
+    # measured, a two-row merit with a -4.0 at row 2 read
+    # ``offenders=[] scan_completed=True``. ``_preflight`` does not shield it: its
+    # own ``int(...)`` returns 1 too.
+    n_ops = (int.__index__(raw_n) if isinstance(raw_n, int)
+             else float.__float__(raw_n))
+    # NEGATIVE is a fault too, and it is here because "unreachable" was wrong.
+    # A negative count yields ``range(1, 0)`` -- an empty walk reported as a
+    # COMPLETED CLEAN scan. The reasoning that ``_preflight`` refuses ``<= 0``
+    # first is defeated by a count whose two readers DISAGREE: an ``int``
+    # subclass with underlying -1 and ``__int__`` returning 2 shows the
+    # preflight two operands and shows this base-slot read -1.
+    #
+    # ROUND-7 -- THE INTEGRALITY TEST NOW CROSS-CHECKS THE **TWO READERS**,
+    # AND THAT IS THE FIX. It used to compare the ALREADY-NORMALIZED value to
+    # ``int()`` OF ITSELF (``raw_n != int(raw_n)`` after the reassignment above),
+    # which on the int branch is ``x != x`` -- a tautology that can never fire, and
+    # on the float branch only re-checked integrality. So the residual
+    # guard was added to close survived one shape over: an ``int`` SUBCLASS whose
+    # true value is 1 and whose ``__int__`` returns 2. MEASURED, two real rows with
+    # the offender at row 2: ``offenders=[] scan_completed=True fault=None`` -- a
+    # TRUNCATED scan wearing a completed scan's answer, all three guard clauses
+    # passing because 1 is integral and non-negative, while ``_preflight`` reads 2
+    # operands from the SAME object. ``test_wa8`` names that outcome verbatim and
+    # closed it only for a float approving itself; ``test_wa11`` only for a negative.
+    #
+    # The truncation is created BY the base-slot read, so the base-slot read cannot
+    # also be the thing that validates it. ``int(raw_n)`` on the ORIGINAL object is
+    # the SECOND reader -- the one ``_preflight`` uses -- so a disagreement between
+    # the two is now the fault, not a silently-shorter walk. On every honest shape
+    # the two agree and nothing changes (``2``, ``2.0``, an ordinary ``int``
+    # subclass); on float liar (``__float__``->1.0, ``__int__``->1 at a
+    # true 1.9) the base slot reads 1.9 against 1 and it still faults.
+    if n_ops != int(raw_n) or n_ops < 0:
+        raise ValueError("NumberOfOperands is not a usable count: %r"
+                         % (raw_n,))
+    return int(n_ops)
+
+
 def _scan_rayfree_merit(system):
     """WARN str-or-None: a merit with ZERO ray operands AND >= 3 free shape (radius/
     conic) variables -> geometry-collapse risk.
@@ -1880,7 +1936,7 @@ def _scan_rayfree_merit(system):
     try:
         mfe = system.MFE
         stage = _SCAN_STAGE_COUNT
-        n_ops = int(mfe.NumberOfOperands)
+        n_ops = _usable_operand_count(mfe.NumberOfOperands)
         stage = _SCAN_STAGE_ROWS
         for i in range(1, n_ops + 1):
             try:
@@ -1980,56 +2036,7 @@ def _scan_negative_weights(system):
     try:
         mfe = system.MFE
         stage = _SCAN_STAGE_COUNT
-        raw_n = mfe.NumberOfOperands
-        # A NON-INTEGRAL COUNT IS A FAULT, NOT A CEILING. ``int(1.9)`` is 1, which would
-        # walk one row of a two-row merit, find no offender, and return
-        # ``scan_completed: True`` -- a TRUNCATED scan wearing a completed scan's
-        # answer, with the offender at row 2 lost and the run allowed to proceed. The
-        # advisory range scanner shares this idiom and can afford it; this one GATES,
-        # so the same read has a different consequence and gets a different rule.
-        if isinstance(raw_n, bool) or not isinstance(raw_n, (int, float)):
-            raise TypeError("NumberOfOperands is not a number: %r" % (raw_n,))
-        # THROUGH THE BASE SLOT, for the same reason the weight predicate above does it,
-        # and it is here because the first version of this guard did NOT. Testing
-        # ``float(raw_n) != int(raw_n)`` dispatches BOTH conversions to the object, so a
-        # subclass whose ``__float__`` returns 1.0 and ``__int__`` returns 1 approves
-        # itself and restores the very truncation this guard was added to stop --
-        # measured, a two-row merit with a -4.0 at row 2 read
-        # ``offenders=[] scan_completed=True``. ``_preflight`` does not shield it: its
-        # own ``int(...)`` returns 1 too.
-        n_ops = (int.__index__(raw_n) if isinstance(raw_n, int)
-                 else float.__float__(raw_n))
-        # NEGATIVE is a fault too, and it is here because "unreachable" was wrong.
-        # A negative count yields ``range(1, 0)`` -- an empty walk reported as a
-        # COMPLETED CLEAN scan. The reasoning that ``_preflight`` refuses ``<= 0``
-        # first is defeated by a count whose two readers DISAGREE: an ``int``
-        # subclass with underlying -1 and ``__int__`` returning 2 shows the
-        # preflight two operands and shows this base-slot read -1.
-        #
-        # ROUND-7 -- THE INTEGRALITY TEST NOW CROSS-CHECKS THE **TWO READERS**,
-        # AND THAT IS THE FIX. It used to compare the ALREADY-NORMALIZED value to
-        # ``int()`` OF ITSELF (``raw_n != int(raw_n)`` after the reassignment above),
-        # which on the int branch is ``x != x`` -- a tautology that can never fire, and
-        # on the float branch only re-checked integrality. So the residual
-        # guard was added to close survived one shape over: an ``int`` SUBCLASS whose
-        # true value is 1 and whose ``__int__`` returns 2. MEASURED, two real rows with
-        # the offender at row 2: ``offenders=[] scan_completed=True fault=None`` -- a
-        # TRUNCATED scan wearing a completed scan's answer, all three guard clauses
-        # passing because 1 is integral and non-negative, while ``_preflight`` reads 2
-        # operands from the SAME object. ``test_wa8`` names that outcome verbatim and
-        # closed it only for a float approving itself; ``test_wa11`` only for a negative.
-        #
-        # The truncation is created BY the base-slot read, so the base-slot read cannot
-        # also be the thing that validates it. ``int(raw_n)`` on the ORIGINAL object is
-        # the SECOND reader -- the one ``_preflight`` uses -- so a disagreement between
-        # the two is now the fault, not a silently-shorter walk. On every honest shape
-        # the two agree and nothing changes (``2``, ``2.0``, an ordinary ``int``
-        # subclass); on float liar (``__float__``->1.0, ``__int__``->1 at a
-        # true 1.9) the base slot reads 1.9 against 1 and it still faults.
-        if n_ops != int(raw_n) or n_ops < 0:
-            raise ValueError("NumberOfOperands is not a usable count: %r"
-                             % (raw_n,))
-        n_ops = int(n_ops)
+        n_ops = _usable_operand_count(mfe.NumberOfOperands)
     except Exception as exc:  # noqa: BLE001 — fail OPEN, but never silently
         return {
             "offenders": [],
@@ -3723,7 +3730,7 @@ def _scan_malformed_ranges(system, last_surface=_UNSET_LAST_SURFACE):
     try:
         mfe = system.MFE
         stage = _SCAN_STAGE_COUNT
-        n_ops = int(mfe.NumberOfOperands)
+        n_ops = _usable_operand_count(mfe.NumberOfOperands)
         stage = _SCAN_STAGE_ROWS
         if last_surface is _UNSET_LAST_SURFACE:
             last_surface = _resolve_last_surface(system)
@@ -4964,7 +4971,7 @@ def _read_operand_number(op, attr):
     wire = safe_float(raw)
     try:
         f = float(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return wire, None
     return wire, (f if math.isfinite(f) else None)
 
@@ -4973,7 +4980,7 @@ def _finite_or_zero(value):
     """A param value coerced to a finite float, else ``0.0`` (the §2.4 Hx/Hy/Px/Py default)."""
     try:
         f = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.0
     return f if math.isfinite(f) else 0.0
 
@@ -5099,8 +5106,8 @@ def _preflight(system, *, require_free_stop=True):
         # preflight saw a merit at all. The walrus REBINDS ``merit``, so the base-slot
         # truth is what every later consumer reads -- the returned tuple, the envelope,
         # and ``_merit_is_uncomputable`` one gate down.
-        and math.isfinite(merit := float.__float__(merit) if isinstance(merit, float)
-                          else int.__index__(merit))
+        and is_finite_number(merit := float.__float__(merit) if isinstance(merit, float)
+                             else int.__index__(merit))
         and merit > 0
     )
     if not merit_ok:
@@ -5141,11 +5148,13 @@ def _is_nonfinite(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return True
     # ROUND-10a P-1 -- THROUGH THE BASE SLOT. ``math.isfinite`` DISPATCHES ``__float__``
-    # on a ``float`` subclass, so a lying ``__float__`` returning inf could disqualify a
-    # real finite merit and, via ``classify_verdict`` gate 1, bin an honest run
-    # ``diverged``. +0 statements.
-    return not math.isfinite(float.__float__(value) if isinstance(value, float)
-                             else int.__index__(value))
+    # on an ``int`` subclass (measured; on a ``float`` subclass it reads the base value,
+    # while ``float(x)`` does consult the override), so a lying ``__float__`` returning
+    # inf could disqualify a real finite merit and, via ``classify_verdict`` gate 1, bin
+    # an honest run ``diverged``. The shared predicate is handed the normalized value,
+    # so an int beyond float range reads non-finite instead of raising. +0 statements.
+    return not is_finite_number(float.__float__(value) if isinstance(value, float)
+                                else int.__index__(value))
 
 
 def classify_verdict(before, after, *, rel_tol=_VERDICT_REL_TOL, abs_tol=_VERDICT_ABS_TOL):

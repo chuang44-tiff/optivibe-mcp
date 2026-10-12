@@ -336,7 +336,7 @@ _TOOLS_SLOT_MODULES = frozenset({
 TOOLS_SLOT_TOOLS = frozenset({
     "analyze_strehl", "analyze_wavefront", "fold_beam", "get_first_order", "get_spot",
     "list_variables", "optimize", "place_element", "ramp_aperture", "render_mtf_vs_field",
-    "scale_lens", "set_asphere_variable", "set_cb_variable", "set_config_variable",
+    "render_ray_fan", "scale_lens", "set_asphere_variable", "set_cb_variable", "set_config_variable",
     "set_grin_variable", "set_vignetting", "set_zoom", "tolerance", "trace_rays", "vary",
     "verify_beam_path", "verify_collimation",
     # The file-hazard delta (reach SaveAs / LoadFile, none reaches an opener)
@@ -346,7 +346,11 @@ TOOLS_SLOT_TOOLS = frozenset({
 #: NOT refused: the slot use is AUXILIARY and the handler DISCLOSES instead.
 #: ``render_layout`` skips the native export AND the ray read on a latched session
 #: (geometry-only, flagged). It reaches no file-hazard sink (census C5).
-_TOOLS_SLOT_DEGRADERS = frozenset({"render_layout"})
+#: ``check_clearance`` and
+#: ``promote_best`` are ALSO degraders -- on a FOLD they open the batch ray trace; on a latched session
+#: ``check_clearance`` opens nothing and reports every fold pair ``not_measured`` (``ray_trace_unavailable``),
+#: so the keeper gate refuses (fail closed). Unfolded calls open nothing and are unchanged.
+_TOOLS_SLOT_DEGRADERS = frozenset({"render_layout", "check_clearance", "promote_best"})
 
 #: The THIRD partition set: tools whose handler module's import
 #: closure reaches a slot module but whose handler reaches NO opener on any call path.
@@ -368,11 +372,12 @@ _TOOLS_SLOT_IMPORT_ONLY = {
           "get_mtf", "get_operand", "get_system_info", "list_catalogs",
           "list_glass_catalog", "read_lens_spec", "read_surface", "surface_count",
           "verify_zoom")),
-        ("the clearance gate is clearance._impl, a geometry read; promote_best neither "
-         "renders nor traces",
-         ("check_clearance", "promote_best")),
+
         ("writes a finding row only; never touches session.system",
          ("record_findings",)),
+        ("a pure read of the design through an already-open session: it reaches no "
+         "Open* member and no file-hazard sink (census C5)",
+         ("render_field_curvature_distortion",)),
         ("delegates to _optimize_common._clear_all_variables_core (inventory + "
          "MakeSolveFixed); no opener",
          ("clear_all_variables",)),
@@ -623,6 +628,8 @@ _MULTI_SPEC_MODULES = (
     # is workspace's, imported and not copied.
     "optivibe_harness.tools.finding_record",     # record_findings
     "optivibe_harness.tools.analysis_mtf_field",  # render_mtf_vs_field
+    "optivibe_harness.tools.analysis_ray_fan",    # render_ray_fan
+    "optivibe_harness.tools.analysis_field_curv",  # render_field_curvature_distortion
 )
 
 
@@ -705,6 +712,10 @@ IDENTITY_PRESERVING_TOOLS = frozenset({
     # nothing to the design (design read-only) -- the get_mtf /
     # render_layout precedent.
     "render_mtf_vs_field",
+    # ``render_ray_fan`` and ``render_field_curvature_distortion`` write nothing to the
+    # design under the default (they only read; an explicit ``config`` evaluation is
+    # restored afterwards and disclosed) -- the render_mtf_vs_field / get_mtf precedent.
+    "render_ray_fan", "render_field_curvature_distortion",
     # --- workspace reads/saves: they publish the design, they do not change it ----
     "promote_best", "save_candidate", "save_merit", "save_snapshot",
     # ``record_findings`` appends a reviewer's finding row against an ALREADY-SAVED

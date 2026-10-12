@@ -53,6 +53,7 @@ import math
 import os
 from dataclasses import dataclass
 
+from . import _config_common as _cfgc
 from . import _mce_cells as _mc
 
 #: The refusal the exporter returns on a coordinate break (even all-zero), a Tilted
@@ -289,7 +290,7 @@ def export_cross_section(system, out_path, *, W, H, start, end, n_rays, config_c
         # A 1-based index outside 1..N is corrupt by definition: written as it stands,
         # 0 would draw config 1 AND move current to 1 (Q4), and N+1 draws nothing the
         # system has. Refused BEFORE any tool is opened or any value written (R-4).
-        if not 1 <= k <= int(config_count):
+        if not _cfgc.config_in_range(k, config_count):
             return _result(False, "configuration_unreadable",
                            f"the current-configuration read {k} is outside "
                            f"1..{int(config_count)}")
@@ -566,7 +567,7 @@ def export_3d(system, kind, out_path, *, size=EXPORT_3D_SIZE, config_count, star
     except Exception as exc:  # noqa: BLE001 -- never guess the configuration
         return _3d_result(False, "configuration_unreadable",
                           f"the current configuration could not be read: {exc}")
-    if not 1 <= k <= n_cfg:
+    if not _cfgc.config_in_range(k, n_cfg):
         return _3d_result(False, "configuration_unreadable",
                           f"the current-configuration read {k} is outside 1..{n_cfg}")
     # 3. open ------------------------------------------------------------------- #

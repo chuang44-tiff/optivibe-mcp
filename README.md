@@ -26,7 +26,19 @@ The project ships **code only**. No vendor data (glass catalog, manual text, ope
 descriptions) is included — you generate it from your own licensed OpticStudio
 install.
 
-## Demo
+## Demos
+
+[An agent reworks a 60× objective into a 10× / NA 0.45 apochromat, unattended](demos/walk-in-10x/README.md)
+One run with no human in the loop produced a 10× / NA 0.45 objective with a polychromatic Strehl ratio of 0.935 or
+better at all four field points, measured afterwards by a separate script.
+
+[A local model does the same job with OptiVibe's skills and MCP server](demos/local-model-10x/README.md)
+Qwen3.8-Flash-Next on a local server, given a brief tuned for this task, met the same targets with a polychromatic
+Strehl of 0.834 or better at all four field points. The page says where it trails Opus.
+
+[An agent refines a 20× zoom, and the promotion gate holds it back](demos/zoom-20x/README.md)
+One run more than halved the blur at the zoom's worst position, missed its distortion target, and the server refused
+to promote the result over two thin filter plates. The headline figures reproduced on a re-read of the saved file.
 
 [Does the agent design a better lens when it can see the drawing?](demos/vision-ab/README.md)
 The same lens task, run with no human in the loop until each arm had three finished lenses: every run that used the layout
@@ -136,6 +148,7 @@ The repository includes a few Claude Code skills for common tasks:
 | `design-review` | Assess a design against a spec |
 | `design-compare` | Compare designs side by side |
 | `design-vision-review` | Observe a rendered layout and report what lens data does not show (advisory) |
+| `design-aberration-review` | Read the ray fan and field curvature / distortion plots and report how the aberrations are balanced (advisory) |
 | `optimize-loop` | Run optimization with monitoring |
 | `zos-api-debug` | Troubleshoot OpticStudio connection / license errors |
 

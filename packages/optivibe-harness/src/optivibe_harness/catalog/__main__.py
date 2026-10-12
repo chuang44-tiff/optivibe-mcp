@@ -120,7 +120,20 @@ def _column_direction_map():
     for adapter in registry.REGISTRY.values():
         for spec in adapter.columns:
             m[spec.name] = spec.higher_is_better
+    # READ-ONLY legacy aliases: a SAVED catalog CSV / rank template written before
+    # the column renames still ranks the right way round. Direction ONLY -- new catalogs emit
+    # the new names (rms_wfe_axis_waves / strehl_field1), never these.
+    for legacy, current in _LEGACY_COLUMN_ALIASES.items():
+        if current in m and legacy not in m:
+            m[legacy] = m[current]
     return m
+
+
+# old saved-catalog column name -> the registry column that replaced it (direction lookup only).
+_LEGACY_COLUMN_ALIASES = {
+    "rms_wfe_worst_waves": "rms_wfe_axis_waves",
+    "strehl_axis": "strehl_field1",
+}
 
 
 def _default_axes(template):
@@ -958,8 +971,14 @@ def _bench_impl(args):
         return 1
     template = _read_json(args.template)
     if template is None:
-        print(f": template not readable: {args.template}", file=sys.stderr)
-        template = {}
+        # An explicitly supplied but unreadable/unparseable ``--template`` is TERMINAL
+        # The run used to continue on DEFAULT axes and report ``ok: true`` with
+        # no hint the user's template was ignored. Mirrors ``rank``'s refusal (same
+        # reason + wording) and fires BEFORE ``_build_session()`` so no seat is taken.
+        msg = f"template not readable/parseable: {args.template}"
+        print(json.dumps({"ok": False, "reason": "input_unreadable", "errors": [msg]}))
+        print(f": {msg}", file=sys.stderr)
+        return 1
 
     session = _build_session()
     try:
@@ -1041,11 +1060,14 @@ def _bench_impl(args):
                   "artifacts kept for diagnosis.", file=sys.stderr)
         print(json.dumps(summary))
         return rc
-    except Exception as exc:  # noqa: BLE001 — top-level: report + exit 1; finally reaps.
-        print(f": FATAL: {exc!r}", file=sys.stderr)
-        return 1
+
     finally:
         # SINGLE-OWNER reap: idempotent, never-raises, safe if never opened.
+        # An engine-phase exception is NOT caught here: it propagates (after
+        # this reap) to ``_cmd_bench``'s outer net, which prints the structured
+        # ``{"ok": false, "reason": "internal", ...}`` stdout envelope AND the single
+        # ``: FATAL:`` stderr line -- the inner handler used to print only
+        # the stderr line and return 1 with no stdout envelope.
         session.close()
 
 

@@ -33,6 +33,7 @@ from ..enums import _resolve_enum
 from ..errors import OptimizeError, ToolParamError
 from ..server import ToolSpec
 from . import _config_common as _ccfg
+from . import _fold_gaps as _fg
 from . import _grin_index_common as _gic  # GRIN — cycle-safe (never imports optimize_run)
 from . import _optimize_common as _oc
 from . import _workspace_paths as _wsp  # S-1 — cycle-safe (never imports optimize_run)
@@ -1933,16 +1934,18 @@ def _improvement_pct(before, after):
 def _finite(value):
     """True if ``value`` is a finite real number (not bool/non-number/non-finite).
 
-    ROUND-10a P-1 -- the ``isfinite`` READ goes THROUGH THE BASE SLOT, for the reason
-    ``_finite_below``'s docstring already records: ``math.isfinite`` DISPATCHES
-    ``__float__`` on a ``float`` subclass, so a lying ``__float__`` returning inf
-    disqualifies a real finite reading. +0 statements.
+    ROUND-10a P-1 -- the finiteness READ goes THROUGH THE BASE SLOT, for the reason
+    ``_finite_below``'s docstring records: ``math.isfinite`` DISPATCHES ``__float__`` on an
+    ``int`` SUBCLASS (measured; it does NOT on a ``float`` subclass), so a lying
+    ``__float__`` returning inf would disqualify a real finite reading. The base-slot
+    value is handed to ``is_finite_number``, which also degrades an ``int`` too large for
+    a ``float`` (``10**400``) to ``False`` instead of raising. +0 statements.
     """
     return (
         isinstance(value, (int, float))
         and not isinstance(value, bool)
-        and math.isfinite(float.__float__(value) if isinstance(value, float)
-                          else int.__index__(value))
+        and is_finite_number(float.__float__(value) if isinstance(value, float)
+                             else int.__index__(value))
     )
 
 
@@ -2233,10 +2236,15 @@ _STATUS_NOT_AUDITED = "not_audited"
 # part of the geometry went unexamined.
 _NOT_AUDITED_MSG = {
     "folded_system": (
-        "the per-gap clearance audit did NOT run over this design: the system is folded "
-        "(a coordinate-break or mirror is present) and the audit is unfolded-only. No "
-        "absence of a gap finding is meaningful here — inspect the layout and run "
-        "verify_beam_path / check_clearance by hand."
+        "the folded-gap audit did NOT run over this design (fold_audit missing or "
+        "malformed). No absence of a gap finding is meaningful here — run check_clearance "
+        "by hand."
+    ),
+    "folded_gap_not_measured": (
+        "at least one adjacent gap of this folded system, in the current configuration, could "
+        "not be measured; no absence of a finding for that gap is meaningful — read "
+        "check_clearance's fold_audit.not_measured for each gap's reason token (this audit "
+        "certifies the current configuration only)."
     ),
     "clearance_refused": (
         "the per-gap clearance audit did NOT run over this design: check_clearance "
@@ -2265,7 +2273,8 @@ _NOT_AUDITED_FALLBACK = (
 
 # The SHORT obstruction clause used inside the bounded ``warning`` summary.
 _OBSTRUCTION_CLAUSE = {
-    "folded_system": "the system is folded; the audit is unfolded-only",
+    "folded_system": "the fold audit did not run",
+    "folded_gap_not_measured": "a folded gap could not be measured (current configuration)",
     "clearance_refused": "the clearance audit refused / returned a degraded envelope",
     "audit_failed": "the clearance audit threw",
     "no_gaps_audited": (
@@ -2835,6 +2844,9 @@ def _edge_audit_warnings(session, glass_floor, air_floor,
                 and isinstance(gnext, dict)
                 and _oc._base_token(g.get("kind")) == "glass"  # base slot
                 and _oc._base_token(gnext.get("kind")) == "glass"  # base slot
+                and (not env.get("folded")                             # unfolded output unchanged
+                     or g.get("next_surface") == gnext.get("surface"))  # ADV-4: contiguous, not list-adjacent
+                and not g.get("ends_at_mirror")
                 and _finite_below(g.get("center_thickness"), g.get("threshold"))
             ):
                 buried.append(g)
@@ -2999,6 +3011,21 @@ def _edge_audit_warnings(session, glass_floor, air_floor,
                     entry.update(measured)
                     nonphysical.append(entry)
 
+        # --- fold-only additive arms (a fold back airgap / a traced ray crossing). ---
+        if env.get("folded"):
+            for g in gaps:
+                if isinstance(g, dict) and g.get("is_back_airgap") and _finite_below(
+                        g.get("center_thickness"), 0.0):
+                    nonphysical.append({
+                        "kind": "bfl_negative", "basis": "fold_back_airgap",
+                        "surface": g.get("surface"), "next_surface": g.get("next_surface"),
+                        "center_thickness": g.get("center_thickness")})
+        for g in gaps:
+            if isinstance(g, dict) and _finite_below(g.get("min_ray_gap"), 0.0):
+                nonphysical.append({
+                    "kind": "ray_crossing", "surface": g.get("surface"),
+                    "next_surface": g.get("next_surface"), "min_ray_gap": g.get("min_ray_gap")})
+
         # --- negative_bfl_warning: image plane in FRONT of the last optical surface ---
         bfd = env.get("global_bfd")
         if not isinstance(bfd, dict):
@@ -3050,7 +3077,14 @@ def _edge_audit_warnings(session, glass_floor, air_floor,
         #     positive coverage oracle is tracked separately as a follow-up. ---
         raw_gaps = env.get("gaps")
         if env.get("folded"):
-            reason = "folded_system"                                       # (a), H-1
+            complete, why = _fg.fold_coverage_complete(env)   # the SAME body workspace calls
+            if complete:
+                reason = None
+            elif why == "not_run":
+                reason = "folded_system"                      # narrowed: the audit did not run
+            else:
+                reason = "folded_gap_not_measured"
+            # ZERO-GAP FOLD POLICY: the _too_small_for_gaps exemption is NOT extended to folds.
         elif not (isinstance(raw_gaps, list) and raw_gaps) and not _too_small_for_gaps(bfd):
             reason = "no_gaps_audited"                                     # (b), vacuity M-1
         else:
@@ -3298,6 +3332,8 @@ def _summary_for(status, ga):
         keys = []
         for entry in entries:
             key = _KIND_LEGACY_KEY.get(_safe_get(entry, "kind"))
+            if _safe_get(entry, "basis") == "fold_back_airgap":
+                key = None          # carries no behind_last_optic: negative_bfl_warning may be absent
             if key and key not in keys:
                 keys.append(key)
         if keys:
@@ -3419,9 +3455,19 @@ def _finding_phrase(entry):
             f"({label} {_mm(measured)} mm)"
         )
     if kind == "bfl_negative":
+        if _safe_get(entry, "behind_last_optic") is None and _safe_get(entry, "basis") == "fold_back_airgap":
+            return (
+                f"negative back focal distance (fold back airgap S{surface}->S{next_surface} "
+                f"centre {_mm(_safe_get(entry, 'center_thickness'))} mm)"
+            )
         return (
             "negative back focal distance "
             f"({_mm(_safe_get(entry, 'behind_last_optic'))} mm)"
+        )
+    if kind == "ray_crossing":
+        return (
+            f"traced ray crossing S{surface}->S{next_surface} "
+            f"(min ray gap {_mm(_safe_get(entry, 'min_ray_gap'))} mm)"
         )
     return f"a nonphysical finding ({kind})"
 
@@ -4019,14 +4065,15 @@ OPTIMIZE_SPEC = ToolSpec(
         "merit FELL; stable means it did NOT move outside tolerance (an exact no-op or a "
         "sub-tolerance drift) — and BOTH now additionally mean the geometry audit "
         "returned NO confirmed nonphysical finding. A *_unphysical suffix means a "
-        "confirmed physically-impossible measurement — exactly three: a negative interior "
-        "air-gap CENTRE, a negative glass edge or centre, and a negative back focal "
-        "distance. A negative interior air-gap EDGE is deliberately NOT among them (it "
+        "confirmed physically-impossible measurement — exactly four: a negative interior "
+        "air-gap CENTRE, a negative glass edge or centre, a negative back focal "
+        "distance, and — on a FOLDED system only — a traced ray whose next-surface hit "
+        "lies behind its current hit (ray_crossing). A negative interior air-gap EDGE is deliberately NOT among them (it "
         "cannot be told from a zero-thickness dummy/reference plane at this "
         "layer), so a *_unphysical verdict is not a complete physicality "
         "check. A *_unverified "
         "suffix means the audit did not establish anything — either it provably did not "
-        "run (folded system / refused / threw / returned no gaps) or its result could not "
+        "run (fold audit did not run / an unmeasured folded gap / refused / threw / returned no gaps) or its result could not "
         "be READ (reason 'qualifier_failed'); read geometry_audit.reason to tell which. "
         "merit_verdict "
         "always carries the RAW merit answer, and geometry_audit carries the evidence "
@@ -4079,6 +4126,12 @@ OPTIMIZE_SPEC = ToolSpec(
         "low merit can hide a bad position -- read PER-CONFIG performance with the "
         "config=\"all\" graders (get_first_order, analyze_strehl, analyze_wavefront, "
         "check_clearance) rather than accepting the scalar as proof. "
+        "WALK IN a demanding spec (the optimize-loop skill, 'Walk in a hard target'): easier spec first, then "
+        "move the hard spec in by re-weighting, with every stated field and every authored geometric bound kept "
+        "at non-zero weight; per-field polychromatic RWCE rows drive (ring 6, wave 0) and STRH never drives and "
+        "no STRH row is present during a walk-in optimize (Strehl is read from a weight-0 row removed before the "
+        "run); each call bounded by cycles x max_passes sized from wall_time_s; a stage review at every stage; a "
+        "stage that cannot be reached is the reported limit -- never a jump to the full target. "
         "See dry_run, normalize_stop, build_merit, save_candidate."
     ),
 )

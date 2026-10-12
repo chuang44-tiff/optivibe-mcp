@@ -238,7 +238,7 @@ def _readback_ok(intended, actual):
     try:
         f_intended = float(intended)
         f_actual = float(actual)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
 
     if math.isnan(f_intended) or math.isnan(f_actual):

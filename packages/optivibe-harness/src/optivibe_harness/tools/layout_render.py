@@ -34,7 +34,7 @@ from time import perf_counter
 from .. import artifact_naming as _naming
 from ..artifact_sink import _ILLEGAL_CHARS as _ILLEGAL_STEM_CHARS
 from ..artifact_sink import _safe_name
-from ..errors import ToolParamError
+from ..errors import SessionClosedError, ToolParamError, map_dotnet_exception
 from . import _workspace_paths as _wsp  # S-1 — cycle-safe (never imports layout_render)
 from ..server import ToolSpec
 from ..server import _wedge_recorded as _slot_wedged
@@ -386,6 +386,14 @@ def _read_config_identity(system):
         active = int(mce.CurrentConfiguration)
     except Exception:  # noqa: BLE001
         active = None
+    # A read outside 1..N is corrupt by
+    # definition (the native R-4 check refuses it through the SAME shared predicate), so the
+    # figure must neither caption it as the configuration drawn nor echo it: it reads as
+    # UNMEASURED (`_S_CFG_UNK`). Disclose, never refuse -- a refusal would turn a
+    # recoverable picture into none. Only when the count was read: an unreadable count is
+    # already disclosed as unmeasured and its `active` is left as read.
+    if count is not None and active is not None and not _cfg.config_in_range(active, count):
+        active = None
     return ConfigIdentity(active=active, count=count)
 
 
@@ -613,7 +621,9 @@ def _is_suppressed_scaffold(rows, i, n):
     NOT the object (``i == 0``). Everything else is KEPT — glass surfaces, mirrors, CURVED
     (finite-radius) air surfaces (real lens back-faces, e.g. surf 2 R=-200 / surf 9 R=-120),
     the stop (even a flat-air ``normalize_stop`` dummy — the ``is_stop`` exemption keeps it),
-    and the image.
+    and the image. **Also kept: a flat air face whose PRECEDING row is readable glass**
+    (not air, not a mirror) — that is the EXIT FACE of a glass body (a filter plate, a plano
+    lens's flat back), a real optical surface, not a spacer.
 
     Rationale: a flat powerless air surface carries no optics — it is fold/spacer scaffolding
     (a CB-coincident surface, a flat air spacer). A curved air surface is a real lens back-face
@@ -642,6 +652,18 @@ def _is_suppressed_scaffold(rows, i, n):
         return False
     if r.get("is_stop", False):
         return False
+    # The flat air face
+    # right behind a READABLE glass body is that body's EXIT FACE -- a real optical
+    # surface the beam leaves through (a filter plate, a plano lens's flat back), never a
+    # spacer. There is NO thickness clause on purpose: a glass body is a glass body. An
+    # unreadable preceding row does not qualify (it stays owned by the `degraded`
+    # channel), a MIRROR does not (the face behind a reflector is a fold spacer), and a
+    # coordinate break reads air-like ('-'), so it stays covered by the air test.
+    prev = rows[i - 1]
+    if (not prev.get("unreadable", False)
+            and not _geom._is_air_material(prev.get("material", ""))
+            and not _geom._is_mirror(prev.get("material", ""))):
+        return False
     return _geom._is_air_material(r.get("material", "")) and not math.isfinite(
         r.get("radius", float("nan"))
     )
@@ -669,8 +691,13 @@ def _scratch_layout_index(name):
     return int(match.group(1)) if match else None
 
 
-def _resolve_path(session, path, exact_path=None):
+def _resolve_path(session, path, exact_path=None, rstate=None):
     """Resolve the output PNG path. Returns ``(path, minted, error)``.
+
+    ``rstate`` is an ALREADY-READ
+    ``_wsp.root_state`` the caller threads in, so the minted directory and the caller's
+    own ``workspace_root`` disclosure come from ONE resolution; omitted, the root is read
+    here as before. The three-tuple return is unchanged.
 
     Three cases:
 
@@ -713,9 +740,14 @@ def _resolve_path(session, path, exact_path=None):
     # (the documented last resort); where the resolver RAISED, the root is UNKNOWN and
     # a fixed name would silently overwrite the previous figure -- so this refuses,
     # through the same channel an unlistable directory already uses.
-    scratch, scratch_fault = _wsp.scratch_dir_state(session)
+    scratch, scratch_fault = _wsp.scratch_dir_from_root_state(
+        rstate if rstate is not None else _wsp.root_state(session))
     if scratch_fault is not None:
         return None, False, scratch_fault
+    # UNREACHABLE under any session whose resolver answers: `_resolve_root` tier 4 ALWAYS
+    # returns `<cwd>/projects`, which is truthy, and a resolver that RAISES refuses above
+    # (`workspace_unlistable`). Kept as the documented last resort; pinned by
+    # a test (the no-root asymmetry is DECIDED, not open).
     if not scratch:
         return "layout.png", False, None
     index = _naming.next_index_in_dir(scratch, _scratch_layout_index)
@@ -819,7 +851,12 @@ _NATIVE_EXPLICIT_FAMILY = {
 #: The SELF-only envelope keys, removed from a native envelope (the vendor drew
 #: the ink these describe, so under native they would describe nothing).
 _NATIVE_INK_KEYS = ("element_outline", "asphere_sag_modelled", "asphere_sag_approximate",
-                    "rim_truncated", "n_rays_drawn", "effective_draw_rays", "n_fields")
+                    "rim_truncated", "n_rays_drawn", "effective_draw_rays", "n_fields",
+                    # The interfaces the SELF renderer could not draw.
+                    # Popped on native/3-D: the vendor drew every interface and this
+                    # renderer never audited them for omissions, so an `[]` there would
+                    # read as "nothing omitted" about ink it did not audit.
+                    "interfaces_omitted")
 # --- the native overlay canvas -- all [unmeasured choice] unless tagged ---- #
 _STAMP_ARM_PX = 36        # clears the 5 % margin at H>=400
 _GUTTER_STAMP_PX = 170    # arm 36 + _STAMP_TIER_MAX x ~16 px + a rider box
@@ -4519,6 +4556,37 @@ def _draw_native_overlay(plt, np, outcome, *, rows, n, title, stop_index, apertu
     return fig, sorted(surface_labels), stop_label, 0, list(placed)
 
 
+def _file_signature(path):
+    """``(size, mtime_ns)`` of an existing regular file, else ``None``. Never raises."""
+    try:
+        if not os.path.isfile(path):
+            return None
+        st = os.stat(path)
+        return (st.st_size, st.st_mtime_ns)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _stale_candidate(params, exact_path):
+    """``(resolved_path, signature)`` of a caller-supplied ``path`` that ALREADY exists,
+    snapshotted BEFORE the render runs; else ``None``. Never raises.
+
+    Only an explicit ``path`` can leave a stale picture behind: a minted scratch name is
+    never reused, and ``exact_path`` is a seq-unique name the INTERNAL caller owns.
+    """
+    try:
+        if exact_path or not isinstance(params, dict):
+            return None
+        path = params.get("path")
+        if type(path) is not str or not path:
+            return None
+        resolved = _resolve_path(None, path)[0]
+        sig = _file_signature(resolved)
+        return None if sig is None else (resolved, sig)
+    except Exception:  # noqa: BLE001 — a disclosure must never sink the render
+        return None
+
+
 def render_layout(session, params, *, exact_path=None):
     """Render a meridional layout PNG from surface geometry. NEVER raises.
 
@@ -4538,8 +4606,9 @@ def render_layout(session, params, *, exact_path=None):
     before anything is drawn or written.
 
     Coordinate-break AND flat powerless air dummy/spacer surfaces are SUPPRESSED
-    (scaffolding — frame operators / spacers, not surfaces the beam lands on) — only real
-    optics (glass, mirrors, curved lens-backs), the stop, and the image are stamped. The
+    (scaffolding — frame operators / spacers) — only real optics (glass, mirrors, curved
+    lens-backs, and the flat exit face of a glass body such as a filter plate or a plano
+    lens's back), the stop, and the image are stamped. The
     suppressed CB indices are disclosed in ``cb_suppressed`` (back-compat); the FULL
     suppressed set (CBs + flat-air dummies) is ``scaffold_suppressed``; both are noted.
 
@@ -4548,7 +4617,25 @@ def render_layout(session, params, *, exact_path=None):
     stamps ``[config k]``, and ``config_evaluated`` is echoed. ``"all"`` is NOT offered
     (no per-config figure set — the render-obscured-slow lock); a bad ``config`` ->
     ``render_failed``.
+
+    A refusal (``ok:false``) over a
+    caller-supplied ``path`` that already held a file leaves THAT file untouched, so the
+    envelope's ``path: null`` is honest while a picture of an OLDER state sits at the
+    requested name. The envelope therefore gains ``stale_artifact_at`` (the resolved path)
+    -- present ONLY then, and only when the file still has the (size, mtime_ns) it had
+    before this call, so a refusal AFTER this call replaced the file never claims it is
+    stale. No file is deleted.
     """
+    stale = _stale_candidate(params, exact_path)
+    out = _render_layout_impl(session, params, exact_path=exact_path)
+    if (stale is not None and isinstance(out, dict) and out.get("ok") is False
+            and _file_signature(stale[0]) == stale[1]):
+        out["stale_artifact_at"] = stale[0]
+    return out
+
+
+def _render_layout_impl(session, params, *, exact_path=None):
+    """The ``render_layout`` handler body; see ``render_layout`` for the contract."""
     if not isinstance(params, dict):  # never-raise: None OR a truthy non-dict (§0.8, L26)
         params = {}
     # element_outline: validated HERE, before ANY engine touch or
@@ -4609,7 +4696,8 @@ def render_layout(session, params, *, exact_path=None):
         if isinstance(result, dict) and result.get("ok"):
             try:
                 result.setdefault(
-                    "config_evaluated", _cfg.safe_current_configuration(session.system)
+                    "config_evaluated",
+                    _echo_config_evaluated(session.system, result.get("configuration_count")),
                 )
             except Exception:  # noqa: BLE001 — disclosure only, never fail the render
                 pass
@@ -4629,6 +4717,24 @@ def render_layout(session, params, *, exact_path=None):
         return result
     except Exception as exc:  # noqa: BLE001 — render never raises into dispatch
         return _fail("render_failed", f"{type(exc).__name__}: {exc}")
+
+
+def _echo_config_evaluated(system, count):
+    """The ``config_evaluated`` echo for a render drawn at the ACTIVE configuration.
+
+    The STRICT read is validated against the read-back count through the shared
+    ``config_in_range``; a value outside ``1..N`` is ``None`` ("not measured"), exactly as
+    the figure captions it -- never the raw 5 of 3, and never the 0 the safe read would
+    clamp to 1. A strict-read FAULT, or an unreadable count, keeps the safe read (a fault
+    is not this input class and was never validated).
+    """
+    try:
+        current = int(_native.strict_current_configuration(system))
+    except Exception:  # noqa: BLE001 — a fault keeps the guarded read
+        return _cfg.safe_current_configuration(system)
+    if type(count) is int and not _cfg.config_in_range(current, count):
+        return None
+    return _cfg.safe_current_configuration(system)
 
 
 def _resolve_render_config(system, config):
@@ -4670,8 +4776,14 @@ def _render_layout_at(session, params, *, exact_path=None):
         # REFUSES and writes nothing — and it refuses before it has cost a geometry
         # read, a batch trace or a matplotlib import. A refusal cannot clobber an
         # existing figure, which is why there is no reservation and no cleanup path.
+        # The workspace root is read ONCE per call. Both consumers -- the minted
+        # scratch directory just below and the `workspace_root` disclosure on the success
+        # envelope -- are derived from this one reading, so a resolver that answers
+        # differently on its second read can no longer make the envelope name a root the
+        # file was not written under.
+        root_st = _wsp.root_state(session)
         attempted, minted, mint_err = _resolve_path(
-            session, params.get("path"), exact_path=exact_path)
+            session, params.get("path"), exact_path=exact_path, rstate=root_st)
         if mint_err is not None:
             return _fail("workspace_unlistable", mint_err)
 
@@ -4702,8 +4814,21 @@ def _render_layout_at(session, params, *, exact_path=None):
             lde = session.system.LDE
             n = int(lde.NumberOfSurfaces)
         except Exception as exc:  # noqa: BLE001 — unreadable count -> refuse, never draw
+            # A TRANSPORT loss is `render_failed`, the family the
+            # config resolve above already serves for the same fault, so one poisoned
+            # channel no longer lands in two families depending on which access threw.
+            # Typed by the mapped exception TYPE, never by message text (the IPC message
+            # changes between calls); everything else keeps the retry-promising family.
+            # The harness's OWN SessionClosedError (a closed ZemaxSession's `system`) is not
+            # a `System.*` exception, so `map_dotnet_exception` returns None for it: take it
+            # as already typed.
+            mapped = (exc if isinstance(exc, SessionClosedError)
+                      else map_dotnet_exception(exc))
+            fam = ("render_failed"
+                   if isinstance(mapped, SessionClosedError)
+                   else "render_unavailable")
             return _fail(
-                "render_unavailable",
+                fam,
                 f"surface count unreadable: {type(exc).__name__}: {exc}",
             )
 
@@ -5147,10 +5272,20 @@ def _render_layout_at(session, params, *, exact_path=None):
         # emitted on EITHER path (folded or unfolded) whenever anything was dropped. An
         # all-refractive system suppresses nothing -> no note (no regression).
         if scaffold_suppressed:
+            # The parenthesis names only the categories actually PRESENT (a design with
+            # no coordinate break must not say "coordinate breaks"). The old clause "not
+            # surfaces the beam lands on" is dropped: it was the false half of this note
+            # on a glass body's exit face.
+            kinds = []
+            # Keyed on the SUPPRESSED set, not `cb_suppressed`: that list also names a CB at
+            # the image row, which is never in `scaffold_suppressed`.
+            if any(i in cb_suppressed for i in scaffold_suppressed):
+                kinds.append("coordinate breaks (frame operators)")
+            if any(i not in cb_suppressed for i in scaffold_suppressed):
+                kinds.append("flat powerless air dummies (spacers)")
             notes.append(
                 f"non-optical surfaces {scaffold_suppressed} suppressed from the figure "
-                "(coordinate breaks + flat powerless air dummies — frame operators / "
-                "spacers, not surfaces the beam lands on)"
+                f"({' + '.join(kinds)})"
             )
         if asphere_sag_modelled and renderer_used == "self":
             notes.append(
@@ -5310,7 +5445,7 @@ def _render_layout_at(session, params, *, exact_path=None):
             # SCRATCH — the REVIEWABLE figure is the one save_candidate(render=true)
             # writes beside its .zmx.
             "minted": minted,
-            "workspace_root": _wsp.workspace_root(session),
+            "workspace_root": root_st[0],
             "size_bytes": size,
             "surface_labels": surface_labels,
             "stop_label": stop_label,
@@ -5378,6 +5513,10 @@ def _render_layout_at(session, params, *, exact_path=None):
                 _layout_meta.get("profile_not_measured", [])),
             "coverage_reasons": coverage_reasons,
             "rim_truncated": rim_truncated,
+            # The internal interfaces this figure could NOT draw -- the
+            # complete, ordered list, always present on a SELF envelope (may be `[]`),
+            # popped on native/3-D (`_NATIVE_INK_KEYS`).
+            "interfaces_omitted": list(_layout_meta.get("interfaces_omitted", [])),
             "out_of_plane": projection.out_of_plane,
             "out_of_plane_surfaces": list(projection.out_of_plane_surfaces),
             "projection_unreadable_surfaces": list(
@@ -5463,12 +5602,12 @@ def _render_layout_at(session, params, *, exact_path=None):
                 pass
 
 
-#: The served description's HARD CAP (native-layout-retool): 5,416 chars MEASURED
-#: (`len(RENDER_LAYOUT_SPEC.description)`) + 1,000 [unmeasured
-#: choice: room for the four call-changing native facts an agent must read at
-#: tool-selection time]. Pinned by a test so a later edit cannot exceed it silently;
-#: slimming is.
-_DESCRIPTION_CHAR_CAP = 6_416
+#: The served description's HARD CAP: 3,022 chars MEASURED (
+#: `len(RENDER_LAYOUT_SPEC.description)`) + 20 [unmeasured choice: a small margin for the
+#: cap rows; test_ray_coverage separately pins the exact length as its own tripwire]. It was 6,416 before the slimming rewrite
+#: (6,404 measured). A later audit fix then took the description to 3,024 (still under
+#: the cap). Pinned by a test so a later edit cannot exceed it silently.
+_DESCRIPTION_CHAR_CAP = 3_042
 
 
 RENDER_LAYOUT_SPEC = ToolSpec(
@@ -5485,102 +5624,49 @@ RENDER_LAYOUT_SPEC = ToolSpec(
                  # prose-not-enum rule -- see `_resolve_renderer`.
                  "renderer": "string"},
     description=(
-        "With no path the figure goes to candidates/scratch/ as a numbered scratch "
-        "file (minted:true) and never overwrites an earlier one; if that directory "
-        "cannot be listed the call REFUSES (workspace_unlistable) and writes nothing, "
-        "because a name it cannot prove is free could destroy an existing figure. A "
-        "REVIEWABLE figure is the one save_candidate(render=true) writes beside its "
-        ".zmx. "
+        "Draws the lens layout PNG: a SCRATCH drawing, NOT the reviewable figure "
+        "(record_findings refuses it as finding_figure_unbound); review ITS paired PNG "
+        "from save_candidate, the one png_sha256 binds. No path: a new numbered scratch "
+        "file each call (minted:true). "
         "renderer picks who draws the picture: 'native' (OpticStudio's own "
         "cross-section, axial systems only; it cannot draw any coordinate break, even "
-        "all-zero) or 'self' (OptiVibe's drawing, below), or the UNSTAMPED "
-        "'native_3d' / 'native_shaded' views (one configuration each, rays optional, "
-        "the same far-object exclusion, folds included). Omit it for the default; "
-        "every successful result names the renderer that drew the bytes (renderer) "
-        "and, if the default could not use its first choice, why (renderer_fallback). "
-        "An explicit renderer that cannot run is refused, never swapped. Both "
-        "cross-sections stamp "
-        "OUR surface numbers; native stamps are registered to the prescription and "
-        "ink-verified (registration), and an explicit native whose check failed is "
-        "UNSTAMPED (stamps_withheld). A very distant object or image plane is left "
-        "out by BOTH and named in far_object_excluded, with a marker at the frame "
-        "edge; for self, on a folded system that rule is computed and disclosed in "
-        "flags but not applied. "
-        "The self renderer draws a real meridional (y-z) optical layout PNG for the "
-        "user, in an "
-        "ISO 10110-inspired visual style (a LOOK borrowed from optical drawing "
+        "all-zero) or 'self', or the UNSTAMPED 'native_3d' / 'native_shaded' views (one "
+        "configuration each, rays optional, the same far-object exclusion, folds "
+        "included). Omit it for the default; every successful result names the renderer "
+        "that drew the bytes (renderer) and, if the default fell back, why "
+        "(renderer_fallback). An explicit renderer that cannot run is refused, never "
+        "swapped. Gotcha: the surface-number stamps are OptiVibe's on every cross-section "
+        "renderer; native stamps are ink-verified (registration), and a failed check "
+        "leaves an explicit native UNSTAMPED (stamps_withheld). A very distant object or image plane is left out by BOTH and "
+        "named in far_object_excluded, with a marker at the frame edge; for self, on a "
+        "folded system that rule is computed and disclosed in flags but not applied. "
+        "The self renderer draws a real meridional (y-z) optical layout PNG in an ISO "
+        "10110-inspired visual style (a LOOK borrowed from optical drawing "
         "practice — this is NOT a standards drawing and nothing here is a "
-        "conformance claim): equal-aspect (true curvature), cement-aware closed "
-        "element outlines with a FLAT rim, two line weights, a patterned optical "
-        "axis + image plane, a STOP marker, OUR stamped surface numbers. "
-        "element_outline (self renderer only; giving it "
-        "selects self) selects the element-outline convention and takes exactly one of two values: 'per_element' (the "
-        "default) or 'grouped'; any other value — including a differently-cased or "
-        "space-separated spelling — is REFUSED before anything is drawn or "
-        "written, and the effective value is echoed back as element_outline on "
-        "every successful result. Under 'per_element' each ELEMENT of a cemented "
-        "run is closed as its own body out to its own rim, and the shared cemented "
-        "surface is a cap of the two bodies that meet there. Under 'grouped' the "
-        "whole cemented run is closed as ONE body out to the group's rim, so a "
-        "cemented internal interface is drawn flat out to that rim. Both are "
-        "drawing conventions over incomplete part-boundary data and neither is a "
-        "measurement of a part boundary. Under EITHER, a surface shorter than the "
-        "rim of the body that carries it is drawn flat past its own measured clear "
-        "semi-diameter, and that band is SYNTHETIC — a drawing convention, not a "
-        "measurement — and is disclosed rather than drawn silently: the figure "
-        "carries one aggregated line naming every affected cemented join, and "
-        "interfaces_extended carries a per-surface own_semi/drawn_to/synthetic_mm "
-        "band width for the cemented joins among them (present only when some "
-        "interface was extended, and always complete even when the figure's own "
-        "line did not fit on the canvas). Under 'per_element' a cemented run is "
-        "split into its elements only where every consecutive pair has at least "
-        "one MEASURED aperture; a run where some pair has none is drawn as ONE "
-        "body instead, because a rim for that pair could only come from heights "
-        "nobody measured — and that exception is never silent: the figure says so, "
-        "and groups_not_split lists those runs with the pairs that blocked them "
-        "(present only when it happened). And — unless draw_rays=False — the chief + "
-        "upper/lower marginal ray of each field, retained on purpose because ray "
-        "bending is the strongest cue that a system is sane (one color per field). "
-        "A body's rim "
-        "height — the body being a cemented GROUP under 'grouped' and a single "
-        "ELEMENT under 'per_element' — is the maximum MEASURED clear semi-diameter "
-        "over that body: an approximation forced by the absence of any "
-        "part-boundary data, and it is not a part dimension. An aperture that "
-        "could not be read is DISCLOSED "
-        "(drawn as unknown, never as a number nobody measured), as is a projection "
-        "the check cannot vouch for; one active configuration is drawn and labelled. "
+        "conformance claim). "
+        "element_outline (self renderer only; giving it selects self) selects the "
+        "element-outline convention: 'per_element' (default) or 'grouped'; any other "
+        "value is REFUSED, and the value used is echoed as element_outline. "
+        "Folded systems (coordinate break / mirror) are drawn by the self renderer in "
+        "the GLOBAL frame. Coordinate breaks are suppressed; so are flat air dummies that "
+        "follow air or a mirror (never the stop or image); a glass body's flat exit face "
+        "is stamped. "
         "Returns the saved PNG path plus png_valid/n_fields/n_rays_drawn/n_surfaces/"
         "aperture_not_measured/profile_not_measured/out_of_plane/figure_disclosures/"
-        "cb_suppressed/scaffold_suppressed/renderer/renderer_fallback/"
-        "far_object_excluded/ray_coverage/flags; inspect result.ok. n_surfaces is the "
-        "system's surface count measured at render time from the state drawn — every "
-        "row including object, image and suppressed scaffolding, so the image plane is "
-        "n_surfaces-1; it is NOT len(surface_labels) and must not be derived from them. "
-        "It is present on every ok:true result and absent when ok is false. Folded systems "
-        "(coordinate break / mirror) are drawn by the self renderer in the GLOBAL "
-        "frame, coherent with "
-        "the rays — so the rays ARE drawn for a fold; coordinate-break and flat "
-        "powerless air dummy/spacer surfaces are suppressed (scaffolding, not "
-        "drawn); real optics (glass, mirrors, curved lens-backs), the stop, and the "
-        "image are stamped with their true Zemax numbers. Gotcha: the surface-number "
-        "stamps are OptiVibe's on every cross-section renderer; a bare vendor image "
-        "numbers nothing, and under 'self' the figure is self-drawn. The saved .zmx "
-        "is the full-fidelity record. This PNG is a SCRATCH drawing for your "
-        "own eyes; it is NOT the reviewable figure — a finding about it cannot be "
-        "recorded (record_findings refuses it as finding_figure_unbound). To have a "
-        "figure reviewed, call save_candidate first and review ITS paired PNG, which is "
-        "the one png_sha256 binds. "
-        "ray_coverage: fields whose sampled rays fail. "
-        "TALKING ABOUT A SURFACE WITH THE USER: this figure stamps OUR surface numbers "
-        "on it, so the user points at a stamped number to talk about a surface -- keep "
-        "that convention in mind for the rest of the exchange, including turns where no "
-        "tool is open. Pair it with describe_surfaces, which gives the surface-number -> "
-        "role ground-truth table, so number talk is unambiguous. "
-        "BEFORE PRESENTING A MULTI-CONFIG DESIGN: call freeze_semidiameters (so each "
-        "element draws at ONE size across configs -- a physically-correct layout) and "
-        "verify_zoom (which flags a gap declared to zoom that is CONSTANT across "
-        "configs). "
-        "See fold_beam."
+        "cb_suppressed/scaffold_suppressed/interfaces_omitted/stale_artifact_at/renderer/"
+        "renderer_fallback/far_object_excluded/ray_coverage/flags; inspect result.ok. "
+        "n_surfaces counts every row (the image plane is n_surfaces-1). "
+        "interfaces_omitted (self renders) lists undrawn interfaces; "
+        "stale_artifact_at names the older file a refusal left at an explicit path. "
+        "ray_coverage: fields whose sampled rays fail. Its status is one of "
+        "sampled_all_traced, sampled_failures, no_rays_requested, unavailable; a field's "
+        "state is all_sampled_traced, sampled_partial or none_sampled_traced. "
+        "Under 'self' the figure is self-drawn; the saved .zmx is the "
+        "full-fidelity record. Talking about a surface: the user points at a stamped "
+        "number to talk about a surface; describe_surfaces gives the "
+        "surface-number -> role ground-truth table. Before presenting a multi-config "
+        "design, call freeze_semidiameters (so each element draws at ONE size across "
+        "configs) and verify_zoom. See describe_surfaces, fold_beam."
     ),
 )
 

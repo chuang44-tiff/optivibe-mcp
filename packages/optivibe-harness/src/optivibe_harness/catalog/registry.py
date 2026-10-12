@@ -254,35 +254,35 @@ MTF = MetricAdapter(
     headline_kind="list_collapse", single_config_note="single_config_only")
 
 
-# ---- strehl (analyze_strehl) -> strehl_axis --------------------------------
+# ---- strehl (analyze_strehl) -> strehl_field1 --------------------------------
 def _strehl_params(basis, opts):
     return {}
 
 
 def _strehl_extract(result):
-    return [Reading(column="strehl_axis", raw=result.get("config_headline"))]
+    return [Reading(column="strehl_field1", raw=result.get("config_headline"))]
 
 
 STREHL = MetricAdapter(
     key="strehl", tool_name="analyze_strehl",
-    columns=(ColumnSpec("strehl_axis", "", "number", higher_is_better=True),),
+    columns=(ColumnSpec("strehl_field1", "", "number", higher_is_better=True),),
     params_from_basis=_strehl_params, extract=_strehl_extract,
     config_all_capable=True, config_refusal="n/a", config_scope="active",
     headline_kind="config_headline")
 
 
-# ---- wavefront (analyze_wavefront) -> rms_wfe_worst_waves -------------------
+# ---- wavefront (analyze_wavefront) -> rms_wfe_axis_waves -------------------
 def _wfe_params(basis, opts):
     return {"samp": basis.samp}   # samp>=1 MANDATORY, else the reading silently reads ~0
 
 
 def _wfe_extract(result):
-    return [Reading(column="rms_wfe_worst_waves", raw=result.get("config_headline"))]
+    return [Reading(column="rms_wfe_axis_waves", raw=result.get("config_headline"))]
 
 
 WAVEFRONT = MetricAdapter(
     key="wavefront", tool_name="analyze_wavefront",
-    columns=(ColumnSpec("rms_wfe_worst_waves", "waves", "number", higher_is_better=False),),
+    columns=(ColumnSpec("rms_wfe_axis_waves", "waves", "number", higher_is_better=False),),
     params_from_basis=_wfe_params, extract=_wfe_extract,
     config_all_capable=True, config_refusal="n/a", config_scope="active",
     headline_kind="config_headline")

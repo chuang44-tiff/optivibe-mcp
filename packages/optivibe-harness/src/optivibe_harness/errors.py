@@ -142,6 +142,24 @@ class ToolParamError(ToolError):
     error_family = "tool_param"
 
 
+class ConfigUnverifiedError(ToolError):
+    """The configuration count / active index could not be READ (or read back as a
+    value that cannot be a configuration index), so a config-aware tool REFUSES.
+
+    ``_config_common``'s guarded ``safe_*`` readers degrade any fault to ``1`` — a substitution of an unknown for a
+    known: it blamed the caller (``config 2 out of range; valid 1..1``), swept ``[1]``
+    as if complete, and restored to a guessed entry index. The strict readers raise this
+    instead.
+
+    Deliberately NOT a ``ToolParamError`` subclass: every caller's param arm
+    (``measurement_param``, ``tool_param``, ...) must NOT catch it, because the fault is
+    the engine read's, not the caller's. Same shape as its siblings: a class-level
+    ``error_family`` override, no ``__init__``.
+    """
+
+    error_family = "config_unverified"
+
+
 class SolveRefsRefusalError(ToolParamError):
     """``remove_surface``'s opt-in strict refusal: the row is a live solve's SOURCE.
 

@@ -1604,7 +1604,7 @@ def _unsupported_surfaces(system):
         # symmetric degraded-CELL hole. REFUSE rather than admit->flatten — the S1+S2a
         # invariant: admit an EvenAspheric ONLY if it can be FAITHFULLY round-tripped. A
         # HEALTHY EvenAspheric (cells read fine) is still admitted (falls through). The
-        # coefficient probe is fully THROW-GUARDED (``_even_asphere_coefficients_unreadable``
+        # coefficient probe is fully THROW-GUARDED (``_s3_asphere_unreadable``
         # never raises) so this arm never breaks the never-raise boundary.
         s3_key = _asph.asphere_type_of_name(type_name) if type_name is not None else None
         if s3_key is not None and _s3_asphere_unreadable(system, row, s3_key):
@@ -1684,34 +1684,11 @@ def _unsupported_surfaces(system):
     return found
 
 
-def _even_asphere_coefficients_unreadable(system, row):
-    """True iff ANY of ``row``'s 8 even-asphere coefficient cells cannot be read (S2a H-1).
-
-    The fail-closed discriminator for a NEWLY-admitted EvenAspheric surface (Type reads
-    cleanly): the carry (``LensSpec.read`` -> ``_read_coefficients``) reads all 8 Par
-    cells via ``read_asphere_cell``. If even ONE cell THROWS (a wedged / Header-drifted
-    Par cell), the read graceful-degrades to ``None`` and the asphere is INDISTINGUISHABLE
-    from a plain Standard surface — a read->apply would silently flatten it. This probe
-    reads the SAME cells with the SAME reader ``LensSpec.read`` uses, so an
-    unreadable-here cell is exactly the unreadable-there case that would flatten.
-
-    Returns True (-> REFUSE) if any cell read raises; False (-> the asphere is admittable)
-    when ALL 8 cells read fine. Fully THROW-GUARDED: ``_unsupported_surfaces`` must never
-    raise, and this is a pure read (no mutation — ``read_asphere_cell`` only reads
-    ``cell.DoubleValue``), so probing here does not perturb the later ``LensSpec.read``.
-    """
-    try:
-        for param in _asph._PARAM_NAMES:
-            _asph.read_asphere_cell(system, row, param)
-        return False
-    except Exception:  # noqa: BLE001 — ANY coefficient cell unreadable -> refuse (fail closed)
-        return True
-
-
 def _s3_asphere_unreadable(system, row, type_key):
     """True iff a Tier-1 asphere's carry cells cannot ALL be read (S3 degraded-cell HIGH).
 
-    The type-aware sibling of ``_even_asphere_coefficients_unreadable``: for a GATED
+    The type-aware probe (it superseded the EvenAspheric-only S2a probe, since deleted):
+    for a GATED
     (Extended) type it probes the Max-Term gate (Par13), the Norm Radius (Par14), AND the
     ``max_term`` materialized coefficient cells — the SAME cells ``LensSpec.read`` reads.
     For a non-gated (Odd/Even) type it probes the fixed Par1..Par(max_terms) cells. If

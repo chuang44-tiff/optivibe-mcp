@@ -210,7 +210,7 @@ _CONFIG_ALL_TOOLS = frozenset({
 _CONFIG_REFUSES = frozenset({
     # heavy single-figure analysis (resolve_single_config_selector)
     "analyze_axial_color", "get_mtf", "get_spot", "render_layout",
-    "describe_surfaces",
+    "describe_surfaces", "render_ray_fan", "render_field_curvature_distortion",
     # authoring / index (config = a 1-based int)
     "set_config_value", "set_config_variable", "set_current_configuration",
     "add_operand", "add_math_constraint", "remove_configuration",

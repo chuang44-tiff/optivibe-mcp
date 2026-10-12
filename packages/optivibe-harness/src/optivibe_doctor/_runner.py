@@ -1525,7 +1525,7 @@ def _reap_owned(owned):
             if record.facts.get("gone") is True:
                 return (True, "")
             if record.facts.get("gone") is None:
-                return (False, "the reap worker could not re-read the process: %s"
+                return (False, "the reap worker did not observe the process gone: %s"
                         % (record.facts.get("detail") or "no detail"))
             return (False, "the process was still running after the reap: %s"
                     % (record.facts.get("detail") or "no detail"))

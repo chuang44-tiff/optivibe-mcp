@@ -1021,7 +1021,8 @@ class ZemaxSession:
             if timed_out or elapsed > threshold:
                 self._log(
                     f"ZemaxSession: engine_open {'TIMED OUT' if timed_out else 'SLOW'} "
-                    f"after {elapsed:.1f}s (threshold {threshold:.1f}s)."
+                    f"after {elapsed:.1f}s (threshold {threshold:.1f}s).",
+                    intent="engine_open", call="open",
                 )
         except Exception:  # noqa: BLE001 — breadcrumb must never break open()
             pass
@@ -1192,18 +1193,25 @@ class ZemaxSession:
         )
         self._log(msg)
 
-    def _log(self, msg):
+    def _log(self, msg, *, intent="reap_failure", call="terminate_tracked"):
         """Best-effort log to the session logger if present, else stderr. NEVER raises.
 
         Uses the ``InteractionLog.log`` audit seam (keyword-only) when a logger
         is wired so a surviving-orphan event lands in the durable corpus; falls
         back to stderr otherwise. The logger itself never raises (it drops + notes
         stderr), but the call is still guarded so teardown can never break.
+
+        ``intent``/``call`` label the durable row. The defaults are the reap-failure
+        labels every pre-existing caller relied on; ``_log_slow_open`` passes
+        ``engine_open``/``open`` so its breadcrumb is no longer filed as a reap
+        failure. The other breadcrumbs routed through here (channel
+        dead, unattributed late engine, orderly close skipped) still carry the
+        defaults -- a dated note on the ticket lists them.
         """
         try:
             logger = self._logger
             if logger is not None and hasattr(logger, "log"):
-                logger.log(intent="reap_failure", call="terminate_tracked", args=msg)
+                logger.log(intent=intent, call=call, args=msg)
                 return
         except Exception:  # noqa: BLE001 — fall through to stderr
             pass
