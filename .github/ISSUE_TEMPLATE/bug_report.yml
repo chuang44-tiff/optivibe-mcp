@@ -1,0 +1,77 @@
+name: Bug report or version report
+description: Something misbehaved, or you ran optivibe-mcp on an OpticStudio version other than 2025 R1.
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        optivibe-mcp has been exercised only on OpticStudio 2025 R1 (Premium). A report from any other
+        version or licence tier is useful, whether it works or not.
+
+        Please do not paste vendor data (glass catalog rows, manual text, operand descriptions) or
+        attach a lens file that came with OpticStudio. See PROVENANCE.md.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What is this?
+      options:
+        - Something misbehaved
+        - It works on a version or tier other than 2025 R1 Premium
+        - A question
+    validations:
+      required: true
+  - type: input
+    id: opticstudio
+    attributes:
+      label: OpticStudio version
+      description: "Help > About in OpticStudio."
+      placeholder: "2024 R2.02"
+    validations:
+      required: true
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Licence tier
+      options:
+        - Premium
+        - Professional
+        - Standard
+        - Enterprise
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: optivibe-mcp version
+      description: "The release tag or the commit you installed from."
+      placeholder: "v0.1.14"
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: |
+        Run `python -m optivibe_doctor` with the interpreter the MCP server uses, and paste everything
+        it prints. Add `--engine` if the problem involves opening OpticStudio, or if this is a version
+        report. The output names local paths; shorten your user name in them if you prefer.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: |
+        The tool call, the result envelope it returned, and what you expected. For a version report,
+        say which tools you exercised.
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      description: "Claude Code, GitHub Copilot, or another client, with its version."
+    validations:
+      required: false

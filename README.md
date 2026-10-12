@@ -3,13 +3,16 @@
 optivibe-mcp is an **experimental** MCP server that provides tooling for a coding
 agent — such as Claude Code — to interface with Zemax OpticStudio.
 
+![A 10× / NA 0.45 objective an agent designed in one unattended run, as OpticStudio draws it](demos/walk-in-10x/walk-in-10x-layout.png)
+
+*One unattended run: a 60× objective reworked into a 10× / NA 0.45 apochromat, polychromatic Strehl ≥ 0.935 at
+every field point. [How it was done and measured](demos/walk-in-10x/README.md).*
+
 It exposes OpticStudio operations as typed MCP tools: loading designs, editing lens
 data, running analyses, optimization, and tolerancing, driven through the ZOS-API so
 the agent doesn't have to write raw API code. Alongside the tools is a reference
 layer the agent can query — operand and glass lookups, and full-text search over the
 OpticStudio manual.
-
-This is early-stage and provided as-is. Expect rough edges; see [Status](#status).
 
 ## What's in it
 
@@ -59,7 +62,27 @@ all four wavelengths.
 
 ## Install
 
-Clone the repository, then from `packages/optivibe-harness/`:
+Clone the repository, then run one command from its root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+It creates a virtual environment in `.venv`, installs both packages, builds the reference
+data from your OpticStudio install, runs the doctor, and prints the command that registers
+the server with Claude Code. It opens no OpticStudio session. Options:
+
+- `-Python <path>`: the Python 3.11+ to build the environment from, when the `python` on
+  PATH is older;
+- `-Probe`: also run the two operand probes, which open OpticStudio and need the ZOS-API
+  licence (see [Build the reference data](#build-the-reference-data));
+- `-Register`: run the `claude mcp add` command for you.
+
+The script only runs the steps below, which you can also do by hand.
+
+### Manual install
+
+From `packages/optivibe-harness/`:
 
 ```bash
 pip install -e ../optivibe-reference   # reference layer first
@@ -81,6 +104,19 @@ pip install -e "../optivibe-reference[manual]"
 ```
 
 A per-package `environment.yml` (Python 3.11) is provided if you prefer conda.
+
+Then check the install:
+
+```bash
+python -m optivibe_doctor
+```
+
+It checks the interpreter, the two packages, their dependencies, the reference data and your
+OpticStudio install directory, and prints one line per check with a remedy for anything that is
+wrong. It opens no OpticStudio session unless you ask: `--engine` also opens one and proves the
+ZOS-API licence, and `--boot` starts the real server once. On a fresh install the reference-data
+checks read `WARN` until you [build the reference data](#build-the-reference-data), and the
+exit code is 1 while any check warns.
 
 ## Register with Claude Code
 
@@ -150,20 +186,25 @@ The repository includes a few Claude Code skills for common tasks:
 | `design-vision-review` | Observe a rendered layout and report what lens data does not show (advisory) |
 | `design-aberration-review` | Read the ray fan and field curvature / distortion plots and report how the aberrations are balanced (advisory) |
 | `optimize-loop` | Run optimization with monitoring |
+| `bench-catalog` | Benchmark and rank a folder of lens designs against a target spec or each other |
 | `zos-api-debug` | Troubleshoot OpticStudio connection / license errors |
 
 ## Status
 
-Experimental. It has been developed and exercised against a single OpticStudio
-version (2025 R1) on Windows; behavior on other versions is unverified. Interfaces
-and tool coverage may change. Issue reports are welcome.
+Experimental, early-stage and provided as-is; expect rough edges. It has been developed
+and exercised against a single OpticStudio version (2025 R1) on Windows; behavior on
+other versions is unverified. Interfaces and tool coverage may change.
+
+**Running another OpticStudio version or licence tier?** Please
+[open an issue](../../issues/new/choose) with the output of `python -m optivibe_doctor --engine`,
+whether it works or not. A report that it works on your version is as useful as a bug.
 
 ## Contributing & contact
 
 Bug reports, questions, and pull requests are welcome via
-[GitHub Issues](../../issues) and pull requests. Please don't include any
-vendor-derived data (glass catalogs, manual text, operand descriptions) in
-issues or PRs — see [PROVENANCE.md](PROVENANCE.md).
+[GitHub Issues](../../issues) and pull requests; see [CONTRIBUTING.md](CONTRIBUTING.md).
+Please don't include any vendor-derived data (glass catalogs, manual text, operand
+descriptions) in issues or PRs — see [PROVENANCE.md](PROVENANCE.md).
 
 ## Licensing & provenance
 
