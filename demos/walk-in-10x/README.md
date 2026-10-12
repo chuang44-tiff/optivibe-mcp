@@ -73,3 +73,9 @@ Measured in OpticStudio 2025 R1:
   nearly equal, so the design is expected to be tolerance-sensitive.
 
 A second Opus run, and a local model on the same task, are on the [local-model page](../local-model-10x/README.md).
+
+## Check it yourself
+
+This folder has the [brief](brief.md), the agent's [stage log](stage-log.md) and the result,
+`result_walk-in-10x.zmx`. The starting lens and a script that re-measures any lens file are in
+[demos/](../README.md).
