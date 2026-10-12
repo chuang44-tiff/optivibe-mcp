@@ -47,8 +47,9 @@ a per-pass `.zmx` trail.
 1. Free the variables with `set_variable` (radii, thicknesses, conics). A
    reused or loaded design can carry INHERITED variables — check with
    `list_variables`, and `clear_all_variables` to start clean.
-2. Establish a merit function: `build_merit` for a wizard default (it authors positive
-   manufacturability floors via `min_air` / `min_glass`), or the user's own operands.
+2. Establish a merit function: `build_merit` for a wizard default (it authors a positive
+   air-gap floor via `min_air`; pass `glass=true` to author the `min_glass` floor too),
+   or the user's own operands.
    If the user supplied a verbatim merit function, drive on THAT.
 3. To ground an operand or a glass choice, use the reference tools (`lookup_operand`,
    `search_reference`, `lookup_glass`) — do not guess a code.
@@ -165,9 +166,9 @@ the verdict, the read-back merit, **and** the geometry read-back together.
    **It reports; it does not certify.** A `check_clearance` that flags nothing is not a
    statement that the design is manufacturable. It substitutes for a degraded read
    rather than refusing, so a surface it could not measure can still produce a
-   confident number — and on a folded system the per-gap thickness audit is suppressed
-   entirely, so an empty violation list there means *nothing was measured*, not
-   *nothing is wrong*. Read what it measured, never the absence of a complaint.
+   confident number. On a folded system each gap across the fold is measured and can
+   violate, but a gap it could not measure is listed in `fold_audit.not_measured` and
+   is never clean. Read what it measured, never the absence of a complaint.
 3. `save_candidate` the result. This is the checkpoint the pause is built on, and it is
    what makes a remark about the figure recordable: the candidate's `seq` and its
    `png_sha256` both come from this envelope.

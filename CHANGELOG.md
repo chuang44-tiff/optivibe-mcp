@@ -13,13 +13,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Three new demos.** An agent reworks a 60× objective into a diffraction-limited 10× / NA 0.45
   apochromat with no human in the loop ([`demos/walk-in-10x/`](demos/walk-in-10x/README.md)); a
-  local model meets the same targets through the same server and skills
+  local model meets the same targets through the same server, with a brief tuned for this task
   ([`demos/local-model-10x/`](demos/local-model-10x/README.md)); and an agent refines a 20× zoom,
   misses one target, and has its result held back by the promotion gate
   ([`demos/zoom-20x/`](demos/zoom-20x/README.md)). Each page lists its limits.
 - **`render_ray_fan` and `render_field_curvature_distortion`** — two new plot tools, drawn by
   OpticStudio. Each saves the picture and, beside it, a `.data.json` file with the full numbers
-  behind the plot. The server now has 92 tools.
+  behind the plot. The harness now has 92 tools; with the five reference tools the server
+  serves 97.
 - **New skill `design-aberration-review`.** Two reviewers read the ray fan and the field
   curvature / distortion plots, with their numbers, and report how the aberrations are balanced.
   They advise; nothing they say blocks a promotion or edits the design.

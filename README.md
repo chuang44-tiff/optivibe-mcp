@@ -33,8 +33,8 @@ One run with no human in the loop produced a 10× / NA 0.45 objective with a pol
 better at all four field points, measured afterwards by a separate script.
 
 [A local model does the same job with OptiVibe's skills and MCP server](demos/local-model-10x/README.md)
-Qwen3.8-Flash-Next on a local server met the same targets, with a polychromatic Strehl of 0.834 or better at all four
-field points. The page says where it trails Opus.
+Qwen3.8-Flash-Next on a local server, given a brief tuned for this task, met the same targets with a polychromatic
+Strehl of 0.834 or better at all four field points. The page says where it trails Opus.
 
 [An agent refines a 20× zoom, and the promotion gate holds it back](demos/zoom-20x/README.md)
 One run more than halved the blur at the zoom's worst position, missed its distortion target, and the server refused
