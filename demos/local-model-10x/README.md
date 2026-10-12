@@ -90,3 +90,11 @@ curvature scale is ±5 µm.
 
 - One task and one local model. The brief was tuned on this task.
 - Not done yet: tolerancing, MTF and a glass-availability check.
+
+## Check it yourself
+
+This folder has the local model's [brief](brief-local-model.md) and [stage log](stage-log-local-model.md),
+the Opus run's [stage log](stage-log-opus.md), and both results, `result_local-model.zmx` and
+`result_opus.zmx`. The Opus run used the [walk-in brief](../walk-in-10x/brief.md). The starting lens and
+a script that re-measures any lens file are in [demos/](../README.md), which also says where the
+stage logs' own figures differ from this page.

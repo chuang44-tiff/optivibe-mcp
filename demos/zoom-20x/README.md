@@ -99,3 +99,9 @@ does not show whether 4 % is reachable on this form.
   - MTF;
   - a glass stock check;
   - a decision on whether the glass floor should apply to filter plates.
+
+## Check it yourself
+
+This folder has the [brief](brief.md), the agent's [stage log](stage-log.md) and the candidate the
+figures describe, `result_zoom-20x.zmx`. The starting lens and a script that re-measures any lens file
+are in [demos/](../README.md).

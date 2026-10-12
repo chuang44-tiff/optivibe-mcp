@@ -31,6 +31,9 @@ install.
 
 ## Demos
 
+Each demo ships its brief, the agent's stage log, the starting lens and the result lens, with a
+script that re-measures them: see [demos/](demos/README.md).
+
 [An agent reworks a 60× objective into a 10× / NA 0.45 apochromat, unattended](demos/walk-in-10x/README.md)
 One run with no human in the loop produced a 10× / NA 0.45 objective with a polychromatic Strehl ratio of 0.935 or
 better at all four field points, measured afterwards by a separate script.

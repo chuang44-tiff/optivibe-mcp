@@ -91,6 +91,10 @@ packages/optivibe-reference/scripts/captures/
 # these rules can hide a real deliverable. NOTE the `**/candidates/` comment above says
 # "the BEST_* design is kept" — that is a PRIVATE-repo convention that came across with
 # the file. Here no design artifact is ever kept.
+#
+# The one deliberate exception is demos/: the seed and result lens files there
+# (seed_*.zmx, result_*.zmx) were chosen for publication and are tracked by name. None of
+# them starts with BEST_, so the rules below do not hide them.
 BEST_*.zmx
 BEST_*.png
 *_layout.png

@@ -81,3 +81,9 @@ length shows in the drawing.
 The vision loop ships in this release: `render_layout` draws with OpticStudio's own layout by
 default, and the `optimize-loop` and `design-vision-review` skills run the review. See the
 [CHANGELOG](../../CHANGELOG.md) for the 0.1.13 changes.
+
+## Check it yourself
+
+This folder has the two briefs, [with the layout review](brief-vision.md) and
+[numbers only](brief-numbers-only.md), and the six lenses, `result_lens-a.zmx` to `result_lens-f.zmx`.
+The starting lens and a script that re-measures any lens file are in [demos/](../README.md).
