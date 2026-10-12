@@ -48,12 +48,33 @@ _LINEAR_UNIT_BY_LENS_UNIT = {
 # The spot-radius convention: OpticStudio reports the standard-spot radius in
 # micrometres for the baseline mm lens (§6). The spot tool returns the
 # matched spot-radius unit string; the tolerance battery asserts against um.
+# The ONE family for "an analysis setting did not read back as written": used by
+# analysis_spot (the StandardSpot sampling) and analysis_mtf_field (its settings checks).
+SETTINGS_UNVERIFIED_FAMILY = "analysis_settings_unverified"
+
 _SPOT_UNIT_BY_LENS_UNIT = {
     "Millimeters": "um",
     "Centimeters": "um",
     "Inches": "um",
     "Meters": "um",
 }
+
+# Lens unit -> the factor that converts a value the
+# ENGINE reports in LENS UNITS to micrometres. RSCE (the get_spot per_wave source) returns
+# lens units (mm on a mm lens), while the envelope labels every spot value "um" (every entry
+# of ``_SPOT_UNIT_BY_LENS_UNIT`` is "um"). This table is a SUBSET of that one, and every key
+# in it must be live-proven by the units leg: a unit that fails there is REMOVED from
+# THIS table, so it refuses (``ANALYSIS_UNITS_UNCONVERTIBLE_FAMILY``) instead of serving an
+# unproven number. Values are floats (``type(x) in (int, float)``; bool excluded).
+_LENS_UNIT_TO_UM = {
+    "Millimeters": 1.0e3,
+    "Centimeters": 1.0e4,
+    "Inches": 25400.0,
+    "Meters": 1.0e6,
+}
+# The ONE family for "a per-wave RMS cannot be put in micrometres because the lens unit is
+# absent, unknown, or not live-proven" (a WHOLE-CALL refusal, never a per-entry reason).
+ANALYSIS_UNITS_UNCONVERTIBLE_FAMILY = "analysis_units_unconvertible"
 
 
 def _marshal_1d(arr):
@@ -208,10 +229,14 @@ def _units_member(system):
     (§6: SpotData has NO unit member). Guarded so a missing
     member degrades to ``None`` (the caller maps that to an ``"unknown"`` string)
     rather than raising — a unit-derivation gap must not crash a results read.
+    EXCEPT a transport loss (a mapped ``SessionClosedError``) raised by the getter, which is
+    re-raised unchanged, exactly as the member's ``str`` path does: a dead channel is never served as an "unknown" unit.
     """
     try:
         return system.SystemData.Units.LensUnits
-    except Exception:  # noqa: BLE001 — degrade to unknown rather than crash
+    except Exception as exc:  # noqa: BLE001 — degrade to unknown rather than crash; a transport loss is NEVER swallowed
+        if isinstance(map_dotnet_exception(exc), SessionClosedError):
+            raise
         return None
 
 
@@ -222,8 +247,8 @@ def _lens_units_string(system):
     Reads ``SystemData.Units.LensUnits`` (§6); maps its
     member name (Millimeters/Centimeters/Inches/Meters) to mm/cm/in/m. An unknown /
     absent member, or one whose ``str`` raises, yields ``"unknown"`` -- except that a transport loss
-    raised by the member's ``str`` is re-raised unchanged (one raised by the ``LensUnits`` getter itself
-    is absorbed by ``_units_member`` and reads ``"unknown"``)
+    raised by the member's ``str`` is re-raised unchanged, and (f2 A2-3) so is one raised by the
+    ``LensUnits`` getter itself (``_units_member``); any other getter fault reads ``"unknown"``
     (0.1.13 E5).
     """
     member = _units_member(system)
@@ -238,25 +263,40 @@ def _lens_units_string(system):
     return _LINEAR_UNIT_BY_LENS_UNIT.get(name, name)
 
 
-def _spot_units_string(system):
-    """Derive the SPOT-RADIUS unit string from the lens unit (§6).
+def _resolve_spot_units(system):
+    """Resolve the lens unit ONCE: ``(units_str, factor_or_None)``.
 
-    SpotData exposes no unit member, so the spot-radius unit is
-    derived from ``SystemData.Units.LensUnits`` here — micrometres (``"um"``) for
-    the baseline mm lens. An unknown/absent member yields ``"unknown"`` (or one whose
-    ``str`` raises -- except that a transport loss raised by the member's ``str`` is re-raised
-    unchanged; one raised by the getter itself is absorbed by ``_units_member``).
+    BOTH the envelope ``units`` string and the lens-unit -> micrometre factor are derived from
+    the ONE ``str(LensUnits)`` token read here, so a label and a factor can never come from two
+    reads that disagree. ``units_str`` is exactly what ``_spot_units_string`` always returned
+    (``"unknown"`` for an absent member / a hostile token; the token itself passes through for
+    an unknown name). ``factor`` is ``_LENS_UNIT_TO_UM[token]`` or ``None`` (absent member,
+    unknown token, or a plain-Exception ``str``). A transport loss raised by the member's
+    ``str`` is re-raised unchanged, and so is one raised by the getter (``_units_member``, f2 A2-3).
     """
     member = _units_member(system)
     if member is None:
-        return "unknown"
+        return "unknown", None
     try:
         name = str(member)
     except Exception as exc:  # noqa: BLE001 — a hostile token reads as "unknown"; a transport loss is NEVER swallowed
         if isinstance(map_dotnet_exception(exc), SessionClosedError):
             raise
-        return "unknown"
-    return _SPOT_UNIT_BY_LENS_UNIT.get(name, name)
+        return "unknown", None
+    return _SPOT_UNIT_BY_LENS_UNIT.get(name, name), _LENS_UNIT_TO_UM.get(name)
+
+
+def _spot_units_string(system):
+    """Derive the SPOT-RADIUS unit string from the lens unit.
+
+    SpotData exposes no unit member, so the spot-radius unit is
+    derived from ``SystemData.Units.LensUnits`` here — micrometres (``"um"``) for
+    the baseline mm lens. An unknown/absent member yields ``"unknown"`` (or one whose
+    ``str`` raises -- except that a transport loss raised by the member's ``str`` is re-raised
+    unchanged, and so is one raised by the getter itself (``_units_member``, f2 A2-3)).
+    Delegates to ``_resolve_spot_units`` (the label half) so the two never drift.
+    """
+    return _resolve_spot_units(system)[0]
 
 
 def error_envelope(tool, family, message, **extra):
@@ -270,3 +310,23 @@ def error_envelope(tool, family, message, **extra):
     env = {"ok": False, "error_family": family, "error": message, "tool": tool}
     env.update(extra)
     return env
+
+
+def _lens_unit_and_um_factor(system):
+    """``(token, linear_label, factor_to_um | None)`` from ONE ``str(LensUnits)`` read.
+
+    The label and the micrometre factor can never come from two reads that disagree. Unknown /
+    absent member or a hostile token -> ``("unknown", "unknown", None)``; a token outside
+    ``_LENS_UNIT_TO_UM`` keeps itself as label with ``None`` as factor. A transport loss raised by
+    the getter or the ``str`` is re-raised unchanged (as ``_resolve_spot_units`` does).
+    """
+    member = _units_member(system)
+    if member is None:
+        return "unknown", "unknown", None
+    try:
+        name = str(member)
+    except Exception as exc:  # noqa: BLE001 — a hostile token reads as unknown; a transport loss is NEVER swallowed
+        if isinstance(map_dotnet_exception(exc), SessionClosedError):
+            raise
+        return "unknown", "unknown", None
+    return name, _LINEAR_UNIT_BY_LENS_UNIT.get(name, name), _LENS_UNIT_TO_UM.get(name)

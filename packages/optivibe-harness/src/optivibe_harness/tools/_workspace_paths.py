@@ -37,10 +37,11 @@ two-independent-resolutions class, and consolidating the four copies into one do
 close it — it makes it fixable in one place instead of four. The ``promote_best``
 half is CLOSED in ``workspace`` (0.1.13 batch B: one ``_resolve_root`` read per call,
 threaded to the keeper path and every disclosure, never through this module), and
-``save_candidate`` reads once through ``_resolve_candidate_sink``. The consumers of THIS
-module -- ``optimize_run`` and ``layout_render`` -- remain the unclosed record, in the
-two tickets (``promote-best-resolves-the-root-twice``, now PARTIAL with the
-``optimize`` pair as its remainder, and ``render-layout-resolves-the-root-twice``).
+``save_candidate`` reads once through ``_resolve_candidate_sink``. ``layout_render`` is
+CLOSED: it reads ``root_state`` ONCE per call and derives the minted
+path and the ``workspace_root`` disclosure from that one reading. ``optimize_run`` remains
+the unclosed record (``promote-best-resolves-the-root-twice``, PARTIAL with the
+``optimize`` pair as its remainder); ``root_state`` is the reusable door for it.
 """
 import os
 import uuid
@@ -89,6 +90,45 @@ def workspace_root(session):
         return None
 
 
+def root_state(session):
+    """``(root, fault)`` -- the workspace root, resolved ONCE, honestly attributed.
+
+    ``workspace_root`` answers a
+    disclosure and ``scratch_dir_state`` decides where a file goes; a caller that wants
+    both asked the resolver twice and could get two answers if ``_resolve_root`` is not a
+    stable read (a rebound attribute, a ``chdir`` under tier 4). This is the ONE resolver
+    body: a caller reads it once and derives the disclosure AND the path from that single
+    reading (``scratch_dir_from_root_state``). ``scratch_dir_state`` is now a two-line
+    wrapper over it.
+
+    ``fault`` is a message when the resolution RAISED (``root`` is then ``None``), ``None``
+    otherwise; ``root`` is ``None`` with no fault when the resolver cleanly reports no
+    root. Never raises past ``Exception``.
+
+    REUSABLE by the ``optimize`` remainder of ``promote-best-resolves-the-root-twice``
+    (``optimize_run.py`` reads ``workspace_root`` and builds the trail path from a second
+    resolution); that edit stays HELD by the module's statement band.
+    """
+    try:
+        from .workspace import _resolve_root
+        root = _resolve_root(session)[0]
+    except Exception as exc:  # noqa: BLE001 — UNKNOWN is reported, never swallowed
+        return None, (
+            f"the workspace root could not be resolved, so a free scratch figure "
+            f"name cannot be minted and a fixed name in the working directory could "
+            f"silently overwrite an existing figure: "
+            f"{type(exc).__name__}: {exc}. Pass an explicit path.")
+    return (root if root else None), None
+
+
+def scratch_dir_from_root_state(state):
+    """``(scratch, fault)`` derived from an ALREADY-READ ``root_state`` -- reads nothing."""
+    root, fault = state
+    if fault is not None or not root:
+        return None, fault
+    return os.path.join(root, "candidates", "scratch"), None
+
+
 def scratch_dir_state(session):
     """``(scratch, fault)`` -- the SAME question as ``scratch_dir``, answered honestly.
 
@@ -114,18 +154,7 @@ def scratch_dir_state(session):
     that has a refusal channel must use it; ``scratch_dir`` keeps the lossy shape for
     anything that genuinely cannot refuse.
     """
-    try:
-        from .workspace import _resolve_root
-        root = _resolve_root(session)[0]
-    except Exception as exc:  # noqa: BLE001 — UNKNOWN is reported, never swallowed
-        return None, (
-            f"the workspace root could not be resolved, so a free scratch figure "
-            f"name cannot be minted and a fixed name in the working directory could "
-            f"silently overwrite an existing figure: "
-            f"{type(exc).__name__}: {exc}. Pass an explicit path.")
-    if not root:
-        return None, None
-    return os.path.join(root, "candidates", "scratch"), None
+    return scratch_dir_from_root_state(root_state(session))
 
 
 def scratch_dir(session):

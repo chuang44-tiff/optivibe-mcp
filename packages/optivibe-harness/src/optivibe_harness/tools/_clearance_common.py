@@ -146,6 +146,12 @@ def edge_thickness(thickness_i, R_i, conic_i, R_ip1, conic_ip1, h,
     return float(thickness_i) + sag_ip1 - sag_i
 
 
+def _is_finite_positive(s):
+    """The ONE finite-positive-semi predicate ``controlling_height`` and
+    ``controlling_height_source`` both consult (so they can never disagree)."""
+    return isinstance(s, (int, float)) and math.isfinite(s) and s > 0.0
+
+
 def controlling_height(semi_i, semi_ip1):
     """The controlling clear-aperture half-height ``h = min`` of the two semis.
 
@@ -153,13 +159,32 @@ def controlling_height(semi_i, semi_ip1):
     common clear aperture the edge is measured at). If NEITHER surface has a
     finite-positive semi-diameter, returns ``None`` (the caller skips + flags the
     gap — there is no aperture to measure an edge at). If only ONE is finite-
-    positive, use it (the smaller of {that, +inf} = that). NEVER raises.
+    positive, use it (the smaller of {that, +inf} = that). Never raises for an engine-read
+    semi (a float); a Python ``int`` too large for a float raises ``OverflowError`` from the
+    shared predicate (not reachable from the engine path).
     """
-    finite = [s for s in (semi_i, semi_ip1) if isinstance(s, (int, float))
-              and math.isfinite(s) and s > 0.0]
+    finite = [s for s in (semi_i, semi_ip1) if _is_finite_positive(s)]
     if not finite:
         return None
     return min(finite)
+
+
+def controlling_height_source(semi_i, semi_ip1):
+    """WHERE ``controlling_height``'s ``h`` came from (edge-height provenance).
+
+    ``"surface_i"`` / ``"surface_ip1"`` when BOTH semis are finite-positive and that
+    surface's semi is the smaller (a TIE goes to ``"surface_i"``);
+    ``"substituted_single_finite"`` when exactly ONE is finite-positive (the other was
+    degraded and its semi was substituted away); ``None`` when neither is (``h`` is
+    ``None``). Uses the same predicate as ``controlling_height``, so it raises exactly where that
+    function does (only a float-overflowing ``int``, never an engine-read semi).
+    """
+    ok_i, ok_ip1 = _is_finite_positive(semi_i), _is_finite_positive(semi_ip1)
+    if ok_i and ok_ip1:
+        return "surface_i" if semi_i <= semi_ip1 else "surface_ip1"
+    if ok_i or ok_ip1:
+        return "substituted_single_finite"
+    return None
 
 
 def is_optical_surface(row):

@@ -28,7 +28,7 @@ package.
 The description-bearing catalogs, the glass catalog, and the manual corpus are
 **built on the user's machine from their own licensed OpticStudio install** and
 are gitignored. Only the author's own sources ship: the `*_synonyms.json`
-intent vocabularies and `operand_semantics.json` (units + sign-convention). See
+intent vocabularies (which also carry the units) and `operand_semantics.json` (sign-convention). See
 the repo-root `README.md` and `PROVENANCE.md` for the build steps and the
 data-source ledger.
 

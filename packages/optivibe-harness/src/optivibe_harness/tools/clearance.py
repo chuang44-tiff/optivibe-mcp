@@ -43,10 +43,11 @@ BEST 0-violations + ~1.12 flint edge; the Cassegrain folded behind_first_optic
 import math
 
 from ..errors import ToolParamError
-from ..server import ToolSpec
+from ..server import ToolSpec, _wedge_recorded
 from . import _asphere_cells as _asph
 from . import _clearance_common as _cl
 from . import _config_common as _cfg
+from . import _fold_gaps as _fg
 from . import _layout_geometry as _geom
 # The STRICT active-config primitive. NOT a second derivation: this is the SAME
 # function ``_config_common.safe_current_configuration`` wraps -- one read, two
@@ -59,6 +60,17 @@ from ._analysis_common import error_envelope
 
 _CL_FAMILY = "clearance_unavailable"   # a total geometry-read failure
 _CL_PARAM = "clearance_param"          # a bad min_air/min_glass value
+
+_FOLD_NOTE = (
+    "system is folded: each adjacent gap is measured between consecutive bounding surfaces "
+    "(coordinate-break rows and flat air-to-air dummies collapsed) in their shared local frame "
+    "— centre = Σ thickness × mirror parity, edge = the coaxial formula × parity — and "
+    "cross-checked against a traced ray; a gap whose surfaces do not share a frame, or whose "
+    "check failed, is listed in fold_audit.not_measured with a reason. Parity is the engine's "
+    "MIRROR convention and is NOT independently verified by the ray check. NOT CHECKED: "
+    "collisions between NON-ADJACENT surfaces (a beam through a primary's hole, a secondary "
+    "obscuring the beam)."
+)
 
 _DEFAULT_MIN_AIR = 0.5     # matches build_merit's MNCA air floor
 _DEFAULT_MIN_GLASS = 1.0   # matches build_merit's MNCG glass floor
@@ -633,7 +645,8 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
     surface no gap started.
 
     ``ceiling`` is ``None`` when neither maximum is in force -- and then every gap record
-    is BYTE-IDENTICAL to what this function has always emitted. Otherwise it is
+    is what this function emitted before the ceiling existed, plus the additive
+    ``edge_height_source`` key (which semi controlled ``edge_height``). Otherwise it is
     ``{"exceedances": [...], "unresolved": [...]}``, the two lists the top-level
     ``center_ceiling_audit`` block is assembled from.
 
@@ -747,6 +760,11 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
             "center_thickness": _safe(center),
             "edge_thickness": _safe(edge) if edge is not None else None,
             "edge_height": _safe(h) if h is not None else None,
+            "edge_height_source": (
+                _cl.controlling_height_source(
+                    ri["semi_diameter"], rip1["semi_diameter"]
+                ) if h is not None else None
+            ),
             "edge_approximate": bool(edge_approximate),
             "threshold": threshold,
             "violation": bool(is_violation),
@@ -826,11 +844,12 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
     return gaps, violations, flags, ceiling
 
 
-def _folded_gaps(rows, n):
+def _folded_gaps(rows, n, walk=None):
     """INFORMATIONAL per-gap center thickness for a FOLDED system (locked §3).
 
     NO violation flag (the raw LDE thickness is the fold direction, not a clearance
-    — the -525.7 trap). Returns the ``folded_gaps`` list.
+    — the -525.7 trap). Returns the ``folded_gaps`` list. ``kind`` comes from the medium
+    walk when one is supplied (``None`` on an unknown medium, never guessed).
     """
     out = []
     for i in range(1, n - 1):
@@ -840,7 +859,7 @@ def _folded_gaps(rows, n):
         out.append({
             "surface": i,
             "next_surface": i + 1,
-            "kind": _gap_kind(ri),
+            "kind": _fg.fold_medium_kind(walk, i) if walk else _gap_kind(ri),
             "center_thickness": _safe(ri["thickness"]),
             "role": ri.get("role"),
         })
@@ -887,7 +906,7 @@ def _global_z(frames, i):
     return float(z)
 
 
-def _global_bfd(lde, rows, n):
+def _global_bfd(lde, rows, n, frames=None):
     """The ``global_bfd`` block from ``GetGlobalMatrix`` (locked §4). Never raises.
 
     ``image_global_z`` (slot [12] of the image surface); ``behind_first_optic`` /
@@ -895,7 +914,7 @@ def _global_bfd(lde, rows, n):
     degraded/unreadable frame -> that field ``None`` + a flag (never a bogus number).
     """
     flags = []
-    frames = _geom.read_global_frames(lde, n)
+    frames = frames if frames is not None else _geom.read_global_frames(lde, n)
     image_idx = n - 1
     image_z = _global_z(frames, image_idx)
     if image_z is None:
@@ -1373,7 +1392,10 @@ def _impl(session, floors, params, consult_session_budget=False):
     # at the ends BEFORE the CB/mirror checks, so a CB at surface 0 / a MIRROR at the
     # image surface would read UNFOLDED — use the shared predicate so this can never
     # drift from get_first_order's fold decision.
-    folded = _geom.lde_is_folded(lde, n)
+    folded_det = _geom.lde_is_folded(lde, n)                       # the shared readout predicate
+    folded_rows = _fg.rows_have_fold(rows)                          # the geometry-row read's own answer
+    fold_inconsistent = (folded_det != folded_rows)
+    folded = folded_det or folded_rows                              # either direction takes the FOLD path
 
     flags = []
     # The invalidation-failure DISCLOSURE (a review, HIGH). A dispatch that could
@@ -1396,6 +1418,8 @@ def _impl(session, floors, params, consult_session_budget=False):
     gap_ceiling = None
     folded_gaps = None
     note = None
+    fold_audit = None
+    frames = None
 
     # A system needs OBJECT + >=1 optical + IMAGE (>=3 surfaces) for any gap to audit.
     if n < 3:
@@ -1405,14 +1429,15 @@ def _impl(session, floors, params, consult_session_budget=False):
         )
 
     if folded:
-        folded_gaps = _folded_gaps(rows, n)
-        note = (
-            "system is folded (a coordinate-break or mirror is present); the per-gap "
-            "edge/clearance VIOLATION audit is unfolded-only (the raw LDE thickness is "
-            "the fold direction, not a clearance) — use global_bfd.behind_first_optic "
-            "for the detector clearance. Global-frame per-gap clearance for a fold is "
-            "future work."
-        )
+        frames = _geom.read_global_frames(lde, n)                   # ONE read, shared with _global_bfd
+        marks = _fg.read_fold_marks(lde, n)                         # D1: independent per-row re-read
+        walk = _fg.medium_walk(rows, n, marks)
+        folded_gaps = _folded_gaps(rows, n, walk=walk)              # informational list KEPT
+        gaps, violations, fold_audit, fold_flags = _fg.audit_folded_gaps(
+            system, lde, rows, n, min_air, min_glass, frames=frames, marks=marks,
+            fold_inconsistent=fold_inconsistent, slot_latched=bool(_wedge_recorded(session)))
+        flags.extend(fold_flags)
+        note = _FOLD_NOTE
     elif n >= 3:
         gaps, violations, gap_flags, gap_ceiling = _audit_gaps(
             rows, n, min_air, min_glass, max_air, max_glass,
@@ -1420,7 +1445,7 @@ def _impl(session, floors, params, consult_session_budget=False):
         )
         flags.extend(gap_flags)
 
-    bfd, bfd_flags = _global_bfd(lde, rows, n)
+    bfd, bfd_flags = _global_bfd(lde, rows, n, frames=frames)
     flags.extend(bfd_flags)
 
     # SAGMATH sag disclosure (REAL geometry — replaces the S1 flag-only
@@ -1490,6 +1515,8 @@ def _impl(session, floors, params, consult_session_budget=False):
     for i in range(n):
         if not rows[i].get("ok", True):
             continue        # already in asphere_sag_approximate — the shipped channel
+        if _geom._is_coordinate_break(str(rows[i].get("type_name", ""))):
+            continue        # a CB is a frame, not a surface the sag model describes
         if _geom.sag_model_is_faithful(rows[i].get("type_name")) is not True:
             sag_model_unfaithful.append(i)
     # The claim is CONDITIONAL ("where it bounds"). This scan runs
@@ -1603,7 +1630,7 @@ def _impl(session, floors, params, consult_session_budget=False):
     # gap clearance (min over each gap's center+edge). A zoom's gaps move per config,
     # so this differs across configs on a real sweep (a repeated value across configs
     # is the silent-wrong switch signature the driver's config_differs surfaces).
-    config_headline = _min_gap_clearance(gaps if not folded else folded_gaps)
+    config_headline = _min_gap_clearance(gaps)
 
     # S6 Delta-2: the union of all Fixed-SemiDiameter (frozen) surface numbers (additive, the
     # global counterpart to the per-gap frozen flag). Populated on a FOLDED system too (the
@@ -1659,7 +1686,8 @@ def _impl(session, floors, params, consult_session_budget=False):
         result["grin_not_audited"] = grin_not_audited
     # Tier-1 (AXIS 3): the additive ``center_ceiling_audit`` block. Emitted ONLY when a
     # budget was APPLIED -- in force AND all four preconditions held -- so an envelope
-    # with no budget is BYTE-IDENTICAL to the shipped one, per-gap keys included.
+    # with no budget is identical to the shipped one apart from the additive per-gap
+    # ``edge_height_source`` key.
     # ``limits`` are the RESOLVED DECLARED values, never re-derived from the gap records
     # (a limit re-derived from what it adjudicated cannot falsify anything).
     if ceiling_basis is not None:
@@ -1703,6 +1731,8 @@ def _impl(session, floors, params, consult_session_budget=False):
         result["active_merit_not_offered"] = active_merit_not_offered
     if note is not None:
         result["note"] = note
+    if folded:
+        result["fold_audit"] = fold_audit
     return result
 
 
@@ -1731,9 +1761,13 @@ CHECK_CLEARANCE_SPEC = ToolSpec(
         "The floor comparison is STRICT with no tolerance: a gap even 3e-5 mm under its floor is a violation "
         "(a stock sample reads 0.99997 against 1.0), so lower min_air/min_glass deliberately to state a "
         "different basis rather than expecting rounding. For "
-        "a FOLDED system (any coordinate-break or mirror): the per-gap thickness audit "
-        "is suppressed (a folded LDE thickness is the fold direction, NOT a clearance) "
-        "and informational folded_gaps + a note are returned instead. ALWAYS returns a "
+        "a FOLDED system (any coordinate-break or mirror) the same per-gap audit runs "
+        "between consecutive bounding surfaces: centre = LDE thickness × reflection parity, "
+        "edge measured only where both surfaces share a frame, each gap cross-checked "
+        "against a traced ray (trace vs sag model; parity itself is the engine's MIRROR "
+        "convention, not ray-verified). A gap that fails any check is listed in "
+        "fold_audit.not_measured, never clean. Collisions between NON-adjacent surfaces "
+        "are not checked. Ceilings are not applied on a fold. ALWAYS returns a "
         "global_bfd block (the image plane's global distance behind the first and last "
         "optical surface) — for a folded/Cassegrain system this behind_first_optic is "
         "the true behind-primary clearance, NOT the misleading raw back-airgap "
@@ -1756,9 +1790,9 @@ CHECK_CLEARANCE_SPEC = ToolSpec(
         "violation. It is a claim about COVERAGE, not correctness -- it is not checked "
         "against an independent surface count and it does NOT mean the geometry is "
         "right. Absence of a finding is not proof; still look at the layout. "
-        "clearance_ok:null means the gate could not CERTIFY clearance -- a FOLDED "
-        "system, an unfaithful surface model, an unreadable global frame or an "
-        "incomplete config sweep; read clearance_summary.coverage_reason for WHICH "
+        "clearance_ok:null means the gate could not CERTIFY clearance -- a folded gap "
+        "that could not be measured (fold_audit.not_measured), an unfaithful surface "
+        "model, an unreadable global frame or an incomplete config sweep; read clearance_summary.coverage_reason for WHICH "
         "rather than guessing. See get_first_order, describe_surfaces."
     ),
 )

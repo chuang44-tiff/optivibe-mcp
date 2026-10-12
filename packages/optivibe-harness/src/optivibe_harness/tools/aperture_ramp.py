@@ -604,9 +604,8 @@ def _ramp_impl(session, params, ctx):
                     "verdict": verdict,
                     # WHY the geometry gate rejected: `no_findings` vs `nonphysical` vs
                     # `not_audited` + the audit's own `reason`. Without it a folded system
-                    # (the per-gap clearance audit does not yet run on a folded system, so
-                    # every step reads `not_audited`) reads as "the design was bad", which
-                    # it is not.
+                    # whose gap could not be measured (`folded_gap_not_measured` in the
+                    # CURRENT configuration) reads as "the design was bad", which it is not.
                     "geometry_status": ga_status,
                     "geometry_reason": (
                         ga.get("reason") if isinstance(ga, dict) else None
@@ -693,9 +692,11 @@ RAMP_APERTURE_SPEC = ToolSpec(
         "design_not_certified and the geometry restored (the trace carries "
         "geometry_status/geometry_reason so you can tell 'bad design' from 'not audited'). "
         "Gotcha: variables + a merit must be set first (like optimize). Gotcha: on a FOLDED "
-        "(mirror / coordinate-break) system the per-gap clearance audit does not run, so "
-        "every step reads not_audited and never passes the no_findings accept gate — a "
-        "folded design cannot ramp until that audit is extended to folded geometry."
+        "system a step passes only when every adjacent gap IN THE CURRENT CONFIGURATION was "
+        "MEASURED by the fold audit (optimize's geometry audit certifies the current "
+        "configuration only — promote_best's config='all' sweep is the design-wide gate); a "
+        "gap behind a tilted/decentered coordinate break, or one whose ray check failed, "
+        "rejects with geometry_reason folded_gap_not_measured (the trace carries it)."
     ),
 )
 

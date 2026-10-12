@@ -75,8 +75,9 @@ that as "not built here", not a failure.
 
 The tools carry design judgment, not just API access — lean on it:
 
-- `build_merit` authors positive manufacturability floors by default
-  (`min_air` / `min_glass`); it won't hand you a knife-edge design. For a
+- `build_merit` authors a positive air-gap floor by default (`min_air`). The glass
+  floor (`min_glass`) is authored only when you pass `glass=true`, so pass it or run
+  `check_clearance` after optimizing. For a
   gradient-index surface, `grin_dn_max` authors a per-point restoring box on the
   index profile: it pulls the profile back toward the envelope, it does not
   certify it — a satisfied box still admits a spread of up to twice `grin_dn_max`.
@@ -117,5 +118,7 @@ skill is selected:
 - **`design-compare`** — rank designs side by side.
 - **`design-vision-review`** — look at the rendered layout and report what the lens
   data does not show. ADVISORY: it observes and feeds back, it does not decide.
+- **`design-aberration-review`** — read the ray fan and the field curvature /
+  distortion plots and report how the aberrations are balanced. ADVISORY.
 - **`optimize-loop`** — set up, preflight, and run optimization with checkpoints.
 - **`zos-api-debug`** — troubleshoot an OpticStudio connection / license error.

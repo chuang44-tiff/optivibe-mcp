@@ -67,8 +67,8 @@ Map intent to metric keys ONLY from this menu. An unknown/unsupported requested 
 | `first_order` | get_first_order | `fnum`, `total_track_mm`, `bfd_mm` (+ fixed `native_efl_mm`/`norm_efl_mm`) | f#↓ track↓ | focal length, f/#, size/compactness, back focus |
 | `rms_spot` | get_spot | `rms_spot_um_worst`, `rms_spot_worst_field`, `rms_spot_valid_fields` | ↓ | geometric blur / spot size, worst field |
 | `mtf` | get_mtf | `mtf_worst`, `mtf_worst_field` | ↑ | sharpness / resolution / contrast at the basis frequency |
-| `strehl` | analyze_strehl | `strehl_axis` | ↑ | on-axis diffraction quality (Strehl) |
-| `wavefront` | analyze_wavefront | `rms_wfe_worst_waves` | ↓ | RMS wavefront error |
+| `strehl` | analyze_strehl | `strehl_field1` | ↑ | diffraction quality (Strehl) at field 1 of the field table, wherever it sits |
+| `wavefront` | analyze_wavefront | `rms_wfe_axis_waves` | ↓ | RMS wavefront error on-axis (Hx=Hy=0), not the worst field |
 | `distortion` | analyze_distortion | `distortion_max_pct` | ↓ | geometric distortion |
 | `rel_illum` | analyze_relative_illumination | `rel_illum_min` | ↑ | relative illumination / corner brightness / vignetting |
 | `lateral_color` | analyze_lateral_color | `lateral_color_max_um` | ↓ | lateral (transverse) chromatic aberration |
@@ -101,8 +101,8 @@ allowlist; the drift test parses this block):
 |---|---|
 | sharpness · resolution · contrast · "corner MTF" · MTF | `mtf` |
 | spot · blur · spot size · geometric | `rms_spot` |
-| Strehl · diffraction-limited · on-axis quality | `strehl` |
-| wavefront · WFE · OPD | `wavefront` |
+| Strehl · diffraction-limited (read at field 1) | `strehl` |
+| wavefront · WFE · OPD · on-axis quality | `wavefront` |
 | distortion · straight lines · barrel/pincushion | `distortion` |
 | vignetting · relative illumination · corner brightness · falloff | `rel_illum` |
 | lateral color · transverse chromatic · color fringing | `lateral_color` |
@@ -150,7 +150,8 @@ Convert the returned prescription into an **`apply_lens_spec`-shaped `LensSpec` 
 NATIVE scale (surfaces + aperture + fields + wavelengths — match the `apply_lens_spec`
 schema exactly). For a patent glass not resolvable directly, use the **seat-free**
 reference tools `lookup_glass` / `find_glass_pair` to map it to an available catalog glass
-(or the nearest nd/vd match) — record the substitution in the spec's notes. Write
+(or the nearest nd/vd match) — record the substitution in that surface's `comment`
+(the spec has no `notes` key, and an unknown key is refused). Write
 `staging/<stem>.spec.json`. The CLI Phase 1 turns each spec into `<stem>.zmx`.
 
 **Extraction failure is honest:** if deep-research cannot return a full, buildable table,
@@ -167,8 +168,8 @@ conda run -n optivibe-harness python -m optivibe_harness.catalog bench \
   --staging <workdir>/staging --out <workdir>/out --template <workdir>/out/template.json
 ```
 
-You are notified on exit and read the stdout one-line JSON summary; the CLI streams
-per-design progress to stderr for liveness.
+You are notified on exit and read the stdout one-line JSON summary. A healthy run prints
+nothing to stderr (only warnings and faults), so silence means it is still working.
 
 **The single-seat discipline (a hard rule):** *during a bench cycle call NO seat-holding
 OptiVibe tool* — no `load_design` / `apply_lens_spec` / `get_*` / `render_layout` /
@@ -176,7 +177,7 @@ OptiVibe tool* — no `load_design` / `apply_lens_spec` / `get_*` / `render_layo
 engine, builds + benches + renders + reaps it in `finally`). Before the CLI runs you may
 use ONLY the seat-free reference tools and `deep-research`:
 
-- **`_SEAT_FREE_TOOLS`** (route to the reference dispatcher; never grab the N=1 seat):
+- **The seat-free reference tools** (route to the reference dispatcher; never grab the N=1 seat):
   **`lookup_glass`, `lookup_operand`, `search_reference`, `find_glasses`, `find_glass_pair`**.
 
 Keeping the skill seat-free makes the CLI the sole engine. **Whether a second OpticStudio

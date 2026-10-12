@@ -1,6 +1,6 @@
 ---
 name: zos-api-debug
-description: Use when the OptiVibe MCP can't reach OpticStudio — a tool returns an engine/connection/license error (session_connect, engine_connect_timeout, session_closed), OpticStudio won't connect, or the ZOS-API license is rejected. Install / connection / license troubleshooting.
+description: Use when the OptiVibe MCP can't reach OpticStudio — a tool returns an engine/connection/license error (engine_unavailable, engine_connect_timeout, engine_channel_dead, session_closed), OpticStudio won't connect, or the ZOS-API license is rejected. Install / connection / license troubleshooting.
 ---
 
 # ZOS-API Debug — Install / Connection / License Troubleshooting
@@ -16,9 +16,9 @@ connection code.
 
 ## When to Use
 
-- A design tool returns `error_family: "session_connect"` (couldn't acquire the engine)
+- A design tool returns `error_family: "engine_unavailable"` (couldn't acquire or validate the engine)
 - `error_family: "engine_connect_timeout"` (the engine open wedged)
-- `error_family: "session_closed"` (the engine transport was lost mid-session)
+- `error_family: "engine_channel_dead"` or `"session_closed"` (the engine transport was lost mid-session)
 - OpticStudio won't launch, or the ZOS-API license is rejected
 - The MCP seems stuck on the first design-touching call after a restart
 
@@ -31,9 +31,9 @@ first design-touching call, as a typed envelope:
 
 | error_family | Meaning | What to check |
 |---|---|---|
-| `session_connect` | The engine couldn't be acquired / validated | OpticStudio installed and licensed for the ZOS-API; 64-bit Python ↔ 64-bit OpticStudio; install path resolvable |
+| `engine_unavailable` | The engine couldn't be acquired / validated | OpticStudio installed and licensed for the ZOS-API; 64-bit Python ↔ 64-bit OpticStudio; install path resolvable |
 | `engine_connect_timeout` | The open WEDGED (a hung handshake or a stuck orphan) | A prior OpticStudio server may be holding the seat — see "stuck engine" below; then retry |
-| `session_closed` | The engine transport was lost mid-session | The OpticStudio process died or was closed; retry the call to re-open |
+| `engine_channel_dead` / `session_closed` | The engine transport was lost mid-session | The OpticStudio process died or was closed. Retrying does not re-open it: restart the MCP server, then reload the design from disk |
 
 ## Triage
 

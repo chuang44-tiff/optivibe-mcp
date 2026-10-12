@@ -93,9 +93,11 @@ def _verdict_for_field(n_traced, n_grid, rms_value):
     """The per-field verdict ladder (§1.4). PURE — both the SUT and the fake key on it.
 
     ``n_traced`` is the count of grid rays with ``errorCode == 0 AND vignetteCode ==
-    0`` for this field; ``n_grid`` is the sampled grid size; ``rms_value`` is the
-    field's polychromatic RMS (used ONLY for the M2 beyond-capture gate, and ONLY
-    when fully traced). Returns ``(valid, traced, reason)`` where ``valid`` /
+    0`` for this field; ``n_grid`` is the sampled grid size; ``rms_value`` is the RMS
+    magnitude of WHICHEVER path called (the field's polychromatic RMS on the collapsed
+    path; the per-(field, wave) own-centroid RSCE value, already converted to um, on
+    ``per_wave``) — used ONLY for the M2 beyond-capture gate, and ONLY when fully traced.
+    The gate is INCLUSIVE at ``_SPOT_HUGE`` (``abs(rms) >= 1e7`` um is beyond_capture). Returns ``(valid, traced, reason)`` where ``valid`` /
     ``traced`` are bool and ``reason`` is a string or ``None``.
 
     Ladder:

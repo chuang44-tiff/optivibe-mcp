@@ -38,6 +38,7 @@ scan).
 """
 import functools
 import math
+import operator
 
 from .._io import safe_exc, safe_float
 from ..errors import ToolParamError
@@ -402,22 +403,180 @@ def _slots(**named):
     return {pos: (header, value) for header, (pos, value) in named.items()}
 
 
-def _strh_slots(wave):
+def _strh_slots(wave, field=1):
     # STRH: {2:"Samp", 3:"Wave", 4:"Field"} — NO surf slot (locked D2). Samp/Field
-    # default 0 (engine default sampling, on-axis field 1 via the default).
-    return _slots(Wave=(3, int(wave)))
+    # default 0 (engine default sampling). MEASURED live: Field=0 evaluates
+    # FIELD NUMBER 1, whatever its coordinates — NOT "on-axis". It is on-axis only
+    # when field 1 sits at (0, 0); the result discloses which via ``field_evaluated``.
+    # B1b: slot 4 is written ONLY for a non-default field, so the default call's slot
+    # dict (and the bench numbers read through it) is byte-identical to before.
+    slots = _slots(Wave=(3, int(wave)))
+    if field != 1:
+        slots.update(_slots(Field=(4, int(field))))
+    return slots
 
 
-def _rwre_slots(samp, wave):
+def _with_hxhy(slots, hx, hy):
+    # RWCE/RWRE slots 4/5 = Hx/Hy. Unset == explicit (0, 0), so they are written
+    # ONLY when non-default and the default read path stays byte-identical (B1b D3).
+    if (hx, hy) != (0, 0):
+        slots.update(_slots(Hx=(4, float(hx)), Hy=(5, float(hy))))
+    return slots
+
+
+# The on-axis disclosure (measured): RWCE/RWRE with Hx/Hy unset evaluate the
+# normalized field (0, 0). Every success path of analyze_wavefront carries a COPY; B1b
+# echoes the REQUESTED (hx, hy).
+def _wavefront_field_evaluated(hx=0.0, hy=0.0):
+    label = "on-axis" if (hx, hy) == (0, 0) else f"hx={hx}, hy={hy} (normalized)"
+    return {"basis": "normalized_field", "hx": hx, "hy": hy, "label": label}
+
+
+def _is_real_number(v):
+    """A finite, non-bool, non-str number -- the only thing a field coordinate may be."""
+    if isinstance(v, (bool, str)):
+        return False
+    try:
+        return math.isfinite(float(v))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _exact_real(v):
+    """Classify ``v`` for hx/hy/field: ``("int", int)``, ``("float", float)`` or ``None``.
+
+    The ONE numeric predicate. Exact integers (a plain ``int`` or a NumPy integer) go
+    through ``operator.index`` -- never ``float`` -- so no integer is rounded. Only a real
+    float (incl. NumPy floating) is converted with ``float``. Refused (``None``): bool,
+    ``numpy.bool_``, str, None, ``numpy.timedelta64``, an ``int`` SUBCLASS (its dunder
+    methods are caller code), anything else, and any value whose conversion raises.
+    NEVER raises (a value must not escape validation into ``_never_raise``).
+    """
+    try:
+        if isinstance(v, bool):
+            return None
+        if type(v) is int:
+            return ("int", v)
+        if isinstance(v, float):
+            return ("float", float(v))
+        import numpy as np
+        if isinstance(v, np.timedelta64):
+            return None
+        if isinstance(v, np.integer):
+            return ("int", operator.index(v))
+        if isinstance(v, np.floating):
+            return ("float", float(v))
+    except Exception:  # noqa: BLE001 -- a hostile value is "invalid", not an error
+        return None
+    return None
+
+
+def _safe_repr(v):
+    """``repr(v)`` that cannot raise (a refusal must not itself fail); fallback: a constant."""
+    # The fallback is a CONSTANT: even ``type(v).__name__`` runs caller code through a
+    # hostile metaclass, so it is not read.
+    try:
+        r = repr(v)
+        return r if type(r) is str else "<unrepresentable value>"
+    except Exception:  # noqa: BLE001
+        return "<unrepresentable value>"
+
+
+def _hx_hy_value(v):
+    """The validated normalized coordinate as a float, or ``None`` (B1b D1: finite, in [-1, 1]).
+
+    Classified ONCE: the handler uses this return value and never re-reads ``v``, so a
+    value whose conversion changes between calls cannot pass as one value and be used as
+    another.
+    """
+    c = _exact_real(v)
+    if c is None:
+        return None
+    if c[0] == "int":
+        return float(c[1]) if -1 <= c[1] <= 1 else None
+    return c[1] if (math.isfinite(c[1]) and -1.0 <= c[1] <= 1.0) else None
+
+
+def _field_number_value(v):
+    """The validated field NUMBER as an exact int, or ``None`` (an integer >= 1, or an
+    integral finite float >= 1). Classified once, like ``_hx_hy_value``."""
+    c = _exact_real(v)
+    if c is None:
+        return None
+    if c[0] == "int":
+        return c[1] if c[1] >= 1 else None
+    if math.isfinite(c[1]) and c[1] == int(c[1]) and int(c[1]) >= 1:
+        return int(c[1])
+    return None
+
+
+def _valid_hx_hy(v):
+    """A normalized field coordinate: a finite real number in [-1, 1] (B1b D1)."""
+    return _hx_hy_value(v) is not None
+
+
+def _valid_field_number(v):
+    """A field NUMBER: an exact integer >= 1, or an integral finite float >= 1."""
+    return _field_number_value(v) is not None
+
+
+def _strehl_field_evaluated(system, field=1):
+    """Disclose WHICH field ``analyze_strehl`` read: the REQUESTED field NUMBER plus its coordinates.
+
+    ``x``/``y`` are in the units of ``field_type`` (degrees for Angle, lens units for the
+    height types); no unit conversion is done here. ``field_type`` is the base token of
+    ``Fields.GetFieldType()``, or ``"unknown"`` if that read throws (which does NOT by
+    itself make the coordinates unavailable). A coordinate that is not a finite real
+    number (bool/str/nan/inf/unreadable) is NAMED, never omitted: ``x``/``y`` are
+    ``None`` and ``coordinates == "unavailable"``. Never raises.
+    """
+    out = {"basis": "field_number", "field": field, "x": None, "y": None,
+           "label": f"field {field}", "field_type": "unknown"}
+    try:
+        out["field_type"] = _oc._base_token(system.SystemData.Fields.GetFieldType())
+    except Exception:  # noqa: BLE001 -- an unreadable type is named "unknown"
+        out["field_type"] = "unknown"
+    try:
+        f1 = system.SystemData.Fields.GetField(field)
+        rx, ry = f1.X, f1.Y
+    except Exception:  # noqa: BLE001 -- an unreadable coordinate is named, not fatal
+        out["coordinates"] = "unavailable"
+        return out
+    if _is_real_number(rx) and _is_real_number(ry):
+        out["x"], out["y"] = float(rx), float(ry)
+    else:
+        out["coordinates"] = "unavailable"
+    return out
+
+
+def _with_outer_field_evaluated(result):
+    """An ok ``config="all"`` aggregate points at its per-config disclosures.
+
+    If NO per_config entry succeeded there is nothing to point at; say so.
+    """
+    if (isinstance(result, dict) and result.get("ok") is True
+            and result.get("config_evaluated") == "all"):
+        entries = result.get("per_config")
+        any_ok = isinstance(entries, list) and any(
+            isinstance(e, dict) and e.get("ok") is True for e in entries)
+        result["field_evaluated"] = {
+            "basis": "per_config",
+            "label": ("see per_config[].field_evaluated" if any_ok
+                      else "no per_config entry succeeded"),
+        }
+    return result
+
+
+def _rwre_slots(samp, wave, hx=0.0, hy=0.0):
     # RWRE: {2:"Samp", 3:"Wave", 4:"Hx", 5:"Hy"} (locked D2).
-    return _slots(Samp=(2, int(samp)), Wave=(3, int(wave)))
+    return _with_hxhy(_slots(Samp=(2, int(samp)), Wave=(3, int(wave))), hx, hy)
 
 
-def _rwce_slots(ring, wave):
+def _rwce_slots(ring, wave, hx=0.0, hy=0.0):
     # RWCE: {2:"Ring", 3:"Wave", 4:"Hx", 5:"Hy"} — a2 Header "Ring", same density
     # role as RWRE's Samp (locked D2). The position-based read uses only the value
     # at slot 2; the "Ring" label is cosmetic self-documentation (fix 6).
-    return _slots(Ring=(2, int(ring)), Wave=(3, int(wave)))
+    return _with_hxhy(_slots(Ring=(2, int(ring)), Wave=(3, int(wave))), hx, hy)
 
 
 def _axcl_slots(wave1, wave2):
@@ -868,6 +1027,11 @@ def get_first_order(session, params):
     return result
 
 
+# B1b: BOTH tools pick the best-focus plane from the ON-AXIS RWCE minimum (one system
+# focus plane), whatever field the readings at that plane are taken at.
+_FOCUS_BASIS = "on_axis_rwce_minimum"
+
+
 # --------------------------------------------------------------------------- #
 # (A) analyze_strehl — dual-focus STRH per wave.
 # --------------------------------------------------------------------------- #
@@ -881,6 +1045,11 @@ def analyze_strehl(session, params):
     STRH (= minimizing RWCE) and ALWAYS restores; a restore that does not verify
     raises a loud ``mutation_warning``. Never raises past the handler.
 
+    ``field`` (default 1) is the field NUMBER to read (measured: STRH Field=0 == Field=1,
+    whatever field 1's coordinates are); every success result carries ``field_evaluated``
+    naming the requested field. The best-focus PLANE is the ON-AXIS RWCE minimum whatever
+    ``field`` is (one system focus plane); ``focus_basis`` discloses it.
+
     ``config`` (None|int|"all") selects the configuration: None=current
     (byte-identical), an int reads at that config, ``"all"`` sweeps every config into a
     ``per_config`` vector (the wave-1 image-plane STRH is the headline). The per-config
@@ -889,6 +1058,13 @@ def analyze_strehl(session, params):
     """
     config = dict.get(params, "config") if isinstance(params, dict) else None
     do_best = _bool_param(params, "best_focus", True)
+    raw_field = dict.get(params, "field", 1) if isinstance(params, dict) else 1
+    field = _field_number_value(raw_field)   # classified ONCE; ``raw_field`` is not re-read
+    if field is None:
+        return _ac.error_envelope(
+            "analyze_strehl", "measurement_param",
+            f"field must be an integer >= 1 (the field NUMBER to read), got {_safe_repr(raw_field)}",
+        )
 
     def _grade(sess):
         system = sess.system
@@ -898,13 +1074,27 @@ def analyze_strehl(session, params):
                 "analyze_strehl", "analysis_empty",
                 "SystemData reports 0 wavelengths; no Strehl to read",
             )
+        if field != 1:  # the count is read ONLY for a non-default field
+            nfield = _field_count(system)
+            if nfield <= 0:
+                return _ac.error_envelope(
+                    "analyze_strehl", "measurement_param",
+                    f"field={field} cannot be checked: the field count "
+                    f"(SystemData.Fields.NumberOfFields) was unreadable or 0",
+                )
+            if field > nfield:
+                return _ac.error_envelope(
+                    "analyze_strehl", "measurement_param",
+                    f"field={field} is out of range: the system has {nfield} field(s)",
+                )
         waves = list(range(1, nwave + 1))
         flags = []
 
         # Current image plane (read-only, no mutation).
         at_image = []
         for w in waves:
-            raw, suspicious = _mc.read_operand_slots(system, "STRH", _strh_slots(w))
+            raw, suspicious = _mc.read_operand_slots(
+                system, "STRH", _strh_slots(w, field))
             entry = _reading("STRH", raw, suspicious, units="dimensionless", wave=w)
             at_image.append(entry)
             if suspicious:
@@ -917,6 +1107,7 @@ def analyze_strehl(session, params):
             "tool": "analyze_strehl",
             "waves": waves,
             "config_headline": headline_value,
+            "field_evaluated": _strehl_field_evaluated(system, field),
             "at_image_plane": at_image,
             "at_best_focus": None,
             "best_focus_requested": do_best,
@@ -958,7 +1149,7 @@ def analyze_strehl(session, params):
             ) as focus:
                 if focus["available"]:
                     raw, suspicious = _mc.read_operand_slots(
-                        system, "STRH", _strh_slots(w)
+                        system, "STRH", _strh_slots(w, field)
                     )
                     entry = _reading(
                         "STRH", raw, suspicious, units="dimensionless", wave=w,
@@ -977,13 +1168,16 @@ def analyze_strehl(session, params):
             if not focus["restore_verified"]:
                 restore_flags.append(focus["mutation_warning"])
         result["at_best_focus"] = at_best
+        result["focus_basis"] = _FOCUS_BASIS
         if restore_flags:
             restore_flags = _dedupe_warnings(restore_flags)
             flags.extend(restore_flags)
             result["mutation_warning"] = "; ".join(restore_flags)
         return result
 
-    return _cfg.evaluate_over_configs(session, config, _grade)
+    return _with_outer_field_evaluated(
+        _cfg.evaluate_over_configs(session, config, _grade)
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1000,9 +1194,15 @@ def analyze_wavefront(session, params):
     in waves. PV is unavailable (no PVCE/PVRE operand) — reported as such, never
     fabricated from RMS. Never raises past the handler.
 
+    ``hx``/``hy`` (default 0, 0 = on-axis) are the NORMALIZED field coordinates to read,
+    each in [-1, 1] (outside is refused, never clamped); the headline is that field's
+    reading and every success result carries ``field_evaluated`` echoing the request. The
+    best-focus PLANE is the ON-AXIS RWCE minimum whatever (hx, hy) is (one system focus
+    plane); ``focus_basis`` discloses it.
+
     ``config`` (None|int|"all") selects the configuration: None=current
     (byte-identical), an int reads at that config, ``"all"`` sweeps every config into a
-    ``per_config`` vector (the on-axis wave-1 image-plane RWCE is the headline). The
+    ``per_config`` vector (the wave-1 image-plane RWCE at the requested field -- on-axis by default -- is the headline). The
     per-config ``with_best_focus`` scan nests INSIDE the driver's ``with_configuration``
     wrap (config OUTER, focus INNER — Q11). A bad ``config``/``samp`` ->
     ``measurement_param``.
@@ -1026,6 +1226,17 @@ def analyze_wavefront(session, params):
             samp=samp,
         )
     samp = _mc.density_as_int(samp)
+    coords = {}
+    for name in ("hx", "hy"):
+        val = dict.get(params, name, 0.0) if isinstance(params, dict) else 0.0
+        coords[name] = _hx_hy_value(val)   # classified ONCE; ``val`` is not re-read
+        if coords[name] is None:
+            return _ac.error_envelope(
+                "analyze_wavefront", "measurement_param",
+                f"{name} must be a finite number in [-1, 1] (a NORMALIZED field "
+                f"coordinate; 0 = on-axis, 1 = full field), got {_safe_repr(val)}",
+            )
+    hx, hy = coords["hx"], coords["hy"]
 
     def _grade(sess):
         system = sess.system
@@ -1041,8 +1252,8 @@ def analyze_wavefront(session, params):
         def _pair_at_current(w):
             out = {}
             for code, slots in (
-                ("RWCE", _rwce_slots(samp, w)),
-                ("RWRE", _rwre_slots(samp, w)),
+                ("RWCE", _rwce_slots(samp, w, hx, hy)),
+                ("RWRE", _rwre_slots(samp, w, hx, hy)),
             ):
                 raw, suspicious = _mc.read_operand_slots(system, code, slots)
                 out[code] = _reading(
@@ -1054,7 +1265,7 @@ def analyze_wavefront(session, params):
 
         at_image = [{"wave": w, **_pair_at_current(w)} for w in waves]
 
-        # The per-config headline (D3): the on-axis wave-1 image-plane RWCE value.
+        # The per-config headline (D3): the wave-1 image-plane RWCE at the requested field (on-axis by default).
         headline_value = None
         if at_image and isinstance(at_image[0].get("RWCE"), dict):
             headline_value = at_image[0]["RWCE"].get("value")
@@ -1065,6 +1276,7 @@ def analyze_wavefront(session, params):
             "waves": waves,
             "samp": samp,
             "config_headline": headline_value,
+            "field_evaluated": _wavefront_field_evaluated(hx, hy),
             "at_image_plane": at_image,
             "at_best_focus": None,
             "best_focus_requested": do_best,
@@ -1103,8 +1315,8 @@ def analyze_wavefront(session, params):
                 entry = {"wave": w, "plane_thickness": focus["plane_thickness"]}
                 if focus["available"]:
                     for code, slots in (
-                        ("RWCE", _rwce_slots(samp, w)),
-                        ("RWRE", _rwre_slots(samp, w)),
+                        ("RWCE", _rwce_slots(samp, w, hx, hy)),
+                        ("RWRE", _rwre_slots(samp, w, hx, hy)),
                     ):
                         raw, suspicious = _mc.read_operand_slots(system, code, slots)
                         entry[code] = _reading(
@@ -1119,13 +1331,16 @@ def analyze_wavefront(session, params):
             if not focus["restore_verified"]:
                 restore_flags.append(focus["mutation_warning"])
         result["at_best_focus"] = at_best
+        result["focus_basis"] = _FOCUS_BASIS
         if restore_flags:
             restore_flags = _dedupe_warnings(restore_flags)
             flags.extend(restore_flags)
             result["mutation_warning"] = "; ".join(restore_flags)
         return result
 
-    return _cfg.evaluate_over_configs(session, config, _grade)
+    return _with_outer_field_evaluated(
+        _cfg.evaluate_over_configs(session, config, _grade)
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2455,12 +2670,15 @@ ANALYZE_STREHL_SPEC = ToolSpec(
     name="analyze_strehl",
     handler=analyze_strehl,
     required_params=(),
-    param_types={"best_focus": "boolean", "config": "number"},
+    param_types={"best_focus": "boolean", "config": "number", "field": "number"},
     description=(
         "Measure the Strehl ratio (STRH) per wavelength, reported at BOTH the current "
-        "image plane AND per-wave best focus (the headline diffraction-limited number "
-        "is the best-focus value). best_focus (default true) runs a back-airgap focus "
+        "image plane AND per-wave best focus (the headline, config_headline, is the "
+        "wave-1 image-plane value; the best-focus values are in at_best_focus). best_focus (default true) runs a back-airgap focus "
         "scan that is always restored; set false for a read-only current-plane call. "
+        "field is the field NUMBER (default 1; field 1 is on-axis only if the field table "
+        "puts it at 0,0); field_evaluated in the result says which field was read, and the "
+        "best-focus plane is the on-axis RWCE minimum whatever the field (focus_basis). "
         "Gotcha: the loaded-plane Strehl is lower than the best-focus Strehl — do not "
         "conflate them. "
         "OBSCURED PUPILS: on a system with a central obscuration (a Cassegrain "
@@ -2476,12 +2694,17 @@ ANALYZE_WAVEFRONT_SPEC = ToolSpec(
     name="analyze_wavefront",
     handler=analyze_wavefront,
     required_params=(),
-    param_types={"samp": "number", "best_focus": "boolean", "config": "number"},
+    param_types={"samp": "number", "best_focus": "boolean", "config": "number",
+                 "hx": "number", "hy": "number"},
     description=(
         "Measure RMS wavefront error per wavelength in waves: RWCE (RMS-to-centroid, "
         "'the RMS', piston+tilt removed) and RWRE (RMS-to-chief, piston only), at both "
         "the image plane and best focus. samp is the Gaussian-quadrature ring density "
         "(default 6); samp < 1 is REJECTED (it returns a silent 0.0), never clamped. "
+        "hx/hy are normalized field coordinates (default 0,0 = on-axis; hy=1 = full field "
+        "along y), each in [-1, 1]; field_evaluated in the result says which field was "
+        "read, and the best-focus plane is the on-axis RWCE minimum whatever the field "
+        "(focus_basis). "
         "PV is unavailable (no PV operand) — read it from a Wavefront-Map/Zernike "
         "analysis instead."
     ),

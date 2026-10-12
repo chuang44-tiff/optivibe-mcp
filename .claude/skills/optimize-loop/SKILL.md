@@ -1,6 +1,6 @@
 ---
 name: optimize-loop
-description: Use when the user wants to optimize a lens design. Triggers on "optimize", "run optimization", "improve this design", "make it better", "hit the spec". Drives the OptiVibe optimize tool with checkpoints and a preflight, pauses at a midpoint for a look at the layout figure, and records a response to every finding raised there.
+description: Use when the user wants to optimize a lens design. Triggers on "optimize", "run optimization", "improve this design", "make it better", "hit the spec". Drives the OptiVibe optimize tool with checkpoints and a preflight, pauses at a midpoint for a look at the layout figure, and records a response to every finding raised there. A demanding spec (field, NA, working distance, distortion, MTF, zoom) is walked in by spec increments -- easier spec first, then the hard spec moved in by re-weighting -- with a stage review at every stage (see "Walk in a hard target").
 ---
 
 # Optimize Loop — Driving OptiVibe Optimization
@@ -44,7 +44,7 @@ a per-pass `.zmx` trail.
 
 ### Step 2: Set up variables + a merit function
 
-1. Free the variables with `set_variable` (radii, thicknesses, conics, glasses). A
+1. Free the variables with `set_variable` (radii, thicknesses, conics). A
    reused or loaded design can carry INHERITED variables — check with
    `list_variables`, and `clear_all_variables` to start clean.
 2. Establish a merit function: `build_merit` for a wizard default (it authors positive
@@ -56,6 +56,67 @@ a per-pass `.zmx` trail.
    substituting glasses, or changing element count alters what the part *is*, not
    just how well it performs. Write down the starting class now; Step 4 must report
    any change to it.
+
+### Walk in a hard target
+
+Walk in whenever a design task carries a demanding spec that reads far from its bound at the start -- image quality
+over a field, a high NA, a long working distance, low distortion, an MTF bar, a zoom range -- or any target more
+than about 25% off (a default, not a measurement). Reach it by SPEC increments -- the easier spec first, the harder
+next, re-optimizing after each move -- never by one merit that asks for all of it at once. Measured on the 60x
+seed: four STRH field rows took 14-30+ min a call and crashed the PC; per-field RWCE rows took 2-75 s.
+
+**Coarse goals.** Which spec item moves next is your call: say which and why, in one line, before each move.
+1. A feasible form: the easier specs met (typically geometry: working distance, EFL, NA, element count, clearance
+   floors) with every hard spec's terms still in the merit at a looser weight. An air-gap floor applies to air gaps
+   only; cemented joins are allowed and stay cemented. Tighten packaging (track, thickness
+   ceilings) early; it costs far more once the hard spec is close.
+2. Increments you set yourself: every hard spec's terms stay in the merit throughout; move the weights, the
+   packaging bounds and, when the diagnosis says so, the cause (colour terms, a glass) one step at a time. Save
+   every increment as a candidate, even if later moves fail, so the series is visible in the candidates folder;
+   each is a checkpoint, not permission to design a different lens. When you start optimizing for performance, run
+   `design-aberration-review` first (an advisor, not a per-stage gate).
+3. The stated spec: from the last increment, move the hard spec the rest of the way.
+The plan is yours to revise along the way: after each stage re-read every spec item and re-rank what is left --
+a spec that came free, one that got harder, a better order. Say what changed and why.
+
+**The craft is the weights.** Normally one merit for the walk-in; progress is chiefly re-weighting it.
+- Image terms: per-field polychromatic RWCE (ring 6, wave 0, one hy per stated field, target 0), or a `build_merit`
+  wavefront block, which carries every field. Move outward by raising the failing fields' weights a few-fold a step
+  (10 -> 30 -> 50) while the centre keeps its own.
+- Shift weight between families; never set a family that carries a stated spec or a packaging bound to weight 0
+  (a trial operand your diagnosis rejected may go). Measured: zeroing off-axis RWCE while pushing WD took the edge
+  0.44 -> 2.62 waves; zeroing the track ceilings to win it back ended at 157.5 mm where 80 mm meets the spec.
+- Move geometry with the image terms on. A bound's TARGET may step (track 150 -> 100 -> 80) or jump (WD 0.8 -> 5.2
+  in one 11 s call); give a floor an upper bound too (7.6 mm of WD against a 5.3 floor bought nothing).
+- One move, then re-read every field and `check_clearance`, so you know what it bought. When a 10x weight raise
+  barely moves the failing reading, the weights are done: diagnose.
+
+**Diagnose before a glass move or a new constraint.** At the failing field compare polychromatic RWCE (wave 0)
+with each single-wave RWCE. Poly well above every single wave is colour: lateral if it grows with field
+(`analyze_lateral_color`; the lever is glass where the chief ray is high relative to the marginal ray -- in an
+objective, the elements nearest the specimen), axial if the band-edge waves are poor on axis too (anomalous-dispersion
+glass in the strong positives). Otherwise read field curvature and astigmatism; the levers are air spacings and power
+balance. A forced flat field made a colour-limited edge worse. Before you name a limiting aberration or launch an
+operand-targeted `optimize`, run `design-aberration-review`: it shows how the aberrations are balanced, so you do not
+chase one operand. A glass change is a trial: `save_snapshot`,
+`substitute_glass` one surface, a short `optimize`, compare every field, keep it or `load_design` back.
+
+**Hard rules.**
+1. STRH never sits in the merit at an `optimize`; RWCE drives. Read a field's Strehl at a stage end from a weight-0
+   STRH row (`add_operand` with `Field n`, `dump_merit_function`, `remove_operand`); `get_operand('STRH', hy=...)`
+   drops hy. Leave the row's sampling (Samp) at its default: a high Samp has stalled or killed the engine. A Marechal estimate from RWCE never stands in for that read. Before every `optimize`,
+   `dump_merit_function`: no STRH row, and no stated field's image term, floor or ceiling (MNCA/MNEG/OPLT/CTGT...)
+   at weight 0 (a measured operand a bound reads, such as TOTR under OPLT, stays at weight 0).
+2. Bound every call: the first at `cycles=10`, later ones sized from the envelope's `wall_time_s`; if one call
+   passes ~5 min, ask for fewer cycles next.
+3. Every stage ends with `check_clearance`, a `save_candidate` under one `design_name`, and a stage review
+   (`design-vision-review` with that candidate's seq). The review is advice; the readings decide.
+4. A stage you cannot reach after weights, a diagnosis and trial moves is the REPORTED LIMIT: reload the last good
+   candidate, name the spec item, the readings at every field and what you tried, and promote that candidate with
+   its geometry spec intact. Never answer a missed stage by jumping to the full target.
+
+Keep a free-form stage log in your reply and in `walk_in_stages.md` when you can write files: per stage the spec
+aimed at, the moves, the readings, the candidate seq and the review outcome -- what helps the next reader.
 
 ### Step 3: Preflight, then optimize
 

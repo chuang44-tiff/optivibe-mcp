@@ -19,8 +19,9 @@ within 2%); unit-tested against a fixture-seeded fake MTF result.
 """
 import math
 
-from .._io import safe_float
-from ..errors import AnalysisResultError, ToolParamError
+from .._io import safe_exc, safe_float
+from ..errors import (AnalysisResultError, SessionClosedError, ToolParamError,
+                      map_dotnet_exception)
 from ..server import ToolSpec
 from . import _analysis_common as _ac
 from . import _config_common as _cfg
@@ -262,7 +263,15 @@ def _get_mtf_at(session, params):
             ))
             max_frequency_auto_extended = True
 
-    analysis = system.Analyses.New_FftMtf()
+    try:
+        analysis = system.Analyses.New_FftMtf()
+    except Exception as exc:  # noqa: BLE001 -- a window that will not open is a family, not `internal`
+        if isinstance(map_dotnet_exception(exc), SessionClosedError):
+            raise
+        return _ac.error_envelope(
+            "get_mtf", "analysis_malformed",
+            "the FFT MTF window could not be opened: " + safe_exc(exc, repr_form=True),
+        )
     max_frequency_applied = None
     if max_frequency is not None:
         max_frequency_applied = False

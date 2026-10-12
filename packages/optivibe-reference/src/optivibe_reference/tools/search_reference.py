@@ -89,13 +89,16 @@ MAX_QUERY_TERMS = 32
 # - ``-our``, stem >= 3: excludes four / hour / tour / your / pour (stem <= 2) and
 #   keeps colour / honour / vapour / flavour;
 # - ``-tre``, stem >= 2: metre / litre are true variants, and no common distinct short
-#   ``-tre`` word exists.
+#   ``-tre`` word exists;
+# - ``-ogue``, stem >= 4: dialogue / analogue are true variants (stem 4); vogue /
+#   rogue / brogue (stem <= 2) and pirogue (stem 3) are not.
 _UK_US_RULES = (
     (re.compile(r"isation(s?)$"), r"ization\1", 5),
     (re.compile(r"is(e|es|ed|ing|er|ers)$"), r"iz\1", 5),
     (re.compile(r"ys(e|es|ed|ing)$"), r"yz\1", 3),
     (re.compile(r"our(s?)$"), r"or\1", 3),
     (re.compile(r"tre(s?)$"), r"ter\1", 2),
+    (re.compile(r"ogue(s?)$"), r"og\1", 4),
 )
 _ASCII_WORD_RE = re.compile(r"[A-Za-z]+")
 

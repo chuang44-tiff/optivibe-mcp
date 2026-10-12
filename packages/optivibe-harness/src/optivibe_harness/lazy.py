@@ -24,8 +24,8 @@ open-before-route grabbed it for invalid calls). Logic:
 - coerce non-dict params to ``{}`` (mirror server.py:160); a non-str / unhashable / None
   name is treated as UNKNOWN (it is not in the known-tools map) and does NOT open;
 - if the name is NOT in the known-tools map -> delegate WITHOUT opening (inner -> unknown_tool);
-- elif a required param for that name is MISSING -> delegate WITHOUT opening (inner -> tool_param);
-- else (dispatchable): if ``not session.is_open`` attempt ``session.open()`` inside a guard:
+- elif a required param KEY for that name is MISSING -> delegate WITHOUT opening (inner -> tool_param);
+- else (dispatchable -- every required KEY is present; the VALUES are not inspected, see below): if ``not session.is_open`` attempt ``session.open()`` inside a guard:
   - on open SUCCESS -> delegate to the inner Dispatcher;
   - on open FAILURE -> return a never-raise DEGRADED envelope
     (``error_family="engine_unavailable"``) for THAT call and DO NOT latch — a later
@@ -261,7 +261,15 @@ class LazyHarnessDispatcher:
         UNKNOWN tool name, or a real tool MISSING a required param, is delegated to the
         inner Dispatcher WITHOUT opening (it envelopes ``unknown_tool`` / ``tool_param``
         before any handler runs) — so an unrunnable call never grabs the single (N=1)
-        seat. Only a genuinely dispatchable call attempts ``session.open()``.
+        seat. Only a call whose required KEYS are all present attempts ``session.open()``.
+
+        "Dispatchable" is KEY PRESENCE, not value validity: ``{"surface": None}`` has its
+        required key and opens the engine. That is deliberate (
+        gates-seat-on-key-presence, Option 1). The inner ``Dispatcher.dispatch`` is ALSO
+        presence-only, so rejecting a ``None`` value here would not yield the param
+        refusal -- it would delegate the call to the inner against a COLD session, which
+        would reach a handler with no engine and serve an engine/session family instead.
+        Value validation therefore stays with the handler, which owns it.
 
         For a dispatchable call: if the session is already open, delegate straight to the
         inner Dispatcher (which never-raises). Otherwise attempt ``session.open()`` inside
@@ -293,7 +301,12 @@ class LazyHarnessDispatcher:
         probe_params = params if isinstance(params, dict) else {}
 
         # VALIDATE: is this call dispatchable? The ENTIRE
-        # determination — the known-map lookup AND the required-param presence test —
+        # "every required param KEY is present" -- NOT that the values are valid (a
+        # ``None`` value still counts; value validation is left to the handler, because
+        # the inner dispatch is presence-only too, so a stricter gate here would send a
+        # cold delegate to a handler and serve an engine family instead of a param
+        # refusal). The ENTIRE
+        # determination — the known-map lookup AND the required-param KEY-presence test —
         # runs inside ONE never-raise guard. A pathological tool_name (``__hash__`` /
         # ``__eq__`` raising) or a hostile params object (``__contains__`` raising)
         # therefore degrades to NOT dispatchable -> the engine is NOT opened and the
@@ -315,7 +328,8 @@ class LazyHarnessDispatcher:
             # reference / unknown / non-dispatchable / missing-param call never reaches
             # here, so it never activates -> leaves nothing on disk.
             self._activate_logging()
-            # OPEN only now — the call WILL reach a handler.
+            # OPEN only now — every required KEY is present, so the call reaches a handler
+            # (whether that handler then accepts the VALUES is its own business).
             try:
                 self._session.open()
             except Exception as exc:  # noqa: BLE001 — engine cold/seat taken -> degrade; KI/SystemExit propagate

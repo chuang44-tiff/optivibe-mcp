@@ -307,7 +307,7 @@ def _unverified(disc, harvest, setting, message):
         disc["flags"].append({"harvest_setting_unverified": message})
         return
     raise _Refuse("sampling_not_applied" if setting in ("SampleSize", "sample_size") else
-                  "analysis_settings_unverified", message, **disc)
+                  _ac.SETTINGS_UNVERIFIED_FAMILY, message, **disc)
 
 
 def _engine_fault(disc, harvest, exc, lead):

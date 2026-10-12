@@ -1569,7 +1569,7 @@ def _is_finite_number(value):
     """
     try:
         return math.isfinite(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
 
 

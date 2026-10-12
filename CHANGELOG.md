@@ -2,12 +2,53 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.1.13`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.1.14`). Each tag points at the merge
 commit that published that version, and every tag was verified against the four version
 literals in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.14] — 2026-10-12
+
+- **Three new demos.** An agent reworks a 60× objective into a diffraction-limited 10× / NA 0.45
+  apochromat with no human in the loop ([`demos/walk-in-10x/`](demos/walk-in-10x/README.md)); a
+  local model meets the same targets through the same server and skills
+  ([`demos/local-model-10x/`](demos/local-model-10x/README.md)); and an agent refines a 20× zoom,
+  misses one target, and has its result held back by the promotion gate
+  ([`demos/zoom-20x/`](demos/zoom-20x/README.md)). Each page lists its limits.
+- **`render_ray_fan` and `render_field_curvature_distortion`** — two new plot tools, drawn by
+  OpticStudio. Each saves the picture and, beside it, a `.data.json` file with the full numbers
+  behind the plot. The server now has 92 tools.
+- **New skill `design-aberration-review`.** Two reviewers read the ray fan and the field
+  curvature / distortion plots, with their numbers, and report how the aberrations are balanced.
+  They advise; nothing they say blocks a promotion or edits the design.
+- **`optimize-loop` walks in a hard target.** A demanding spec is reached by stages: the easier
+  targets first, then the hard one moved in by re-weighting, with a review at each stage.
+- **`check_clearance` measures folded systems.** Gaps across a fold are measured and
+  cross-checked against a traced ray, so a healthy folded design promotes without `force`. A gap
+  that cannot be measured is listed as not measured, never counted as clean.
+- `analyze_strehl` takes a `field`, and `analyze_wavefront` takes `hx` / `hy`. Both now say which
+  field they read (`field_evaluated`).
+- `load_design` refuses a file that is not a `.zmx` before loading it, and proves each load
+  against the file's own surface count and thicknesses (`load_verified`).
+- **Changed: catalog bench column names.** `rms_wfe_worst_waves` is now `rms_wfe_axis_waves`, and
+  `strehl_axis` is now `strehl_field1`, because that is what each column holds. The old names are
+  still accepted as ranking inputs, but a saved rank template that names an old output column
+  should be updated.
+- **Fix:** `get_spot` with `per_wave` returned millimetres labelled as micrometres. It now
+  returns micrometres. The default RMS spot is computed from a fixed dense pupil sample.
+- **Fix:** the operand synonym table shipped in 0.1.12 and 0.1.13 with two entries repeated. No
+  lookup answer was wrong; the table is clean again and the release checks now refuse a repeat.
+- `get_operand` places each argument in the operand's own column and reports where it put it.
+- `render_layout` labels the exit face of each glass element, and its description is shorter.
+- Multi-configuration tools refuse a malformed configuration count or value instead of guessing.
+- `search_reference` treats "catalogue" as "catalog".
+- Skill corrections: `optimize-loop` no longer says a glass can be a variable (`set_variable`
+  takes radius, thickness and conic); `bench-catalog` no longer names a constant or a progress
+  stream that do not exist; `zos-api-debug` names the error families the server actually returns.
+- Corrections to earlier entries below: the 0.1.12 line about the engine-session ledger, and the
+  command name of the doctor in 0.1.3.
 
 ## [0.1.13] — 2026-10-07
 
@@ -55,7 +96,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sends and what an agent receives are the same text.
 - `add_math_constraint` checks an operand's sign convention against the reference layer before
   authoring it.
-- The engine-session ledger records which MCP client started each engine.
+- The interaction log records which MCP client made each call.
 - `render_layout` no longer tells agents that the native export writes text; it writes real
   PNGs.
 - `build_operand_semantics.py` writes 1-based manual page citations, matching the rest of the
@@ -115,7 +156,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.3] — 2026-07-30
 
-- **`optivibe doctor`** — a self-diagnostic that names why an install is broken.
+- **The doctor (`python -m optivibe_doctor`)** — a self-diagnostic that names why an install is broken.
 
 ## [0.1.2] — 2026-07-28
 
@@ -131,6 +172,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Initial public release of optivibe-mcp.
 
+[0.1.14]: ../../compare/v0.1.13...v0.1.14
 [0.1.13]: ../../compare/v0.1.12...v0.1.13
 [0.1.12]: ../../compare/v0.1.11...v0.1.12
 [0.1.11]: https://github.com/chuang44-tiff/optivibe-mcp/compare/v0.1.10...v0.1.11

@@ -7,11 +7,12 @@ It is now SLOT-AWARE: the 9-arg
 meanings, so a caller param (``ring``/``samp``/``surf``/``wave``/``hx``…) is placed
 into the slot named by the operand's OWN live Header map, NOT a fixed positional
 guess. The map is read GENERICALLY via a temp row (``AddOperand`` ->
-``ChangeType(member)`` -> ``_merit_cells.read_param_map(op)`` returns the ORDERED
-``{Header: {kind}}`` = positional slots 2,3,4,…; -> ``RemoveOperandAt`` in a
+``ChangeType(member)`` -> ``_merit_cells.read_param_map(op)`` returns
+``{Header: {col, kind}}``, and each value is placed at the argument for its OWN ``col``
+(never by header order, since a blank col 2 shifts every slot) -> ``RemoveOperandAt`` in a
 ``finally`` so the MFE stays byte-identical). Examples (probe-captured):
 ``RWCE``: slot2 = Ring; ``RWRE``: slot2 = Samp; ``REAY``/``RAGY``: slot2 = Surf;
-``EFFL``: Wave only.
+``EFFL``: Wave at col 3 (col 2 blank); ``FCGS``/``FCGT``: Wave/Hx/Hy at cols 3/4/5.
 
 The silent-0 trap this closes (the gap's whole point): a SAMPLED operand
 (``RWCE``/``RWRE``) read with its Ring/Samp slot left at 0 returns ~0 (e.g. RWCE
@@ -136,7 +137,8 @@ def _read_slot_headers(system, member):
 
     ``op = mfe.AddOperand()`` -> ``op.ChangeType(member)`` -> the ordered
     ``_merit_cells.read_param_map(op)`` (``{Header: {col, kind, value}}`` for the
-    non-blank cols 2..9, in column order = the positional slots) -> ALWAYS
+    non-blank cols 2..9; each entry's ``col`` IS its positional slot, and blank columns
+    are skipped, so the map's ORDER is not the slot index) -> ALWAYS
     ``RemoveOperandAt`` in a ``finally`` (net-zero MFE mutation — the add_operand
     orphan-removal discipline). The temp row's operand number is captured
     IMMEDIATELY after the add so the right row is reaped even if a later read
@@ -212,24 +214,39 @@ def _remove_temp_row(mfe, op, operand_number):
         pass
 
 
-def _build_slot_args(headers, supplied):
-    """Map ``supplied`` caller params into the operand's ordered positional slots.
+class _SlotColumnError(ValueError):
+    """A slot header carried a ``col`` that is not an exact int in 2..9 (degraded read)."""
 
-    ``headers`` is ``read_param_map``'s ordered ``{Header: {col, kind, value}}``.
-    ``supplied`` is ``{param_name: value}`` (already typed) the caller passed.
+
+def _build_slot_args(headers, supplied):
+    """Place ``supplied`` caller params into the 9-arg call BY THE OPERAND'S COLUMN.
+
+    ``headers`` is ``read_param_map``'s ``{Header: {col, kind, value}}`` where ``col`` is
+    the MFE cell column 2..9. ``supplied`` is ``{param_name: value}`` (already typed).
 
     Returns ``(slot_args, applied_slots, slot_header_list, density_unset)``:
 
-    - ``slot_args`` — the positional args (col order), each coerced int (int-kind
-      slot) or float (double-kind), padded with 0 to the 8 trailing slots (a2..a9
-      of the 9-arg call). A slot with no matching supplied param defaults to 0.
-    - ``applied_slots`` — ``{Header: value}`` actually placed (the agent-facing map).
-    - ``slot_header_list`` — the operand's slot Header list (col order).
-    - ``density_unset`` — the Header name of a Ring/Samp slot left at 0 (the
+    - ``slot_args`` -- the 8 positional args a2..a9 of the 9-arg ``GetOperandValue``,
+      argument ``aN`` for column ``N``: the header at column ``c`` lands at index
+      ``c - 2``. A value is the supplied param coerced int (int-kind slot) or float
+      (double-kind), or ``0`` for a column with no supplied param or no header (a blank
+      column such as EFFL's col 2, which the engine ignores).
+    - ``applied_slots`` -- ``{Header: value}`` exactly as placed (the agent-facing map).
+      There are no cells to read back here: ``GetOperandValue`` is a stateless call and
+      the temp row was only used to read the slot map. The guarantee is therefore that
+      the SAME column map that NAMES a slot also POSITIONS its argument.
+    - ``slot_header_list`` -- the operand's slot Header list (col order).
+    - ``density_unset`` -- the Header name of a Ring/Samp slot left at 0 (the
       silent-0 flag trigger), or ``None``.
 
     The caller params are keyed BY HEADER (case-insensitive): a Header ``"Ring"``
     takes the ``ring`` param, ``"Surf"`` the ``surf`` param, etc. (``_PARAM_BY_HEADER``).
+
+    Placement is by COLUMN, never by header order: an operand whose first
+    header is not at column 2 (FCGS/FCGT: Wave col 3, Hx col 4, Hy col 5; EFFL: Wave col
+    3) used to have every argument shifted one slot left. Fails CLOSED with
+    ``_SlotColumnError`` on a ``col`` that is not an exact int in 2..9 -- never a
+    fall-back to order.
     """
     # Header (lower) -> the supplied caller value, if any.
     by_header_lower = {}
@@ -237,7 +254,7 @@ def _build_slot_args(headers, supplied):
         if param_name in supplied:
             by_header_lower[header_name.lower()] = supplied[param_name]
 
-    slot_args = []
+    slot_args = [0] * 8
     applied_slots = {}
     slot_header_list = []
     density_unset = None
@@ -245,6 +262,12 @@ def _build_slot_args(headers, supplied):
     for header, meta in headers.items():
         header_str = str(header)
         slot_header_list.append(header_str)
+        col = meta.get("col") if isinstance(meta, dict) else None
+        if type(col) is not int or not 2 <= col <= 9:
+            raise _SlotColumnError(
+                f"slot header #{len(slot_header_list)} carries a column that is not an int "
+                f"in 2..9 (a degraded header read)"
+            )
         kind = meta.get("kind")
         hl = header_str.lower()
         if hl in by_header_lower:
@@ -259,11 +282,8 @@ def _build_slot_args(headers, supplied):
             # A density (Ring/Samp) slot left at 0 is the silent-0 trap.
             if hl in _DENSITY_HEADERS:
                 density_unset = header_str
-        slot_args.append(value)
+        slot_args[col - 2] = value
 
-    # Pad the trailing positional args to the 8 slots (a2..a9) the 9-arg call needs.
-    while len(slot_args) < 8:
-        slot_args.append(0)
     return slot_args, applied_slots, slot_header_list, density_unset
 
 
@@ -391,9 +411,18 @@ def get_operand(session, params):
                     f"specific surface."
                 )
 
-    slot_args, applied_slots, slot_header_list, density_unset = _build_slot_args(
-        headers, supplied
-    )
+    try:
+        slot_args, applied_slots, slot_header_list, density_unset = _build_slot_args(
+            headers, supplied
+        )
+    except _SlotColumnError as exc:
+        # A degraded slot-map read (a col that is not an int in 2..9): same family the
+        # slot-header read serves (operand_param). The temp row is already reaped.
+        return _ac.error_envelope(
+            "get_operand", "operand_param",
+            f"could not place the operand's parameter slots ({exc})",
+            operand=operand,
+        )
 
     flags = []
     if density_unset is not None:

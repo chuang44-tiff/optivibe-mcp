@@ -93,6 +93,7 @@ from ..server import ToolSpec
 # ``min_air``/``min_glass`` mean.
 from .clearance import check_clearance, check_clearance_floor_only, resolve_floors
 from . import _finding
+from . import _fold_gaps as _fg
 from . import _judgment
 from ._image_gate import _is_png
 from ._workspace_paths import RUN_ID_RULE, run_id_refusal
@@ -189,6 +190,32 @@ from .layout_render import render_layout
 # --------------------------------------------------------------------------- #
 # Save-time clearance/visual gate (§1/§2).
 # --------------------------------------------------------------------------- #
+_FOLD_STATUS_RANK = {"not_run": 0, "partial": 1, "complete": 2}
+
+
+def _add_fold_keys(summary, audits, tag=False):
+    """Additive fold keys (``fold_audit_status`` / ``fold_gaps_not_measured`` / ``fold_scope``).
+
+    ``audits`` is ``[(config, fold_audit)]``; the status is the WORST over the folded configs
+    (``None`` if any block is unreadable). Emitted only when the summary is folded."""
+    statuses, unmeasured = [], []
+    for cfg, fa in audits:
+        st = fa.get("status") if isinstance(fa, dict) else None
+        statuses.append(st if (type(st) is str and st in _FOLD_STATUS_RANK) else None)
+        nm = fa.get("not_measured") if isinstance(fa, dict) else None
+        for e in (nm if isinstance(nm, list) else []):
+            if isinstance(e, dict):
+                entry = {"surface": e.get("surface"), "next_surface": e.get("next_surface"),
+                         "reason": e.get("reason")}
+                if tag:
+                    entry["config"] = cfg
+                unmeasured.append(entry)
+    summary["fold_audit_status"] = (
+        None if (not statuses or None in statuses) else min(statuses, key=_FOLD_STATUS_RANK.get))
+    summary["fold_gaps_not_measured"] = unmeasured
+    summary["fold_scope"] = "adjacent_gaps_only (non-adjacent collisions not audited)"
+
+
 def _summary_single(env):
     """Compact echo of a SINGLE-config ``check_clearance`` envelope (§1).
 
@@ -241,6 +268,8 @@ def _summary_single(env):
     }
     if grin_na:
         summary["grin_not_audited"] = grin_na
+    if summary["folded"]:                                 # additive: absent on an unfolded summary
+        _add_fold_keys(summary, [(None, env.get("fold_audit"))])
     return summary
 
 
@@ -301,6 +330,9 @@ def _summary_all(env):
     }
     if grin_na:
         summary["grin_not_audited"] = grin_na
+    if summary["folded"]:
+        _add_fold_keys(summary, [(pc.get("config"), pc.get("fold_audit")) for pc in per
+                                 if isinstance(pc, dict) and pc.get("folded")], tag=True)
     return summary
 
 
@@ -327,7 +359,8 @@ _OWNER_META_KEY = "workspace"
 _CLEARANCE_OK = {"clean": True, "thin": False, "indeterminate": None}
 
 # Coverage-failure reasons. FROZEN token set — a caller branches on WHY, not on prose.
-_COVERAGE_FOLDED   = "folded_gaps_not_audited"
+_COVERAGE_FOLDED   = "folded_gaps_not_audited"       # KEPT, NARROWED: the fold audit did not run / is malformed
+_COVERAGE_FOLD_GAP = "folded_gap_not_measured"       # >=1 adjacent fold gap could not be measured
 _COVERAGE_NO_GAPS  = "no_gaps_audited"
 _COVERAGE_EDGE     = "gap_edge_not_measurable"
 _COVERAGE_RUN      = "gap_run_incomplete"             # audit 
@@ -338,10 +371,14 @@ _COVERAGE_CONFIG   = "config_coverage_incomplete"
 
 _COVERAGE_TEXT = {
     _COVERAGE_FOLDED: (
-        "clearance was NOT audited: the system is folded (a coordinate break or mirror is "
-        "present) and the per-gap edge audit is unfolded-only, so NOTHING about the gaps "
-        "was measured — an absence of evidence, not a finding. Inspect the layout "
-        "(render_layout) and check_clearance's folded_gaps yourself"
+        "clearance was NOT audited: the system is folded and the fold audit did not run or "
+        "returned a malformed fold_audit block — an absence of evidence, not a finding. "
+        "Re-run check_clearance; if it recurs, file it."
+    ),
+    _COVERAGE_FOLD_GAP: (
+        "clearance was only PARTIALLY audited: at least one adjacent gap of this folded "
+        "system could not be measured. check_clearance's fold_audit.not_measured names each "
+        "such gap and its reason token. No unmeasured gap is certified clear."
     ),
     _COVERAGE_NO_GAPS: (
         "clearance was NOT audited: check_clearance produced no gap records at all (fewer "
@@ -618,6 +655,11 @@ def _sweep_covered(env):
     ) == expected_set
 
 
+_FOLD_COVERAGE_TOKEN = {"not_run": _COVERAGE_FOLDED, "gap_not_measured": _COVERAGE_FOLD_GAP,
+                        "no_gaps": _COVERAGE_NO_GAPS, "chain_incomplete": _COVERAGE_RUN,
+                        "record_incomplete": _COVERAGE_FOLD_GAP}
+
+
 def _coverage_gap(env):
     """Coverage-failure token for ONE single-config-shaped envelope, else None.
 
@@ -640,7 +682,15 @@ def _coverage_gap(env):
     ``_run_clearance_gate`` and must stay the only one).
     """
     if env.get("folded"):
-        return _COVERAGE_FOLDED
+        complete, why = _fg.fold_coverage_complete(env)     # the SAME body optimize step 3 calls
+        if not complete:
+            return _FOLD_COVERAGE_TOKEN[why]
+        if env.get("grin_not_audited"):
+            return _COVERAGE_GRIN
+        bfd = env.get("global_bfd")
+        if not isinstance(bfd, dict) or not _finite_reading(bfd.get("behind_last_optic")):
+            return _COVERAGE_FRAME
+        return None
     gaps = env.get("gaps")
     if not isinstance(gaps, list) or not gaps:
         return _COVERAGE_NO_GAPS
@@ -708,6 +758,13 @@ def _classify_clearance(env):
             if isinstance(per, list) and per:
                 summary["coverage_reason"] = _COVERAGE_CONFIG
             return "indeterminate", summary            # fail-closed: cannot certify
+
+        # PASS 0b (fold audit) — a violation among a RAN fold audit's MEASURED records is a confirmed
+        # finding whatever any OTHER configuration's sag-model applicability says; adjudicate it
+        # before PASS 1 can pre-empt it with an UNFOLDED config's TYPE reason.
+        if any(isinstance(pc, dict) and pc.get("folded") and _fg.fold_audit_ran(pc.get("fold_audit"))
+               and _has_violation(pc) for pc in per):
+            return "thin", _summary_all(env)
 
         # PASS 1 (DQ-6) — an unfaithful model precedes the violation scan: a violation
         # computed from a model that does not represent the surface is not a CONFIRMED
@@ -3764,6 +3821,50 @@ _FIGURE_ENVELOPE_KEYS = (
 )
 
 
+def _append_render_error(existing, new):
+    """Join a later ``render_error`` reason onto an earlier one, earlier FIRST.
+
+    Two sites used to assign ``render_error``
+    unconditionally and lost an earlier, accurate reason. ``existing is None`` returns
+    ``new`` unchanged, so every single-reason envelope stays byte-identical.
+    """
+    if existing is None:
+        return new
+    return existing + "; then " + new
+
+
+def _exc_text(exc):
+    """``"<ClassName>: <message>"`` for an exception, NEVER raising itself.
+
+    ``save_candidate`` formats
+    caught exceptions into ``render_error`` and into its two ``workspace_unwritable``
+    ``error`` keys. An exception whose ``__str__`` (or whose type's ``__name__``) is hostile
+    must not escape that handler. A normal exception yields the byte-identical text it
+    always did. ``Exception`` only: an abort (``BaseException``) must still propagate.
+
+    TERMINATION CRITERION: the return is an EXACT ``str`` BY
+    CONSTRUCTION. Each untrusted value is read inside a ``try`` and USED only if
+    ``type(x) is str`` (an exact-type test; a ``str`` SUBCLASS is rejected and replaced by a
+    literal), and the result is plain concatenation of exact strs. Nothing here formats an
+    untrusted object (no f-string, ``format()`` or ``%`` over it), so nothing after the
+    guarded reads can dispatch to user code. Do NOT "simplify" back to an f-string over
+    ``name`` or ``exc``: that reopens the enumeration ladder.
+    """
+    try:
+        name = type(exc).__name__
+    except Exception:  # noqa: BLE001 - a hostile exception TYPE must not escape
+        name = None
+    if type(name) is not str:
+        name = "<unnamed exception>"
+    try:
+        msg = str(exc)
+    except Exception:  # noqa: BLE001 - a hostile __str__ must not escape
+        msg = None
+    if type(msg) is not str:
+        msg = "<unprintable exception>"
+    return name + ": " + msg
+
+
 def save_candidate(session, params):
     """Snapshot the live system as a durable candidate ``.zmx`` (+ paired ``.png``).
 
@@ -3889,7 +3990,7 @@ def save_candidate(session, params):
         return {
             "ok": False,
             "error_family": "workspace_unwritable",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": _exc_text(exc),
             "design_name": design_name,
             "label": label,
             "seq": None,
@@ -3997,7 +4098,7 @@ def save_candidate(session, params):
         return {
             "ok": False,
             "error_family": "workspace_unwritable",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": _exc_text(exc),
             "design_name": design_name,
             "label": label,
             "seq": None,
@@ -4247,7 +4348,7 @@ def save_candidate(session, params):
         except (OSError, ValueError) as exc:  # noqa: BLE001 — never raise
             _minted_png = None
             render_error = (f"the private render name could not be minted: "
-                            f"{type(exc).__name__}: {exc}")
+                            f"{_exc_text(exc)}")
         try:
             if _minted_png is None:
                 render_res = {"ok": False, "path": None}
@@ -4321,9 +4422,15 @@ def save_candidate(session, params):
                     # is dropped with the claim.
                     png_produced_here = False
                     _png_sha_proved = None
-                    render_error = (
+                    # Keep an earlier
+                    # refusal reason; the publish failure is appended, not substituted.
+                    render_error = _append_render_error(
+                        render_error,
                         f"the rendered figure could not be published to its sibling "
-                        f"path: {type(exc).__name__}: {exc}")
+                        f"path: {_exc_text(exc)}")
+                    # The replace FAILED, so the sibling was not replaced, whatever the
+                    # pre-replace read said (A3-3).
+                    png_replaced_existing = False
             png_ok = bool(_png_is_png and png_produced_here)
             # ``png_unproven`` IS A DISCLOSURE ABOUT THE SIBLING, AND UNDER S-3 IT HAS
             # TO BE READ THERE. Before S-3 the render wrote straight to the sibling, so
@@ -4391,7 +4498,13 @@ def save_candidate(session, params):
         except Exception as exc:  # noqa: BLE001 — render is a convenience; never raise
             png_ok = False
             png_path = png_path
-            render_error = f"{type(exc).__name__}: {exc}"
+            # Append, never overwrite an
+            # earlier reason (mint failure, refusal, digest or not-a-PNG text).
+            render_error = _append_render_error(
+                render_error, _exc_text(exc))
+            if not _png_published:
+                # Nothing reached the sibling, whatever the pre-replace read said (A4-2).
+                png_replaced_existing = False
         finally:
             # THE MINTED NAME WAS CREATED BY THIS CALL, so removing it cannot
             # destroy an artifact this workspace was keeping. It is removed on EVERY
@@ -4614,7 +4727,10 @@ def save_candidate(session, params):
     judgment_receipt = None
     if judgment_req is not None:
         if not _write_audit:
-            judgment_record = "not_written:dir_unresolved"
+            # The judgment write shares the audit row's preconditions, so it
+            # reports the audit's OWN skip reason (snapshot_failed / digest_unreadable /
+            # floors_unresolved / dir_unresolved) rather than always naming the directory.
+            judgment_record = audit_record
         else:
             judgment_record = _write_judgment_record(
                 _audit_dir,
