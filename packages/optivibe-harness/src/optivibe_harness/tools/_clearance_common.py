@@ -211,7 +211,7 @@ def _row_is_flat(row):
 def optic_rim_edge(center, optic_row, end_row):
     """The END gap's edge read at the OPTIC's own rim against a FLAT end surface.
 
-    ``check_clearance`` reads every gap's edge at the SMALLER of the two semi-diameters.
+    ``check_clearance`` reads an air gap's edge at the SMALLER of the two semi-diameters.
     For the gap that ends at the image that is the image circle, close to the axis, so
     the reading is nearly the vertex distance. This is the second reading: how far the
     optic's own clear rim sits from the end PLANE (a sample, cover glass or sensor is

@@ -141,8 +141,8 @@ def _surface_rows(system, conn, waves_ref_um):
                 solves.append((s, solve))
             hits = cmap.get(str(row.MaterialCatalog or "").strip().upper(), [])
             if len(hits) != 1:
-                raise _unsupported(f"surface {s}: {mat} in {row.MaterialCatalog} has no index in "
-                                   f"the glass database at {waves_ref_um} um", "glass")
+                raise _unsupported(f"surface {s}: catalog {row.MaterialCatalog} of {mat} is not in "
+                                   f"the built glass database, or is ambiguous there", "glass")
             if s == n - 2:
                 raise _unsupported(f"the image space is not air (surface {s} carries glass)",
                                    "not_in_air")

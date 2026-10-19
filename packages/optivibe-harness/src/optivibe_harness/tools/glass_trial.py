@@ -87,6 +87,7 @@ _MSG = {
     "not_single": "set %d: surface %d is not the single row of one glass element",
     "same_element": "set %d: two entries sit in element %d",
     "not_in_catalog": "set %d: glass %s is not in catalog %s",
+    "no_index": "set %d: glass %s in catalog %s has no index at the primary wavelength (%g um) in the glass database",
     "multi_config": "the lens has %d configurations; trial by hand",
     "not_ready": "dry_run did not report ready: %s: %s",
     "material_solve": "surface %d's glass is under a %s solve; a swap would not hold",
@@ -243,8 +244,10 @@ def _binding(system, sets, primary_um):
                 members = {m.casefold() for m in cats.GetMaterialsInCatalog(canon)} if canon else set()
                 held = _ge._holders(conn, key, e["glass"])
                 n_new = _ge._index_at(conn, held[0][0], held[0][1], primary_um) if held else None
-                if canon is None or e["glass"].casefold() not in members or n_new is None:
+                if canon is None or e["glass"].casefold() not in members or not held:
                     raise _Refuse("tool_param", _MSG["not_in_catalog"] % (n, e["glass"], e["catalog"]))
+                if n_new is None:
+                    raise _Refuse("tool_param", _MSG["no_index"] % (n, e["glass"], e["catalog"], primary_um))
                 for c in in_use + [canon]:
                     if c.casefold() == canon.casefold():
                         break

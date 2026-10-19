@@ -710,6 +710,7 @@ IDENTITY_PRESERVING_TOOLS = frozenset({
     "analyze_grin_profile", "analyze_lateral_color", "analyze_relative_illumination",
     "analyze_strehl", "analyze_wavefront", "capture_graphic", "check_clearance",
     "describe_configurations", "describe_surfaces", "dry_run", "dump_merit_function",
+    "explain_glass_swaps",  # property reads + GetOperandValue + SELECTs on an in-memory DB
     "get_first_order", "get_mtf", "get_operand", "get_spot", "get_system_info",
     "list_catalogs", "list_glass_catalog", "list_variables", "read_lens_spec",
     "read_surface", "render_layout", "serialize_merit", "surface_count", "trace_rays",

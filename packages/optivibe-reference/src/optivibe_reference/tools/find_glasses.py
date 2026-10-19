@@ -29,9 +29,11 @@ in-band-valid. Every window predicate is built as
 ``vd`` is null can NEVER match a Vd window — only rows with a genuinely-computed
 in-band value are returned.
 
-THE ΔPg,F CAVEAT: ``delta_pg_f`` is stored VERBATIM from the ``.agf`` (ED token 4)
-and is UNVALIDATED raw vendor data (the probe saw values down to -81.0). A
-``delta_pg_f`` window matches on that raw stored value, and the result carries
+THE ΔPg,F CAVEAT: ``delta_pg_f`` comes from the ``.agf`` (ED token 4) and is
+UNVALIDATED vendor data. ``build_glass_db`` stores a value whose magnitude is beyond
+``glass_build.DELTA_PG_F_LIMIT`` (0.1) as NULL (the probe saw values down to -81.0),
+so such a row cannot match a ``delta_pg_f`` window and sorts last. A window matches on
+the stored value, and the result carries
 ``delta_pg_f_unvalidated: True`` so the caller knows the trustworthy
 partial-dispersion quantity is the COMPUTED ``pg_f`` (with its ``pg_f_valid``
 gate), not this field.
@@ -77,10 +79,10 @@ _RESULT_COLUMNS = (
 # The window params: each maps the public ``<field>_min`` / ``<field>_max`` pair
 # onto a real glass column. ``valid_only=True`` adds the ``<col> IS NOT NULL``
 # clause (the cardinal-defense gate — a NULL computed field is out-of-band and
-# must never match a window). ``delta_pg_f`` is raw/unvalidated so it does NOT
-# get the NOT NULL gate keyed to a *_valid flag (its NULLs are absent-in-.agf,
-# not out-of-band), but a NULL still cannot satisfy a BETWEEN, so SQLite filters
-# it naturally; we mark the result as unvalidated instead.
+# must never match a window). ``delta_pg_f`` is unvalidated so it does NOT get the
+# NOT NULL gate keyed to a *_valid flag (its NULLs are absent in the .agf or beyond
+# the +-0.1 limit applied at DB build), but a NULL still cannot satisfy a BETWEEN, so
+# SQLite filters it naturally; we mark the result as unvalidated instead.
 _WINDOW_FIELDS = (
     # (public_prefix, column, valid_only)
     ("vd", "vd", True),
@@ -267,8 +269,9 @@ def find_glasses(db_conn, params):
         # Flag the caveat: delta_pg_f is raw, unvalidated .agf data.
         result["delta_pg_f_unvalidated"] = True
         result["note"] = (
-            "delta_pg_f is raw unvalidated .agf data (manufacturer ED token 4); "
-            "the trustworthy partial dispersion is the computed pg_f (pg_f_valid)"
+            "delta_pg_f is unvalidated .agf data (manufacturer ED token 4); a stored "
+            "value beyond +-0.1 reads as null; the trustworthy partial dispersion is "
+            "the computed pg_f (pg_f_valid)"
         )
     return result
 
