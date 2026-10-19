@@ -27,12 +27,20 @@ def _isolated(ys):
     return [k for k in range(n) if fin[k] and not (k > 0 and fin[k - 1]) and not (k + 1 < n and fin[k + 1])]
 
 
-def fan_model(fields, waves, scale, config_line, footer_lines, unit_label="um"):
+def _beyond(ys, limit):
+    """Indices of finite samples outside ``+-limit`` (a fixed scale): drawn as an edge marker, ONCE here."""
+    return [k for k, y in enumerate(ys) if not math.isnan(y) and abs(y) > limit]
+
+
+def fan_model(fields, waves, scale, config_line, footer_lines, unit_label="um", airy_um=None):
     """The figure as data.
 
     ``fields``: ``[{index, label, annotation | None, tan_x, sag_x, ey: {wave: [41|None]},
     ex: {wave: [41|None]}}]`` in index order. ``waves``: ``[{index, um, colour}]``.
-    ``scale``: the ``fan_scale`` dict. Returns a model whose ``ys`` arrays are nan-bearing."""
+    ``scale``: the ``fan_scale`` dict, or a fixed one (``fixed`` True): then every finite sample beyond
+    ``+-scale.value`` is listed in its line's ``beyond`` and marked at the edge. ``airy_um``: the Airy radius
+    for the title, ``None`` when it could not be read. Returns a model whose ``ys`` arrays are nan-bearing."""
+    fixed = bool(scale.get("fixed"))
     blocks = []
     for f in fields:
         panels = {}
@@ -46,18 +54,29 @@ def fan_model(fields, waves, scale, config_line, footer_lines, unit_label="um"):
                 drawn = _nan(ys)
                 lines.append({"gid": "fan:%d:%d:%s" % (f["index"], w["index"], key[0]),
                               "wave": w["index"], "xs": [float(x) for x in xs], "ys": drawn,
-                              "color": w["colour"], "isolated": _isolated(drawn)})
+                              "color": w["colour"], "isolated": _isolated(drawn),
+                              "beyond": _beyond(drawn, scale["value"]) if fixed else []})
             panels[key] = {"corner": corner, "lines": lines}
         blocks.append({"index": f["index"], "label": f["label"], "annotation": f.get("annotation"),
                        "annotation_token": f.get("annotation_token"),
                        "panels": panels})
-    title_lines = [TITLE, "Maximum Scale: ± %s %s." % (ps.format_value(scale["value"]),
-                                                              "µm" if unit_label == "um" else unit_label),
-                   SURFACE_LINE, config_line]
+    unit = "µm" if unit_label == "um" else unit_label
+    scale_line = "Maximum Scale: ± %s %s." % (ps.format_value(scale["value"]), unit)
+    if fixed:
+        dm = scale.get("data_max")
+        scale_line = "Maximum Scale: ± %s %s (fixed; data max %s %s)." % (
+            ps.format_value(scale["value"]), unit, "unread" if dm is None else ps.format_value(dm), unit)
+    airy_line = ("Airy radius: %s µm (1.22 x λ x working F/#, primary wave)" % ps.format_value(airy_um)
+                 if airy_um is not None else "Airy radius: unread")
+    title_lines = [TITLE, scale_line, airy_line, SURFACE_LINE, config_line]
     n_isolated = sum(len(ln["isolated"]) for b in blocks for p in b["panels"].values() for ln in p["lines"])
     footer = list(footer_lines)
     if n_isolated:
         footer.append("%d isolated sample(s) drawn as markers" % n_isolated)
+    n_beyond = sum(len(ln["beyond"]) for b in blocks for p in b["panels"].values() for ln in p["lines"])
+    if n_beyond:
+        footer.append("%d sample(s) beyond the fixed scale, marked by a triangle at the edge; the values are in "
+                      "the envelope." % n_beyond)
     legend = [("%s µm" % ps.format_value(w["um"]), w["colour"]) for w in waves]
     return {"blocks": blocks, "title_lines": title_lines, "scale_value": scale["value"],
             "legend": legend, "footer_lines": footer}
@@ -73,7 +92,8 @@ def _place(n_blocks, b):
 
 def build_fan_figure(model):
     """``(fig, plt)``; artist ``gid`` = ``fan:<field>:<wave>:<t|s>``, ``annotation:<panel>:<reason>``,
-    ``title_block``, ``footer``; one marker artist per isolated sample, gid ``isolated:<field>:<wave>:<t|s>:<k>``
+    ``title_block``, ``footer``; one marker artist per isolated sample, gid ``isolated:<field>:<wave>:<t|s>:<k>``,
+    and on a fixed scale one edge triangle per sample beyond it, gid ``beyond:<field>:<wave>:<t|s>:<k>``
     (deliberately NOT ``fan:``-prefixed: ``fan:`` gids are the one-per-line registry the consumers key on).
 
     Every panel draws native-style CROSSING centre axes (owner ruling): a vertical line at pupil 0 and a
@@ -124,6 +144,11 @@ def build_fan_figure(model):
                             ax.plot([ln["xs"][k]], [ln["ys"][k]], marker="o", markersize=2, linestyle="None",
                                     color=ln["color"],
                                     gid="isolated:%s:%s" % (ln["gid"][len("fan:"):], k))
+                        for k in ln["beyond"]:
+                            up = ln["ys"][k] > 0
+                            ax.plot([ln["xs"][k]], [scale if up else -scale], marker="^" if up else "v",
+                                    markersize=4, linestyle="None", color=ln["color"], clip_on=False,
+                                    gid="beyond:%s:%s" % (ln["gid"][len("fan:"):], k))
                     ax.text(0.0, scale, panel["corner"][0], transform=ax.transData, fontsize=7, ha="left",
                             va="bottom", clip_on=False, gid="axis_label:y")
                     ax.text(1.0, 0.0, panel["corner"][1], transform=ax.transData, fontsize=7, ha="left",

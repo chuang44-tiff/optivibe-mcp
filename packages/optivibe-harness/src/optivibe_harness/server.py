@@ -338,7 +338,7 @@ TOOLS_SLOT_TOOLS = frozenset({
     "list_variables", "optimize", "place_element", "ramp_aperture", "render_mtf_vs_field",
     "render_ray_fan", "scale_lens", "set_asphere_variable", "set_cb_variable", "set_config_variable",
     "set_grin_variable", "set_vignetting", "set_zoom", "tolerance", "trace_rays", "vary",
-    "verify_beam_path", "verify_collimation",
+    "verify_beam_path", "verify_collimation", "trial_glass_swaps",
     # The file-hazard delta (reach SaveAs / LoadFile, none reaches an opener)
     "apply_lens_spec", "load_design", "save_candidate", "save_snapshot",
 })
@@ -348,7 +348,8 @@ TOOLS_SLOT_TOOLS = frozenset({
 #: (geometry-only, flagged). It reaches no file-hazard sink (census C5).
 #: ``check_clearance`` and
 #: ``promote_best`` are ALSO degraders -- on a FOLD they open the batch ray trace; on a latched session
-#: ``check_clearance`` opens nothing and reports every fold pair ``not_measured`` (``ray_trace_unavailable``),
+#: ``check_clearance`` opens nothing and reports every fold pair ``not_measured`` (``ray_trace_unavailable``,
+#: or the pair's own earlier reason where it stopped before the trace, e.g. an unreadable bounding row),
 #: so the keeper gate refuses (fail closed). Unfolded calls open nothing and are unchanged.
 _TOOLS_SLOT_DEGRADERS = frozenset({"render_layout", "check_clearance", "promote_best"})
 
@@ -369,6 +370,7 @@ _TOOLS_SLOT_IMPORT_ONLY = {
           "analyze_relative_illumination")),
         ("a read / analysis handler with no call path to an opener",
          ("capture_graphic", "describe_configurations", "describe_surfaces",
+          "explain_glass_swaps",
           "get_mtf", "get_operand", "get_system_info", "list_catalogs",
           "list_glass_catalog", "read_lens_spec", "read_surface", "surface_count",
           "verify_zoom")),
@@ -550,6 +552,10 @@ _SINGLE_SPEC_MODULES = (
     "optivibe_harness.tools.aperture_ramp",
     # Geometric scale (scale_lens).
     "optivibe_harness.tools.scale_lens",
+    # Glass matching: the per-element colour / Petzval table (explain_glass_swaps).
+    "optivibe_harness.tools.glass_explain",
+    # glass-matching A1: the swap-optimise-measure-restore trial (trial_glass_swaps).
+    "optivibe_harness.tools.glass_trial",
 )
 # Tool modules exposing a ``TOOL_SPECS`` tuple of several ToolSpecs (lens tier
 # + analysis tier).

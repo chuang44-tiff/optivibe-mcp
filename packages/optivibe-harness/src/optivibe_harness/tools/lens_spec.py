@@ -2066,7 +2066,10 @@ def apply_lens_spec(session, params):
             object_warnings = _object_skipped_field_warnings(
                 spec.surfaces[0] if spec.surfaces else None
             )
-            warnings = comment_warnings + object_warnings
+            # A glass name more than one in-use catalog holds binds the first in
+            # in-use order; apply cannot name a vendor, so it says which one bound.
+            warnings = (comment_warnings + object_warnings
+                        + lens_glass._ambiguous_binding_warnings(system))
             if warnings:
                 env["warnings"] = warnings
             # S1 GAP-1a: stamp the additive hard-reset disclosure — present ONLY when

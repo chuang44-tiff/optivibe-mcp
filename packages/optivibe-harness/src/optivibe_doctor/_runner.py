@@ -124,8 +124,14 @@ class _SafeStream:
 
     def __init__(self, stream):
         self._stream = stream
+        self._ascii_only = _is_piped_os_stream(stream)
 
     def write(self, text):
+        if self._ascii_only:
+            # A piped or redirected report is read by something else, in an encoding this
+            # process cannot know (a Windows shell re-decodes the bytes with its own code
+            # page). ASCII is the one form every reader shows correctly.
+            text = text.replace("\u2014", "-").encode("ascii", "backslashreplace").decode("ascii")
         try:
             return self._stream.write(text)
         except UnicodeEncodeError:
@@ -144,6 +150,19 @@ class _SafeStream:
 
     def __getattr__(self, name):
         return getattr(self._stream, name)
+
+
+def _is_piped_os_stream(stream):
+    """True iff ``stream`` is a real OS stream that is NOT a terminal (a pipe or a file).
+
+    An in-memory stream (no file descriptor) is not "piped": its reader is this process and
+    gets the text unchanged. Never raises; anything unreadable counts as not piped.
+    """
+    try:
+        stream.fileno()
+        return not stream.isatty()
+    except BaseException:                                          # noqa: BLE001
+        return False
 
 
 def _harden_stream(stream):

@@ -37,7 +37,7 @@ It mirrors `design-vision-review`: the reviewers advise, the main agent listens 
    configuration is its own render with an explicit `config`.
 3. **Save the images and the results.** Before you dispatch, create `review_<n>/` under the workspace root (a relative
    `path` resolves there, not in your working directory), plus the next `review_<n+1>/` for a re-render: the render
-   tool writes into an existing folder only. Each render's `path` is `review_<n>/fan_c<k>.png` or `fcd_c<k>.png` (k = the configuration). The tool writes the data beside it as `<png stem>.data.json` and names it in `data_path`.
+   tool writes into an existing folder only. Each render's `path` is `review_<n>/fan_c<k>.png` or `fcd_c<k>.png` (k = the configuration); the fan reviewer also renders `review_<n>/fan_c<k>_body.png` at a fixed scale of three Airy radii. The tool writes the data beside it as `<png stem>.data.json` and names it in `data_path`.
    If `data_path` is null, its `data_sidecar_failed:<reason>` flag says why: the reviewer renders again into a fresh
    `review_<n>` and, if that fails too, says so in its reply. Never retype the data by hand.
    When the replies are back, check `review_<n>/` (or the folder a reply says it re-rendered into) holds a PNG and a
@@ -47,7 +47,7 @@ It mirrors `design-vision-review`: the reviewers advise, the main agent listens 
    it is missing): one for the fan, one for field curvature / distortion. Fill its placeholders: `{FIGURE}` (ray fan,
    or field curvature / distortion), `{DESIGN_INTENT}` (one line on what the lens is meant to be), `{CONFIG_FILES}`
    (one line per configuration: `config <k>: render it with waves <list>, image <png path>, data <png stem>.data.json`
-   — ALL of them for that figure) and `{REPLY_PATH}` (`review_<n>/fan_reply.md` or `fcd_reply.md`). Do not rewrite
+   — ALL of them for that figure; for the fan add `, body image <fan_c<k>_body.png path>`) and `{REPLY_PATH}` (`review_<n>/fan_reply.md` or `fcd_reply.md`). Do not rewrite
    the prompt's instructions.
 5. **Merge into ONE cross-plot picture**, not two verdicts side by side: which aberrations are present, how they are
    balanced against each other and across configurations, which one limits and at what configuration, field and wave.
@@ -55,7 +55,9 @@ It mirrors `design-vision-review`: the reviewers advise, the main agent listens 
    configurations by the numbers, never by eye. Every size claim quotes a value from a reply or a data file, and the
    merge names both reply files. If either reply is missing or unusable, there is no merged picture and no claim of a limiting
    aberration — dispatch again.
-6. **Use it.** The merged picture picks the move, not one operand. Check the claim behind it with a numeric tool
+6. **Use it.** The merged picture picks the move, not one operand. Prefer a readable form to a stuck one even when its
+   RMS is worse (the fan reviewer's `Form`): a readable form is worked on its named terms. A stuck form needs a new
+   start or merit, not a longer run. Check the claim behind it with a numeric tool
    first. The move takes up a suggestion, or your answer says why another is better (a human's steer counts as that
    answer). On a multi-config design, check a fix at every configuration. Any design or config change retires the
    review; a new diagnosis needs a fresh one.

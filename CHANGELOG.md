@@ -2,12 +2,64 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.1.14`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.1.15`). Each tag points at the merge
 commit that published that version, and every tag was verified against the four version
 literals in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.15] — 2026-10-19
+
+- **Glass tools.** Two new tools help an agent choose glass once a lens form has settled, and the
+  two glass searches gain new controls:
+  - `explain_glass_swaps` is read-only. It lists which glass elements carry the lens's colour
+    and Petzval terms, and which swaps would move them.
+  - `trial_glass_swaps` tries up to four swap sets. Each set is re-optimised on its own time
+    budget, beside an unchanged control, and judged on measured image quality. A set that falls
+    far behind its control and cannot catch up is dropped early.
+  - `find_glass_pair` and `find_glasses` now return lens materials by default and take a vendor
+    list; `find_glasses` also says how many glasses matched and takes a sort order.
+
+  The harness now has 94 tools; with the five reference tools the server serves 99.
+- **Hold the two glass tools that edit a design behind a permission rule.** `trial_glass_swaps`
+  edits the open lens while it runs and then restores it; `substitute_glass` leaves its change in place. The README shows a Claude Code `ask` rule that makes
+  each call wait for your OK. In a headless (`claude -p`) or `dontAsk` run, a call that matches
+  an `ask` rule is denied, not asked.
+- **New skill `design-glass-matching`.** It runs the glass step: read the glass table, choose
+  swap sets, trial them, and keep a swap only when overall image quality improves at every field.
+- **`doc/glass-matching/`** gives the glass-matching math with sources, and a script that
+  reproduces its worked examples.
+- **Skill updates.** `optimize-loop` leaves glass to the end (it hands a settled lens to
+  `design-glass-matching`), reads Strehl with `analyze_strehl(fields="all")`, treats a time-budget
+  stop as not converged, cuts an unpromising run early, and reads the `_unphysical` /
+  `_unverified` verdict suffixes. `design-aberration-review` adds a second ray fan at a fixed
+  scale of three Airy radii and a readable-or-stuck verdict on the form. `design-vision-review`
+  follows the new edge rule below, and a reported finding blocks promotion until it is answered.
+- **Changed: `check_clearance` reads a glass element's edge at each face's own rim.** For an
+  unfolded glass gap, the edge is now the thickness where the wider face reaches its own
+  semi-diameter, which is OpticStudio's own edge thickness. Edges read thinner on most
+  elements than before. The old reading is reported as `edge_thickness_min_aperture` for this
+  release only, for comparison; it never decides a pass. Air gaps and folded systems are read
+  as before.
+- **Changed: `analyze_axial_color`'s `f_minus_c_shift_mm` now holds F minus C, as its name
+  says.** Earlier versions returned it with the opposite sign.
+- **Changed: the best-focus reading refuses a plane it did not find**, instead of returning a
+  pinned or unmoved plane as a valid reading.
+- **Changed: `get_operand` refuses a parameter the operand has no column for.**
+- `optimize` takes a time budget for one call's optimizer run, and says what ended its pass loop
+  (`stop_reason`).
+- `analyze_strehl` takes `fields` and reads several fields in one call; every call also returns
+  the polychromatic Strehl (`polychromatic`).
+- `render_ray_fan` takes an optional fixed `scale_um`; samples beyond it are marked and listed.
+  Every fan now reports the Airy radius.
+- `substitute_glass` reports which catalogue the engine actually used, flags a name held by more
+  than one loaded catalogue, and takes an optional `catalog`.
+- `check_clearance` also reports the back gap's reading at the lens rim (`rim_edge`).
+- Fix: calcium fluoride and the lowest-dispersion glasses have their Abbe number back.
+- Fix: the doctor no longer warns falsely about Pillow, and a piped report is readable.
+- Fix: findings from the 0.1.14 public review (an unflagged empty cross-check, a dropped ranking
+  column, and smaller items).
 
 ## [0.1.14] — 2026-10-12
 
@@ -173,6 +225,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Initial public release of optivibe-mcp.
 
+[0.1.15]: ../../compare/v0.1.14...v0.1.15
 [0.1.14]: ../../compare/v0.1.13...v0.1.14
 [0.1.13]: ../../compare/v0.1.12...v0.1.13
 [0.1.12]: ../../compare/v0.1.11...v0.1.12

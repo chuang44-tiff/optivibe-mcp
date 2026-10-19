@@ -15,7 +15,7 @@ wavefront, axial color) WITHOUT hand-driving operand rows or a thickness solve:
   + ``RWRE`` (RMS-to-chief), per wave, at both planes. ``samp`` density guard
   (>= 1; default 6; a value < 1 -> ``measurement_param``, never clamped). PV is
   unavailable (no PVCE/PVRE operand) — reported as such, never fabricated.
-- ``analyze_axial_color`` (locked D7/C) — ``AXCL`` scalar (shorter-minus-longer focus
+- ``analyze_axial_color`` (locked D7/C) — negated ``AXCL`` scalar (shorter-minus-longer focus
   shift in mm) over a wavelength pair RESOLVED BY VALUE from the system's own table:
   the 0.4861/0.6563 µm F/C lines when BOTH are present, otherwise the system's own
   shortest and longest wavelengths. Never by file order (AXCL sign-flips on swap).
@@ -367,8 +367,25 @@ _WAVE_C_UM = 0.656273
 # are exact to ~1e-6; a 1e-3 µm window tolerates a rounded entry without aliasing
 # d (0.5876) onto F/C.
 _WAVE_MATCH_TOL_UM = 1e-3
+# When a per-wavelength best focus is NOT produced. Served in both tool descriptions.
+_BEST_FOCUS_LIMITS = (
+    "A wavelength's at_best_focus entry carries a reason and no value when no best focus "
+    "was found: best_focus_image_distance_solve_driven (the image distance is under a "
+    "solve other than Fixed or Variable; nothing is written and the solve is kept — clear "
+    "the solve to measure), best_focus_outside_scan_window (the lowest reading in the "
+    "+/-0.5 mm scan window lies at its edge, within 1/1000 of its width, so no minimum was "
+    "bracketed; the best plane is about 0.5 mm or more from the current image plane — "
+    "refocus first), or "
+    "best_focus_thickness_write_not_taken. "
+)
 # AXCL<->curve agreement tolerance (mm) for the full-curve consistency assert (D7).
 _AXCL_CURVE_TOL_MM = 1e-3
+# What the sign of ``f_minus_c_shift_mm`` means. Served in the envelope.
+_AXIAL_SIGN_CONVENTION = (
+    "focus(short wavelength) minus focus(long wavelength), i.e. minus AXCL(Wave1=short, "
+    "Wave2=long). Negative: the short wavelength comes to focus first along the direction "
+    "of light travel (measured on unfolded refractive lenses)."
+)
 # The two colour-wavelength resolution bases.
 _BASIS_FC = "fc_by_value"          # both F and C present -> today's pair, unchanged
 _BASIS_BAND = "band_extremes"      # otherwise -> the system's own shortest/longest
@@ -1035,6 +1052,35 @@ _FOCUS_BASIS = "on_axis_rwce_minimum"
 # --------------------------------------------------------------------------- #
 # (A) analyze_strehl — dual-focus STRH per wave.
 # --------------------------------------------------------------------------- #
+def _fields_param_value(v):
+    """The validated ``fields`` request, or ``None`` for anything else.
+
+    ``"all"`` (the exact string) means every field of the system, resolved per
+    configuration. Otherwise a non-empty list of DISTINCT field numbers, each as
+    ``_field_number_value`` accepts one; the order is kept. A duplicate, an empty list,
+    a non-list or one bad entry refuses the whole request.
+    """
+    if isinstance(v, str):
+        return "all" if v == "all" else None
+    if not isinstance(v, (list, tuple)) or not v:
+        return None
+    out = []
+    for item in v:
+        n = _field_number_value(item)
+        if n is None or n in out:
+            return None
+        out.append(n)
+    return out
+
+
+def _strh_field_flag(phase, wave, field, head):
+    # The headline field keeps the pre-``fields`` flag text byte-identical; any other
+    # field names itself so two fields' flags can never be confused.
+    if field == head:
+        return f"STRH({phase},wave={wave}) suspicious"
+    return f"STRH({phase},wave={wave},field={field}) suspicious"
+
+
 @_never_raise("analyze_strehl")
 def analyze_strehl(session, params):
     """Strehl per wave at the current image plane AND best focus (locked D4/A).
@@ -1049,6 +1095,16 @@ def analyze_strehl(session, params):
     whatever field 1's coordinates are); every success result carries ``field_evaluated``
     naming the requested field. The best-focus PLANE is the ON-AXIS RWCE minimum whatever
     ``field`` is (one system focus plane); ``focus_basis`` discloses it.
+
+    ``fields`` (``"all"`` or a list of distinct field numbers) reads several fields in one
+    call and may not be given together with ``field``. Each field gets a ``per_field``
+    entry; the top-level keys describe the FIRST field read (``fields_evaluated[0]``).
+    The per-wave focus scans run once per wave and every field is read at that plane, so
+    a fields call costs no more scans than a single-field call.
+
+    ``polychromatic`` is the STRH Wave=0 reading (all wavelengths, weighted) at the
+    CURRENT image plane only. It includes lateral colour, so it is not a weighted mean of
+    the per-wave values. No best-focus polychromatic value is read.
 
     ``config`` (None|int|"all") selects the configuration: None=current
     (byte-identical), an int reads at that config, ``"all"`` sweeps every config into a
@@ -1065,6 +1121,22 @@ def analyze_strehl(session, params):
             "analyze_strehl", "measurement_param",
             f"field must be an integer >= 1 (the field NUMBER to read), got {_safe_repr(raw_field)}",
         )
+    fields_req = None
+    if isinstance(params, dict) and dict.__contains__(params, "fields"):
+        if dict.__contains__(params, "field"):
+            return _ac.error_envelope(
+                "analyze_strehl", "measurement_param",
+                "pass field OR fields, not both (fields reads several fields; "
+                "field reads one)",
+            )
+        raw_fields = dict.get(params, "fields")
+        fields_req = _fields_param_value(raw_fields)
+        if fields_req is None:
+            return _ac.error_envelope(
+                "analyze_strehl", "measurement_param",
+                "fields must be 'all' or a non-empty list of distinct field numbers "
+                f">= 1, got {_safe_repr(raw_fields)}",
+            )
 
     def _grade(sess):
         system = sess.system
@@ -1074,45 +1146,87 @@ def analyze_strehl(session, params):
                 "analyze_strehl", "analysis_empty",
                 "SystemData reports 0 wavelengths; no Strehl to read",
             )
-        if field != 1:  # the count is read ONLY for a non-default field
+        if fields_req is None:
+            if field != 1:  # the count is read ONLY for a non-default field
+                nfield = _field_count(system)
+                if nfield <= 0:
+                    return _ac.error_envelope(
+                        "analyze_strehl", "measurement_param",
+                        f"field={field} cannot be checked: the field count "
+                        f"(SystemData.Fields.NumberOfFields) was unreadable or 0",
+                    )
+                if field > nfield:
+                    return _ac.error_envelope(
+                        "analyze_strehl", "measurement_param",
+                        f"field={field} is out of range: the system has {nfield} field(s)",
+                    )
+            field_list = [field]
+        else:
             nfield = _field_count(system)
             if nfield <= 0:
                 return _ac.error_envelope(
                     "analyze_strehl", "measurement_param",
-                    f"field={field} cannot be checked: the field count "
+                    f"fields={_safe_repr(fields_req)} cannot be checked: the field count "
                     f"(SystemData.Fields.NumberOfFields) was unreadable or 0",
                 )
-            if field > nfield:
-                return _ac.error_envelope(
-                    "analyze_strehl", "measurement_param",
-                    f"field={field} is out of range: the system has {nfield} field(s)",
-                )
+            if fields_req == "all":
+                field_list = list(range(1, nfield + 1))
+            else:
+                over = [k for k in fields_req if k > nfield]
+                if over:
+                    return _ac.error_envelope(
+                        "analyze_strehl", "measurement_param",
+                        f"fields {over} out of range: the system has {nfield} field(s)",
+                    )
+                field_list = list(fields_req)
+        head = field_list[0]
         waves = list(range(1, nwave + 1))
         flags = []
 
-        # Current image plane (read-only, no mutation).
-        at_image = []
-        for w in waves:
-            raw, suspicious = _mc.read_operand_slots(
-                system, "STRH", _strh_slots(w, field))
-            entry = _reading("STRH", raw, suspicious, units="dimensionless", wave=w)
-            at_image.append(entry)
+        # Current image plane (read-only, no mutation): per wave, then polychromatic.
+        at_image = {}
+        poly = {}
+        for k in field_list:
+            rows = []
+            for w in waves:
+                raw, suspicious = _mc.read_operand_slots(
+                    system, "STRH", _strh_slots(w, k))
+                rows.append(_reading("STRH", raw, suspicious, units="dimensionless", wave=w))
+                if suspicious:
+                    flags.append(_strh_field_flag("image", w, k, head))
+            at_image[k] = rows
+            raw, suspicious = _mc.read_operand_slots(system, "STRH", _strh_slots(0, k))
+            poly[k] = _reading("STRH", raw, suspicious, units="dimensionless", wave=0,
+                               basis="polychromatic", plane="image")
             if suspicious:
-                flags.append(f"STRH(image,wave={w}) suspicious")
+                flags.append("STRH(image,polychromatic) suspicious" if k == head
+                             else f"STRH(image,polychromatic,field={k}) suspicious")
 
         # The per-config headline (D3): the wave-1 image-plane STRH.
-        headline_value = at_image[0]["value"] if at_image else None
+        headline_value = at_image[head][0]["value"] if at_image[head] else None
         result = {
             "ok": True,
             "tool": "analyze_strehl",
             "waves": waves,
             "config_headline": headline_value,
-            "field_evaluated": _strehl_field_evaluated(system, field),
-            "at_image_plane": at_image,
+            "field_evaluated": _strehl_field_evaluated(system, head),
+            "at_image_plane": at_image[head],
+            "polychromatic": poly[head],
             "at_best_focus": None,
             "best_focus_requested": do_best,
             "flags": flags,
         }
+        per_field = None
+        if fields_req is not None:
+            per_field = [{
+                "field": k,
+                "field_evaluated": _strehl_field_evaluated(system, k),
+                "polychromatic": poly[k],
+                "at_image_plane": at_image[k],
+                "at_best_focus": None,
+            } for k in field_list]
+            result["fields_evaluated"] = list(field_list)
+            result["per_field"] = per_field
 
         # (afocal/collimation §3.1) QUARANTINE the catastrophic headline on a
         # collimated/afocal output: the image-plane STRH (0.0173) is plausible-WRONG.
@@ -1121,10 +1235,15 @@ def analyze_strehl(session, params):
         # mutates the back-airgap — quarantine REMOVES a mutation), and flag loud.
         if _is_collimated_output(system):
             result["config_headline"] = None
+            result["polychromatic"] = None
+            if per_field is not None:
+                for entry in per_field:
+                    entry["polychromatic"] = None
             result["collimated_output"] = True
             result["verdict"] = "metric_not_applicable"
             result["raw_image_plane_reading"] = {
-                "STRH": at_image,
+                "STRH": at_image[head],
+                "STRH_polychromatic": poly[head],
                 "meaningless_for_collimated_output": True,
             }
             result["at_best_focus"] = {
@@ -1136,11 +1255,12 @@ def analyze_strehl(session, params):
         if not do_best:
             return result
 
-        at_best = []
+        at_best = {k: [] for k in field_list}
         restore_flags = []
         for w in waves:
             # Each wave is scanned to its OWN best plane (per-wave best focus, D3) and
             # restored before the next wave (the context manager restores in finally).
+            # Every requested field is read at that one plane (one scan per wave).
             # This with_best_focus is the INNER manager (Q11) — the driver's
             # with_configuration wraps the WHOLE grade OUTER.
             with _mc.with_best_focus(
@@ -1148,26 +1268,30 @@ def analyze_strehl(session, params):
                 slots_by_name=_rwce_slots(_DEFAULT_SAMP, w),
             ) as focus:
                 if focus["available"]:
-                    raw, suspicious = _mc.read_operand_slots(
-                        system, "STRH", _strh_slots(w, field)
-                    )
-                    entry = _reading(
-                        "STRH", raw, suspicious, units="dimensionless", wave=w,
-                        plane_thickness=focus["plane_thickness"],
-                    )
-                    at_best.append(entry)
-                    if suspicious:
-                        flags.append(f"STRH(best,wave={w}) suspicious")
+                    for k in field_list:
+                        raw, suspicious = _mc.read_operand_slots(
+                            system, "STRH", _strh_slots(w, k)
+                        )
+                        at_best[k].append(_reading(
+                            "STRH", raw, suspicious, units="dimensionless", wave=w,
+                            plane_thickness=focus["plane_thickness"],
+                        ))
+                        if suspicious:
+                            flags.append(_strh_field_flag("best", w, k, head))
                 else:
-                    at_best.append({
-                        "operand": "STRH", "wave": w, "value": None,
-                        "units": "dimensionless", "suspicious": True,
-                        "reason": focus["reason"],
-                    })
+                    for k in field_list:
+                        at_best[k].append({
+                            "operand": "STRH", "wave": w, "value": None,
+                            "units": "dimensionless", "suspicious": True,
+                            "reason": focus["reason"],
+                        })
                     flags.append(f"STRH(best,wave={w}): {focus['reason']}")
             if not focus["restore_verified"]:
                 restore_flags.append(focus["mutation_warning"])
-        result["at_best_focus"] = at_best
+        result["at_best_focus"] = at_best[head]
+        if per_field is not None:
+            for entry in per_field:
+                entry["at_best_focus"] = at_best[entry["field"]]
         result["focus_basis"] = _FOCUS_BASIS
         if restore_flags:
             restore_flags = _dedupe_warnings(restore_flags)
@@ -1670,9 +1794,13 @@ def _single_config_selector(session, params, tool_name):
 def analyze_axial_color(session, params):
     """Axial (longitudinal) color: the AXCL focus shift (mm) + optional curve (D7/C).
 
-    Headline ``f_minus_c_shift_mm`` = ``AXCL(wave1=short, wave2=long)`` — the SHORTER
-    minus the LONGER wavelength, a difference of focus positions (so it does not depend
-    on the curve's zero reference). The pair is resolved BY VALUE from the system's own
+    Headline ``f_minus_c_shift_mm`` = focus(SHORTER wavelength) minus focus(LONGER
+    wavelength), a difference of focus positions (so it does not depend on the curve's
+    zero reference). It is the NEGATED operand read: measured live, ``AXCL(Wave1=a,
+    Wave2=b)`` is focus(b) minus focus(a), so ``AXCL(short, long)`` is long minus short.
+    Negative means the short wavelength comes to focus first along the direction of
+    light travel (the ordinary under-corrected positive lens); ``sign_convention``
+    says so in the envelope. The pair is resolved BY VALUE from the system's own
     table: the F/C lines (0.4861/0.6563 µm) when both are present, otherwise the
     system's shortest and longest wavelengths. Never by file order (AXCL sign-flips on
     swap). ``wavelength_basis`` + ``wavelengths_used`` name the pair actually used.
@@ -1730,11 +1858,18 @@ def _analyze_axial_color_at(session, params):
     )
     if suspicious:
         flags.append("AXCL suspicious (sentinel/overflow)")
+    # AXCL(Wave1=short, Wave2=long) is focus(long) - focus(short) (measured live against
+    # an independent real-ray focus per colour), so the key's value is the negated read.
+    # ``0.0 - raw`` keeps a true zero as +0.0; a non-number degrades through safe_float
+    # exactly as before.
+    is_num = isinstance(raw, (int, float)) and not isinstance(raw, bool)
+    f_minus_c = (0.0 - raw) if is_num else raw
 
     result = {
         "ok": True,
         "tool": "analyze_axial_color",
-        "f_minus_c_shift_mm": safe_float(raw),
+        "f_minus_c_shift_mm": safe_float(f_minus_c),
+        "sign_convention": _AXIAL_SIGN_CONVENTION,
         "units": "mm",
         "wave_slots_used": {"wave1_F": f_idx, "wave2_C": c_idx},
         "suspicious": bool(suspicious),
@@ -1757,7 +1892,9 @@ def _analyze_axial_color_at(session, params):
                 # differ, so the two quantities must carry their own bases.
                 "domain_um": [min(p[0] for p in points), max(p[0] for p in points)],
             }
-            # AXCL<->curve agreement: |shift(short) - shift(long)| should match |AXCL|.
+            # Scalar<->curve agreement: |shift(short) - shift(long)| should match the
+            # scalar's size. The comparison is on magnitudes; the two also agree in SIGN
+            # on the lenses measured live (pinned in the live sign test).
             # The interpolation points are the RESOLVED wavelengths, NOT the F/C literals.
             # Probe-measured: on a 0.48-0.6438 band, interpolating at 0.6563 CLAMPS
             # to the curve's last point and at 0.4861 lands 4 points INTO the band, giving
@@ -1799,12 +1936,13 @@ def _analyze_axial_color_at(session, params):
                 ):
                     return _ac.error_envelope(
                         "analyze_axial_color", "axial_color_inconsistent",
-                        f"AXCL scalar ({safe_float(raw)} mm) disagrees with the "
+                        f"scalar ({safe_float(f_minus_c)} mm) disagrees in size with the "
                         "FocalShiftDiagram short-long span "
                         f"({safe_float(curve_fc)} mm) at the resolved wavelengths "
                         f"({s_um:.6g}/{l_um:.6g} um) beyond tolerance",
-                        f_minus_c_shift_mm=safe_float(raw),
+                        f_minus_c_shift_mm=safe_float(f_minus_c),
                         curve_f_minus_c_mm=safe_float(curve_fc),
+                        sign_convention=_AXIAL_SIGN_CONVENTION,
                         wave_slots_used={"wave1_F": f_idx, "wave2_C": c_idx},
                         # ROUND-13 -- CARRY THE FLAGS. This refusal envelope is REBUILT
                         # rather than derived from ``result``, and it carried the wave
@@ -2670,7 +2808,8 @@ ANALYZE_STREHL_SPEC = ToolSpec(
     name="analyze_strehl",
     handler=analyze_strehl,
     required_params=(),
-    param_types={"best_focus": "boolean", "config": "number", "field": "number"},
+    param_types={"best_focus": "boolean", "config": "number", "field": "number",
+                 "fields": "array"},
     description=(
         "Measure the Strehl ratio (STRH) per wavelength, reported at BOTH the current "
         "image plane AND per-wave best focus (the headline, config_headline, is the "
@@ -2679,8 +2818,15 @@ ANALYZE_STREHL_SPEC = ToolSpec(
         "field is the field NUMBER (default 1; field 1 is on-axis only if the field table "
         "puts it at 0,0); field_evaluated in the result says which field was read, and the "
         "best-focus plane is the on-axis RWCE minimum whatever the field (focus_basis). "
+        "fields ('all' or a list of field numbers; not together with field) reads several "
+        "fields in one call: per_field has one entry per field, fields_evaluated lists them, "
+        "and the top-level keys describe the first; the focus scans still run once per "
+        "wavelength (on a collimated output config_headline and polychromatic are null and no "
+        "focus scan runs). polychromatic is the all-wavelength Strehl (STRH Wave 0) at the current "
+        "image plane only; it includes lateral colour, so it is not a weighted mean of the "
+        "per-wavelength values. "
         "Gotcha: the loaded-plane Strehl is lower than the best-focus Strehl — do not "
-        "conflate them. "
+        "conflate them. " + _BEST_FOCUS_LIMITS +
         "OBSCURED PUPILS: on a system with a central obscuration (a Cassegrain "
         "secondary shadow) author a CircularObscuration on the obstructing surface "
         "with set_surface_aperture FIRST, so this number is computed on the TRUE "
@@ -2704,7 +2850,7 @@ ANALYZE_WAVEFRONT_SPEC = ToolSpec(
         "hx/hy are normalized field coordinates (default 0,0 = on-axis; hy=1 = full field "
         "along y), each in [-1, 1]; field_evaluated in the result says which field was "
         "read, and the best-focus plane is the on-axis RWCE minimum whatever the field "
-        "(focus_basis). "
+        "(focus_basis). " + _BEST_FOCUS_LIMITS +
         "PV is unavailable (no PV operand) — read it from a Wavefront-Map/Zernike "
         "analysis instead."
     ),
@@ -2717,11 +2863,15 @@ ANALYZE_AXIAL_COLOR_SPEC = ToolSpec(
     # config is SINGLE-config only (None|int); 'all' is refused. Advertised "number".
     param_types={"full": "boolean", "config": "number"},
     description=(
-        "Measure axial (longitudinal) color: the focus shift in mm (AXCL) between the "
-        "SHORTER and the LONGER of two wavelengths resolved BY VALUE from the system's "
-        "own table — the F/C lines (0.4861/0.6563 µm) when both are present, otherwise "
-        "the system's shortest and longest wavelength. Works on any band, not just F/C. "
-        "Never by file order (AXCL sign-flips on swap). The scalar is a DIFFERENCE of "
+        "Measure axial (longitudinal) color: f_minus_c_shift_mm = focus position of the "
+        "SHORTER minus that of the LONGER of two wavelengths, in mm, resolved BY VALUE "
+        "from the system's own table — the F/C lines (0.4861/0.6563 µm) when both are "
+        "present, otherwise the system's shortest and longest wavelength. Works on any "
+        "band, not just F/C. Never by file order. SIGN: negative means the short "
+        "wavelength comes to focus first along the direction of light travel (the "
+        "ordinary under-corrected positive lens); it is minus the AXCL operand read with "
+        "Wave1=short, Wave2=long, and sign_convention repeats this in the result. The "
+        "scalar is a DIFFERENCE of "
         "focus positions, so it does not depend on any reference wavelength; "
         "wavelength_basis + wavelengths_used name the pair actually used. Refuses "
         "(analysis_empty) a monochromatic or degenerate band rather than returning the "

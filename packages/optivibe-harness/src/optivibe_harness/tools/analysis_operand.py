@@ -70,6 +70,11 @@ _PARAM_BY_HEADER = {
 # 0 makes a sampled operand silently read ~0 (the gap). Lower-cased for matching.
 _DENSITY_HEADERS = frozenset({"ring", "samp"})
 
+# A field/pupil coordinate of 0 asks for the on-axis / chief default, so on an operand
+# with no such slot it cannot change the reading: it passes. Zero is NOT neutral for
+# surf (0 is the OBJECT), wave, ring or samp, so those never take this exemption.
+_ZERO_NEUTRAL_PARAMS = frozenset({"hx", "hy", "px", "py", "ex", "ey"})
+
 # (G1) The slot-2 Header of the ray-operand family (REAX/REAY/REAZ, RAG*, RAID/RANG/…).
 _SURF_HEADER = "surf"
 
@@ -124,7 +129,7 @@ def _int_param(params, key):
     value = params[key]
     if isinstance(value, bool) or not isinstance(value, int):
         # Allow an integral float (a JSON round-trip can float an int).
-        if isinstance(value, float) and value == int(value):
+        if isinstance(value, float) and math.isfinite(value) and value == int(value):
             return int(value)
         raise ToolParamError(
             f"{key!r} must be an integer, got {type(value).__name__} {value!r}"
@@ -146,8 +151,10 @@ def _read_slot_headers(system, member):
 
     Returns ``(headers, error)``: ``headers`` is the ordered map (or ``None`` on a
     failure) and ``error`` is a structured ``error_envelope`` (or ``None`` on
-    success). NEVER raises — a ChangeType==False / read throw is caught and turned
-    into a structured envelope so dispatch sees a clean ``ok:false``.
+    success). NEVER raises an ``Exception`` — a ChangeType==False / any read throw is
+    caught and turned into a structured envelope so dispatch sees a clean ``ok:false``.
+    A temp row that could NOT be removed also returns an error envelope (carrying
+    ``temp_row_not_removed``): the merit function was changed, so the read is refused.
     """
     mfe = system.MFE
     try:
@@ -171,47 +178,67 @@ def _read_slot_headers(system, member):
     except Exception:  # noqa: BLE001 — fall back to op.OperandNumber at reap time
         operand_number = None
     try:
-        try:
-            changed = op.ChangeType(member)
-        except Exception as exc:  # noqa: BLE001 — a ChangeType throw -> structured
-            return None, _ac.error_envelope(
-                "get_operand", "operand_param",
-                f"could not type a temp row to the operand to read its parameter "
-                f"slots ({exc!r})",
-            )
-        if changed is False:
-            return None, _ac.error_envelope(
-                "get_operand", "operand_param",
-                "the engine refused to type a temp row to this operand (ChangeType "
-                "returned False) — its parameter slots are unreadable",
-            )
-        try:
-            headers = _mc.read_param_map(op)
-        except SurfaceWriteError as exc:
-            return None, _ac.error_envelope(
-                "get_operand", "operand_param",
-                f"could not read the operand's parameter-slot layout ({exc!r})",
-            )
-        return headers, None
+        headers, error = _typed_slot_map(op, member)
     finally:
-        _remove_temp_row(mfe, op, operand_number)
+        removed = _remove_temp_row(mfe, op, operand_number)
+    if removed:
+        return headers, error
+    # The temp row is still in the merit function. That is a mutation the caller did not
+    # ask for, so the read is REFUSED and the row is named, never returned as ok:true.
+    detail = f" (the slot read had already failed: {error['error']})" if error else ""
+    return None, _ac.error_envelope(
+        "get_operand", "operand_param",
+        f"the temporary merit-function row used to read the operand's parameter slots "
+        f"could not be removed, so the merit function may now hold one extra row"
+        f"{'' if operand_number is None else f' (row {operand_number})'}. Inspect it with "
+        f"dump_merit_function and delete it with remove_operand before optimizing."
+        f"{detail}",
+        temp_row_not_removed=operand_number if operand_number is not None else "unknown",
+    )
+
+
+def _typed_slot_map(op, member):
+    """``(headers, error)`` for a freshly added temp row. NEVER raises an ``Exception``."""
+    try:
+        changed = op.ChangeType(member)
+    except Exception as exc:  # noqa: BLE001 — a ChangeType throw -> structured
+        return None, _ac.error_envelope(
+            "get_operand", "operand_param",
+            f"could not type a temp row to the operand to read its parameter "
+            f"slots ({exc!r})",
+        )
+    if changed is False:
+        return None, _ac.error_envelope(
+            "get_operand", "operand_param",
+            "the engine refused to type a temp row to this operand (ChangeType "
+            "returned False) — its parameter slots are unreadable",
+        )
+    try:
+        return _mc.read_param_map(op), None
+    except Exception as exc:  # noqa: BLE001 — ANY read fault -> structured, not only
+        # SurfaceWriteError: a degraded read must not escape as a bare exception.
+        return None, _ac.error_envelope(
+            "get_operand", "operand_param",
+            f"could not read the operand's parameter-slot layout ({exc!r})",
+        )
 
 
 def _remove_temp_row(mfe, op, operand_number):
-    """Best-effort removal of the temp row (net-zero MFE mutation). NEVER raises.
+    """Remove the temp row (net-zero MFE mutation). NEVER raises; returns whether it did.
 
     Mirrors ``optimize_merit._remove_orphan``: remove the row the slot-map read
-    added so the MFE is byte-identical afterward. The removal is itself GUARDED —
-    a ``RemoveOperandAt`` throw during cleanup must not mask the caller's outcome
-    nor escape as a dispatch ``internal``. ``operand_number`` is the index captured
-    right after the add; if it was not captured, fall back to ``op.OperandNumber``
-    (itself guarded).
+    added so the MFE is byte-identical afterward. A ``RemoveOperandAt`` throw during
+    cleanup must not escape as a dispatch ``internal`` -- and must not be HIDDEN either:
+    ``False`` tells the caller the row may still be there. ``operand_number`` is the index
+    captured right after the add; if it was not captured, fall back to
+    ``op.OperandNumber`` (itself guarded).
     """
     try:
         number = operand_number if operand_number is not None else int(op.OperandNumber)
         mfe.RemoveOperandAt(number)
-    except Exception:  # noqa: BLE001 — best-effort cleanup; never raises
-        pass
+    except Exception:  # noqa: BLE001 — never raises; the caller discloses the failure
+        return False
+    return True
 
 
 class _SlotColumnError(ValueError):
@@ -301,7 +328,9 @@ def get_operand(session, params):
 
     Returns a structured ``{ok:false}`` envelope (NEVER raised past the boundary)
     for: an unresolvable operand (``operand_unknown``); a bad density param
-    (``operand_param``); an unreadable parameter-slot layout (``operand_param``). A
+    (``operand_param``); an unreadable parameter-slot layout (``operand_param``); a
+    caller parameter the operand has no slot for (``operand_param``, with
+    ``unplaced_params`` + ``slot_headers`` -- a zero hx/hy/px/py/ex/ey is exempt). A
     sampled operand (RWCE/RWRE) whose Ring/Samp slot is left at 0 still returns the
     value but adds a ``flags`` entry naming the unset density slot (the silent-0
     disclosure — a density-0 sampled operand reads ~0, not a real value).
@@ -368,6 +397,9 @@ def get_operand(session, params):
     if error is not None:
         return error
 
+    # What the CALLER supplied, captured before the tool injects its own surf default.
+    caller_params = sorted(supplied)
+
     # G1: image-space ray-operand surf default (config-independent — resolved once).
     # Runs AFTER the slot-Header read + BEFORE _build_slot_args, injecting the resolved
     # surf into `supplied` so _build_slot_args places it into applied_slots naturally
@@ -422,6 +454,35 @@ def get_operand(session, params):
             "get_operand", "operand_param",
             f"could not place the operand's parameter slots ({exc})",
             operand=operand,
+        )
+
+    # A caller parameter the operand has no slot for was never placed, so the call cannot
+    # return what was asked for (STRH has no Hy slot: hy=1 used to read the ON-AXIS value
+    # with ok:true). Refuse before any value is read. The temp row is already reaped.
+    placed = {h.lower() for h in applied_slots}
+    unplaced = [
+        key for key in caller_params
+        if _PARAM_BY_HEADER[key].lower() not in placed
+        and not (key in _ZERO_NEUTRAL_PARAMS and supplied[key] == 0)
+    ]
+    if unplaced:
+        real_slots = list(slot_header_list)   # blank columns are already excluded
+        message = (
+            f"operand {operand} has no parameter slot for {', '.join(unplaced)}, so the "
+            f"call cannot return the value asked for; refusing rather than reading a "
+            f"different quantity. Its parameter slots are: "
+            f"{', '.join(real_slots) if real_slots else 'none'}."
+        )
+        if any(h.lower() == "field" for h in real_slots):
+            message += (
+                f" {operand} selects its field by the integer Field slot, which "
+                f"get_operand cannot set."
+            )
+            if operand.strip().upper() == "STRH":
+                message += " For a Strehl ratio at a field use analyze_strehl(field=N)."
+        return _ac.error_envelope(
+            "get_operand", "operand_param", message,
+            operand=operand, unplaced_params=unplaced, slot_headers=real_slots,
         )
 
     flags = []
@@ -499,6 +560,10 @@ GET_OPERAND_SPEC = ToolSpec(
         "set: pass ring= (RWCE) or samp= (RWRE) >= 1, else it reads ~0 and a flag "
         "is returned. Returns the raw operand reading with a suspicious_sentinel "
         "overflow flag plus applied_slots (the {Header:value} placed). "
+        "A parameter the operand has NO slot for is REFUSED (the call cannot return "
+        "what was asked): e.g. STRH has no hy slot -- it selects its field by a Field "
+        "slot get_operand cannot set, so read a Strehl at a field with analyze_strehl. "
+        "A zero hx/hy/px/py/ex/ey on an operand without that slot is accepted. "
         "For an image-space intercept operand (REAX/REAY/REAZ) an omitted surf now "
         "defaults to the IMAGE surface (the image height ~= PIMH); other Surf-slot ray "
         "operands (RAG*/RAID/RANG) default surf to 0 (the OBJECT) with a disclosure "

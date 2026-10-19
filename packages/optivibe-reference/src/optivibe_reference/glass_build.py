@@ -50,7 +50,16 @@ BUILDER_VERSION = 1
 # divide by that same denominator, so a machine-noise denominator makes BOTH
 # numerically meaningless. ONE source of truth — vd AND pg_f are nulled when
 # |nF-nC| <= _DENOM_FLOOR even when the lines are in-band (§5 / gate 1).
-_DENOM_FLOOR = 0.005
+#
+# The VALUE is set from the measured split of the installed catalogs: the
+# noise rows sit at |nF-nC| <= 3.1e-6 (four VACUUM rows; a constant-index model glass at
+# exactly 0) and the smallest REAL material at 0.00285 (a liquid), with nothing between.
+# 1e-4 is the geometric middle of that gap. The earlier 0.005 sat INSIDE the real
+# materials: it blanked calcium fluoride, the FPL53 / FCD100 / FK95 class and the other
+# lowest-dispersion glasses (nF-nC about 0.0046, Abbe number about 95), 60 rows in all,
+# so no Abbe or partial-dispersion search could return them. An absolute floor, not one
+# relative to nd-1: a vacuum row has nd below 1 and overlaps the real rows on that scale.
+_DENOM_FLOOR = 1e-4
 # Back-compat alias (the floor was historically named for vd only).
 _VD_DENOM_FLOOR = _DENOM_FLOOR
 
@@ -318,6 +327,19 @@ CREATE TABLE glass (
 """
 
 
+# A stored ΔPg,F beyond this reads as missing (the owner's choice). The
+# vendor field holds a few impossible values (HIKARI Q-LASFH59S -81.0); the largest real one in
+# the shipped catalogs is about 0.072. The committed JSON keeps the vendor's value.
+DELTA_PG_F_LIMIT = 0.1
+
+
+def _plausible_delta_pg_f(value):
+    """Return ``value``, or None when it is absent or its magnitude is above DELTA_PG_F_LIMIT."""
+    if value is None or abs(value) > DELTA_PG_F_LIMIT:
+        return None
+    return value
+
+
 def build_glass_db(catalog_json_path, conn):
     """Build the keyed ``glass`` table from the committed JSON (NO FTS5).
 
@@ -365,7 +387,7 @@ def build_glass_db(catalog_json_path, conn):
                 row.get("max_wave"),
                 row.get("nd_stored"),
                 row.get("vd_stored"),
-                row.get("delta_pg_f"),
+                _plausible_delta_pg_f(row.get("delta_pg_f")),
                 row.get("nd"),
                 row.get("ng"),
                 row.get("nf"),

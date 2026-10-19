@@ -30,6 +30,7 @@ from contextlib import contextmanager
 
 from .._io import safe_float
 from .analysis_operand import _merit_operand_enum, _SUSPICIOUS_MAGNITUDE
+from ._solve_cells import is_driving
 from ..enums import _resolve_enum
 
 # A 9-arg GetOperandValue takes (type, a2, a3, a4, a5, a6, a7, a8, a9). The
@@ -219,12 +220,23 @@ def _read_thickness(system, surface):
 
 
 def _write_thickness(system, surface, value):
-    """Write ``surface``'s thickness; returns True on success, False on a throw."""
+    """Write ``surface``'s thickness and READ IT BACK; True only if the value landed.
+
+    The engine drops a write to a cell it computes (a driving solve) without raising,
+    so "no exception" is not proof. A throw, an unreadable read-back, or a read-back
+    that is not the value written all return False.
+    """
     try:
         system.LDE.GetSurfaceAt(surface).Thickness = value
-        return True
     except Exception:  # noqa: BLE001 — a write throw is surfaced as a restore failure
         return False
+    landed = _read_thickness(system, surface)
+    if landed is None or not math.isfinite(landed):
+        return False
+    # Storage keeps 15 significant digits, so a landed write is within ~1e-15 relative (measured 7e-16).
+    # The relative term is kept that tight on purpose: at a very long image distance a
+    # loose one would accept a write that never moved the cell.
+    return math.isclose(landed, float(value), rel_tol=1e-13, abs_tol=1e-9)
 
 
 def _solve_type_name(system, surface):
@@ -388,6 +400,16 @@ def _quickfocus_criterion(system, name):
         return None
 
 
+# Why a per-wavelength best focus was not produced (the callers show the token).
+_REASON_SOLVE_DRIVEN = "best_focus_image_distance_solve_driven"
+_REASON_OUTSIDE_WINDOW = "best_focus_outside_scan_window"
+_REASON_WRITE_NOT_TAKEN = "best_focus_thickness_write_not_taken"
+# The golden-section search ends within about 1e-5 of the window width of an edge when
+# the minimum lies beyond it; 1e-3 of the width (1 um on the default 1 mm window) is 100
+# times that.
+_EDGE_FRACTION = 1e-3
+
+
 @contextmanager
 def with_best_focus(system, *, wave=None, code="RWCE", slots_by_name=None,
                     scan_halfwidth=0.5, poly=False):
@@ -416,7 +438,14 @@ def with_best_focus(system, *, wave=None, code="RWCE", slots_by_name=None,
     Degrade paths (never raise, never leave mutated): an unresolvable back-airgap
     surface OR a non-finite loaded thickness -> ``available:False`` +
     ``best_focus_unavailable`` (NO mutation attempted); no improving plane in the
-    window -> ``available:False`` + the current plane restored. A restore throw /
+    window -> ``available:False`` + the current plane restored. Three more refusals,
+    each with its own ``reason``: the image distance is under a DRIVING solve
+    (``best_focus_image_distance_solve_driven`` — nothing is written and the solve is
+    left alone; ``solve_type`` names it); the minimum sits on the edge of the scan
+    window (within 1/1000 of its width), so no minimum was BRACKETED
+    (``best_focus_outside_scan_window``);
+    a thickness write did not land (``best_focus_thickness_write_not_taken``). Every
+    thickness write is read back. A restore throw /
     a post-restore mismatch -> ``restore_verified:False`` + a loud
     ``mutation_warning`` (the system MAY be left mutated; the grader must not trust
     downstream numbers silently).
@@ -450,6 +479,15 @@ def with_best_focus(system, *, wave=None, code="RWCE", slots_by_name=None,
         return
 
     original_solve = _solve_type_name(system, surface)
+    if is_driving(original_solve):
+        # The engine computes this thickness: a write is dropped without an error, every
+        # scan point would measure the same plane, and the restore below would leave the
+        # cell Fixed. Nothing is written; the solve stays as the designer set it. An
+        # unreadable solve type is treated the same way.
+        focus["reason"] = _REASON_SOLVE_DRIVEN
+        focus["solve_type"] = original_solve
+        yield focus
+        return
 
     try:
         if poly or wave is None:
@@ -465,21 +503,41 @@ def with_best_focus(system, *, wave=None, code="RWCE", slots_by_name=None,
         else:
             lo = t0 - scan_halfwidth
             hi = t0 + scan_halfwidth
-            best_t, best_v = _golden_section_min(
-                system, surface, lo, hi, code, slots_by_name or {},
-            )
-            if best_t is None:
-                focus["reason"] = "best_focus_unavailable"
-                focus["mutation_warning"] = (
-                    "no improving best-focus plane was found in the scan window; "
-                    "reporting the current plane"
+            focus["scan_window_mm"] = [safe_float(lo), safe_float(hi)]
+            if not _write_thickness(system, surface, hi):
+                # A write that does not land means no scan point can be placed.
+                best_t = None
+                focus["reason"] = _REASON_WRITE_NOT_TAKEN
+            else:
+                best_t, best_v = _golden_section_min(
+                    system, surface, lo, hi, code, slots_by_name or {},
                 )
+                if best_t is None:
+                    focus["reason"] = "best_focus_unavailable"
+                    focus["mutation_warning"] = (
+                        "no improving best-focus plane was found in the scan window; "
+                        "reporting the current plane"
+                    )
+                elif min(best_t - lo, hi - best_t) <= _EDGE_FRACTION * (hi - lo):
+                    # The search never evaluates the end points; a minimum that lies
+                    # beyond the window converges onto its edge. That is "not found
+                    # here", not a best focus.
+                    best_t = None
+                    focus["reason"] = _REASON_OUTSIDE_WINDOW
+            if best_t is None:
+                # The scan left the gap at its last trial point; a caller reading inside
+                # the block on a refusal must see the plane it started from.
+                _write_thickness(system, surface, t0)
             else:
                 # Park the back airgap at the best plane so the caller's reads INSIDE
                 # the with-block see the best-focus numbers.
-                _write_thickness(system, surface, best_t)
-                focus["available"] = True
-                focus["plane_thickness"] = safe_float(best_t)
+                if _write_thickness(system, surface, best_t):
+                    focus["available"] = True
+                    focus["plane_thickness"] = safe_float(best_t)
+                else:
+                    # The caller would measure some other plane under this label.
+                    focus["reason"] = _REASON_WRITE_NOT_TAKEN
+                    _write_thickness(system, surface, t0)
         yield focus
     finally:
         # RESTORE (always): write the thickness back AND re-instate the solve.

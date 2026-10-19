@@ -241,7 +241,7 @@ def fold_medium_kind(walk, i):
 # --------------------------------------------------------------------------- #
 # Frames.
 # --------------------------------------------------------------------------- #
-def frame_relation(fr_i, fr_j, sum_t):
+def frame_relation(fr_i, fr_j):
     """Section 4 -> ``(token, along, perp)``; ``token`` is "shared" or a frame reason."""
     if not (fr_i.get("ok") and fr_j.get("ok")):
         return "frame_unreadable", None, None
@@ -538,7 +538,7 @@ def _evaluate(i, j, rows, walk, frames, traced, min_air, min_glass, n, unavailab
     ctx["info"], ctx["parity"] = parity * sum_t, parity          # informational until the frame is shared (4)
     if kind is None or any(walk.cb_glass[r] for r in collapsed):        # rule 4 [medium]
         return nm("medium_unknown")
-    token, along, _perp = frame_relation(frames[i], frames[j], sum_t)   # rule 5 [frame-test]
+    token, along, _perp = frame_relation(frames[i], frames[j])   # rule 5 [frame-test]
     if token != "shared":
         extra = {}
         if token in ("frame_rotated", "frame_lateral_offset"):
