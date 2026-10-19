@@ -543,8 +543,12 @@ def remove_surface(session, params):
     * the confirm runs AFTER the count read-back and is skipped entirely (zero engine
       reads) when nothing was at risk.
 
-    THE FAILURE PATH DISCARDS THE SCAN: a removal that mutates and then fails its count
-    read-back raises ``SurfaceWriteError`` and the scan result is lost. A known gap.
+    THE FAILURE PATH CARRIES THE PRE-MUTATION SCAN IN THE MESSAGE: a removal that mutates
+    and then fails its count read-back raises ``SurfaceWriteError`` (the confirm never
+    runs, and only the message reaches the wire), so the message ends with
+    ``_refs.failure_note`` -- the scan taken BEFORE the attempt, stated as such, with the
+    removal outcome stated as unknown. It is not ``refusal_message``: that one says
+    "nothing was mutated", which is false here.
     """
     refuse = _c._require_bool_param(params, "refuse_on_solve_refs")  # zero engine reads
     system = session.system
@@ -583,8 +587,9 @@ def remove_surface(session, params):
     new_count = int(lde.NumberOfSurfaces)
     if not bool(removed) or new_count != n - 1:
         raise SurfaceWriteError(
-            f"remove at {at} did not take effect: returned={removed!r} "
-            f"intended_count={n - 1} actual_count={new_count}",
+            f"remove at {at} could not be verified: returned={removed!r} "
+            f"intended_count={n - 1} actual_count={new_count}"
+            + _refs.failure_note(at, scan),
             field="count",
             intended=n - 1,
             actual=new_count,

@@ -101,8 +101,8 @@ _MSG = {
     "control_budget": "the control did not stop by itself within time_budget_s=%g s: rerun one set "
                       "with a larger time_budget_s, or optimise the lens to rest first and run the "
                       "trial again",
-    "restore_not_verified": "the lens was not back at the lens as found after trial %d; not run",
-    "call_aborted": "the call stopped at trial %d: %s; not run",
+    "restore_not_verified": "the lens was not back at the lens as found after %s; not run",
+    "call_aborted": "the call stopped at %s: %s; not run",
     "swap_not_landed": "surface %d reads %s from %s; asked %s from %s",
     "merit_uncomputable": "the optimiser could not start from this swap (the merit function is "
                           "not computable); try a glass nearer the present one",
@@ -593,6 +593,11 @@ def _arm(run, entries, label, control):
     return arm
 
 
+def _arm_name(j):
+    """How a message names arm ``j``: 0 is the control, 1.. are the trials."""
+    return "the control" if j == 0 else "trial %d" % j
+
+
 def _control_merit(control):
     """The control's final merit, or None (no control yet, or no usable reading)."""
     blocks = (control or {}).get("detail", {}).get("blocks") or []
@@ -864,14 +869,17 @@ def _trial_row(run, i, entries, res, cvec, cvalue, prediction):
     status = "not_measured"
     if control is None or control["status"] != "measured":
         reason = "control_not_usable" if control else "call_aborted"
+        aborted = _MSG["call_aborted"] % (_arm_name(res["fault"][0]), res["fault"][1]) if not control else None
         message = (_MSG["control_budget"] % run.budget if control and control["status"] == "not_finished"
-                   else (control["message"] if control else _MSG["call_aborted"] % res["fault"]))
+                   else (control["message"] if control else aborted))
     elif a is None:
         halt, fault = res["halt"], res["fault"]
-        reason, message = (("restore_not_verified", _MSG["restore_not_verified"] % halt[1])
-                           if halt and halt[0] == "restore" else
-                           ("call_aborted", _MSG["call_aborted"] % (halt[1], halt[2]))
-                           if halt else ("call_aborted", _MSG["call_aborted"] % fault))
+        if halt and halt[0] == "restore":
+            reason, message = "restore_not_verified", _MSG["restore_not_verified"] % _arm_name(halt[1])
+        elif halt:
+            reason, message = "call_aborted", _MSG["call_aborted"] % (_arm_name(halt[1]), halt[2])
+        else:
+            reason, message = "call_aborted", _MSG["call_aborted"] % (_arm_name(fault[0]), fault[1])
     else:
         status, reason, message, tvec = a["status"], a["reason"], a["message"], a["vec"]
         if status in ("measured", "not_finished"):

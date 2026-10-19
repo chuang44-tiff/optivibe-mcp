@@ -41,7 +41,12 @@ def normalize_catalog(catalog, param_name="catalog"):
     cat = cat.replace("\\", "/").rstrip("/")
     cat = os.path.basename(cat)
     if not cat:
-        return None
+        # A non-blank value with no basename ("/", "\\", "//") names no catalog.
+        # Reading it as "no catalog given" would silently drop the restriction.
+        raise ToolParamError(
+            f"'{param_name}' item {catalog.strip()!r} names no catalog (only a path or "
+            "separator); give a catalog name such as 'SCHOTT', or leave it out"
+        )
     # Append .AGF when the user passed a bare basename (the stored form carries it).
     if not cat.lower().endswith(".agf"):
         cat = cat + ".AGF"

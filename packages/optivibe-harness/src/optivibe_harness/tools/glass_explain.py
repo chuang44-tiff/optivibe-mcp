@@ -277,6 +277,8 @@ def _notes(ctx, colour, pair, swap):
 
 def _numbers(term, src, a, b, mu):
     """(element values, parts_sum, total) of section 4 for the term."""
+    # (4.3) and (4.4) divide by n'_k (the image-space index); it is 1 here because a lens whose image
+    # space is not air is refused before this point (_glass_explain_read, reason not_in_air).
     t = src["totals"]
     if term == "axial_color":
         vals = [-1000.0 * (e["axial"][a] - e["axial"][b]) / mu ** 2 for e in src["elements"]]

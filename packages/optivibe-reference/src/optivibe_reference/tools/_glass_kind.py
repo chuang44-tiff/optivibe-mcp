@@ -70,9 +70,12 @@ _MIXED_NAME_KIND.update(_table("plastic", (
     "ACRYLIC COC CR39 PMMA POLYCARB POLYSTYR SAN"
 )))
 _MIXED_NAME_KIND.update(_table("other", "N15 RETINA"))
+# Strongly birefringent crystals (also in BIREFRINGENT.AGF as ordinary/extraordinary pairs);
+# the MISC rows carry one index only. LAF3 and QUARTZ (birefringence under 0.01) stay lens.
+_MIXED_NAME_KIND.update(_table("birefringent", "CDS KDP TEO2"))
 _MIXED_NAME_KIND.update(_table("lens", (
-    "B270 BASF5 BASF55 BOROFLOAT BOROFLOAT2 CAF2 CAF2CORNING CDS F_SILICA "
-    "HPFS_8650 HPFS_CORNING KDP LAF3 N-BK7 PYREX QUARTZ SILICA TEO2 TGG"
+    "B270 BASF5 BASF55 BOROFLOAT BOROFLOAT2 CAF2 CAF2CORNING F_SILICA "
+    "HPFS_8650 HPFS_CORNING LAF3 N-BK7 PYREX QUARTZ SILICA TGG"
 )))
 
 
@@ -95,10 +98,10 @@ def material_kind(catalog, name):
         return exception
     if key in _MIXED_CATALOGS:
         kind = _MIXED_NAME_KIND.get(name)
-        if kind is None:
+        if kind is None and isinstance(name, str):
             kind = next((k for prefix, k in _MIXED_PREFIX_KIND if name.startswith(prefix)),
                         "unclassified")
-        return kind
+        return kind or "unclassified"
     return _CATALOG_KIND.get(key, "unclassified")
 
 
