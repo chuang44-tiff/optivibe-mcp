@@ -11,6 +11,8 @@ lenses and the script that measures a lens file the way the pages do.
 | [local-model-10x](local-model-10x/README.md), Opus comparison | [walk-in-10x/brief.md](walk-in-10x/brief.md) (the same brief) | [stage-log-opus.md](local-model-10x/stage-log-opus.md) | 60× seed | `local-model-10x/result_opus.zmx` |
 | [zoom-20x](zoom-20x/README.md) | [brief.md](zoom-20x/brief.md) | [stage-log.md](zoom-20x/stage-log.md) | zoom seed | `zoom-20x/result_zoom-20x.zmx` |
 | [vision-ab](vision-ab/README.md) | [brief-vision.md](vision-ab/brief-vision.md), [brief-numbers-only.md](vision-ab/brief-numbers-only.md) | none was written | 60× seed | `vision-ab/result_lens-a.zmx` to `result_lens-f.zmx` |
+| [glass-picking](glass-picking/README.md), 10× | [brief-form.md](glass-picking/10x/brief-form.md), [brief-glass.md](glass-picking/10x/brief-glass.md) | [stage-log.md](glass-picking/10x/stage-log.md) | `walk-in-10x/result_walk-in-10x.zmx` | `glass-picking/10x/result_10x-form-step.zmx`, `result_10x-glass-step.zmx` |
+| [glass-picking](glass-picking/README.md), 20× | [brief-form.md](glass-picking/20x/brief-form.md), [brief-glass.md](glass-picking/20x/brief-glass.md) | [stage-log.md](glass-picking/20x/stage-log.md) | patent rebuild, not included | `glass-picking/20x/result_20x-form-step.zmx`, `result_20x-glass-step.zmx` |
 
 The 60× seed is `seeds/seed_BEST_apo60x.zmx`. The zoom seed is `seeds/seed_BEST_zoom20x_pana5g.zmx`.
 
