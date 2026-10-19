@@ -6,7 +6,9 @@
   ``no_variables`` / ``no_merit`` envelope.
 - ``optimize`` — THE CAPSTONE closed loop (§a/§c). Embeds the dry_run gates
   (short-circuit BEFORE opening anything), opens ``Tools.OpenLocalOptimization()``
-  ONCE, runs ``max_passes`` bounded passes of ``RunAndWaitForCompletion(cycles)``,
+  ONCE, runs ``max_passes`` passes inside ONE run-time budget (``time_budget_s``; each
+  pass is ``RunAndWaitWithTimeout(remaining)``, and a pass that runs out is ``Cancel()``-ed
+  with the partial result kept -> ``budget_reached``),
   snapshots ``pass00_before`` (once, pre-open) + ``pass{NN}_after`` (per pass) via
   the run's ``ArtifactSink`` (never-raise, verdict-DECOUPLED), reads the merit,
   classifies the verdict, cross-checks the MFE recompute (the tripwire,
@@ -14,8 +16,9 @@
 
 The verdict dict carries ``ok=True`` even on ``stable`` / ``diverged`` — a
 COMPLETED run that did not improve is a RESULT, not a dispatch error. Only an
-engine-level run failure (``RunAndWaitForCompletion``->False / ``opt.Succeeded``->
-False) returns ``ok=False`` (``optimize_run_failed``).
+engine-level run failure (the timed run reports neither ``Completed`` nor ``TimedOut``,
+a cancelled run does not stop, or ``opt.Succeeded``->False) returns ``ok=False``
+(``optimize_run_failed``).
 
 Live ZOS-API integration: exercised by the live closed-loop acceptance test;
 unit-tested against the fixture-seeded MUTATING fake optimizer.
@@ -36,6 +39,7 @@ from . import _config_common as _ccfg
 from . import _fold_gaps as _fg
 from . import _grin_index_common as _gic  # GRIN — cycle-safe (never imports optimize_run)
 from . import _optimize_common as _oc
+from . import _run_budget as _rb  # cycle-safe (never imports optimize_run)
 from . import _workspace_paths as _wsp  # S-1 — cycle-safe (never imports optimize_run)
 from . import analysis_spot  # cycle-safe (analysis_spot never imports optimize_run)
 from . import clearance  # cycle-safe (clearance never imports optimize_run)
@@ -986,10 +990,13 @@ def optimize(session, params):
        no cycles run, still reaped by the finally); a read-throw degrades to letting
        the run proceed (the ``optimize_run_failed`` path is the backstop).
     5. Read ``merit_before`` from ``mfe.CalculateMeritFunction()``. Run
-       ``max_passes`` bounded passes of ``RunAndWaitForCompletion(cycles)``; after
-       each pass read ``opt.CurrentMeritFunction``, snapshot ``pass{NN}_after``,
-       classify the pass verdict, EARLY-STOP on ``stable``. An engine run failure
-       (``RunAndWaitForCompletion``->False / ``opt.Succeeded``->False) ->
+       ``max_passes`` passes, each ``RunAndWaitWithTimeout(<what is left of
+       time_budget_s>)``; after each pass read ``opt.CurrentMeritFunction``, snapshot
+       ``pass{NN}_after``, classify the pass verdict, EARLY-STOP on ``stable``. A pass
+       that times out is ``Cancel()``-ed, snapshotted, and ends the loop with
+       ``budget_reached=True`` (still ``ok=True``; the audits below run on the partial
+       lens). An engine run failure (the timed run reports neither ``Completed`` nor
+       ``TimedOut``, a cancelled run does not stop, or ``opt.Succeeded``->False) ->
        ``optimize_run_failed`` (``ok=False``).
     6. After Close, re-read ``mfe.CalculateMeritFunction()`` and cross-check it
        against the optimizer's ``CurrentMeritFunction`` (the tripwire;
@@ -1173,6 +1180,9 @@ def _optimize_impl(session, params):
     run_time_m = _require_pos_float(
         params, "run_time_m", _DEFAULT_RUN_TIME_M, cap=_RUN_TIME_M_CAP
     )
+    time_budget_s = _require_pos_float(
+        params, "time_budget_s", _rb.DEFAULT_TIME_BUDGET_S, cap=_rb.TIME_BUDGET_S_CAP
+    )
 
 
     mfe = system.MFE
@@ -1282,6 +1292,7 @@ def _optimize_impl(session, params):
     opt_current = merit_before
     passes_run = 0
     desync = False
+    budget = _rb.Budget(time_budget_s)
     with _oc._optimizer_session(
         system, algorithm_member=algorithm_member, cores=cores,
         cycles_member=cycles_member,
@@ -1333,13 +1344,19 @@ def _optimize_impl(session, params):
         # with the optimizer's own start.
         prev_merit = opt_initial
         for pass_index in range(max_passes):
-            succeeded_flag = opt.RunAndWaitForCompletion()
+            # One budget for the whole call: each pass gets what is left of it, and
+            # only time inside a pass is charged.
+            run_state, run_detail = budget.run_pass(opt)
+            if run_state == "no_time_left":
+                break
             passes_run += 1
             # Engine-level run failure (a COMPLETED-but-failed run, distinct from a
-            # diverged result): RunAndWaitForCompletion->False OR Succeeded->False.
+            # diverged result): the timed run reported neither Completed nor TimedOut, a
+            # cancelled run did not stop, OR Succeeded->False.
             opt_succeeded = bool(getattr(opt, "Succeeded", True))
-            if not bool(succeeded_flag) or not opt_succeeded:
-                err_msg = _safe_error_message(opt, "run failed")
+            if run_state == "failed" or not opt_succeeded:
+                err_msg = (run_detail if run_state == "failed"
+                           else _safe_error_message(opt, "run failed"))
                 # The finally in _optimizer_session still Close()s the optimizer.
                 return _oc.error_envelope(
                     "optimize",
@@ -1376,18 +1393,24 @@ def _optimize_impl(session, params):
                     f"{after_row.get('error')}",
                 )
 
+            if budget.reached:
+                # The pass was cut short, so its merit says nothing about convergence:
+                # no pass-to-previous verdict, no early-stop reading.
+                break
+
             # early-stop on a PASS-TO-PREVIOUS stable verdict (no further
             # improvement over the prior pass — the true convergence gate). Comparing
             # to the ORIGINAL merit_before would never early-stop a plateau.
             pass_verdict = _oc.classify_verdict(prev_merit, opt_current)
-            prev_merit = opt_current
-            if pass_verdict == "stable":
+            if budget.note_pass(pass_verdict, _improvement_pct(prev_merit, opt_current)):
                 break
+            prev_merit = opt_current
 
         # Capture the canonical run result (the optimizer's own post-run value)
         # WHILE the handle is still live (before the finally Close()).
         merit_after = opt.CurrentMeritFunction
-        status = str(getattr(opt, "Status", ""))
+        # On a budget stop the status is the one read AT the stop (before Cancel).
+        status = budget.status_text(opt)
         succeeded = bool(getattr(opt, "Succeeded", True))
 
     # (6) tripwire: re-read the MFE AFTER Close (it survives teardown)
@@ -1427,6 +1450,7 @@ def _optimize_impl(session, params):
     # verdict from (opt_initial, merit_after) and also cross-check it against the MFE
     # before-read; the optimizer's own pair is authoritative.
     verdict = _oc.classify_verdict(opt_initial, merit_after)
+    warning = _merge_warning(warning, budget.warning(passes_run))
     if desync:
         # F-E class (round 5) — MERGE. ``disagreement`` (merit_after vs the post-Close MFE
         # recalc) and ``desync`` (opt_initial vs the pre-run MFE read) are INDEPENDENT
@@ -1460,7 +1484,7 @@ def _optimize_impl(session, params):
 
     # Post-optimize edge / buried-center audit — ONCE on the RESULT,
     # after the pass loop + optimizer Close(). Reuses check_clearance (agreement by
-    # construction: the edge number is check_clearance's min(semi) geometry, NOT
+    # construction: the edge number is check_clearance's edge geometry, NOT
     # MNEG.Value — the SEQ wizard floors at Surf1's larger aperture, ~40% divergent),
     # fully guarded, additive keys, never flips ok, never raises. Only the SUCCESS
     # return is hooked (a failed/refused/uncomputable run has no completed geometry).
@@ -1507,8 +1531,18 @@ def _optimize_impl(session, params):
         "succeeded": succeeded,
         "status": status,
         "wall_time_s": safe_float(round(time.time() - wall_start, 4)),
+        # The optimizer's own run time, which is what ``time_budget_s`` bounds; the
+        # audits after the run are inside ``wall_time_s`` and outside the budget.
+        "run_time_s": safe_float(round(budget.spent, 4)),
+        "time_budget_s": time_budget_s,
+        "budget_reached": budget.reached,
         "variables_count": variables,
         "passes": passes_run,
+        # What ended the pass loop, so a caller need not infer it from the two keys above:
+        # a stable pass ON the last allowed pass reads passes == max_passes too.
+        "max_passes": max_passes,
+        "stop_reason": budget.stop_reason(),
+        "last_pass_improvement_pct": safe_float(budget.last_pass_gain_pct),
         "run_id": run_id,
         # WHERE the forensic trail landed. It is a per-run directory under
         # candidates/trail/ and is NOT the owner's candidates/zmx folder: a
@@ -2716,7 +2750,8 @@ def _edge_audit_warnings(session, glass_floor, air_floor,
     Numbers are READ from the returned envelope (agreement with an independent
     ``check_clearance`` by construction — NOT ``MNEG.Value``, which the SEQ wizard clamps
     at target and evaluates at Surf1's larger aperture, ~40% divergent from
-    ``check_clearance``'s ``min(semi)`` convention).
+    ``check_clearance``'s old convention; ``check_clearance`` now reads a glass gap at
+    each surface's own semi and an air gap at ``min(semi)``).
 
     NEVER raises, NEVER flips ``ok``, runs ONCE. On every REACHED exit it discloses
     rather than falling silent: a refusal / vacuity / fold is reported as
@@ -4040,6 +4075,7 @@ OPTIMIZE_SPEC = ToolSpec(
         "auto_normalize": "boolean",
         "cycles": "number",
         "max_passes": "number",
+        "time_budget_s": "number",
         "cores": "number",
         "algorithm": "string",
         "run_time_m": "number",
@@ -4085,6 +4121,22 @@ OPTIMIZE_SPEC = ToolSpec(
         "design you are about to keep, still run check_clearance and inspect the layout. "
         "Merit values are only comparable across runs that used the SAME merit function "
         "— rebuild the merit and improvement_pct is not comparable to the prior run. "
+        "A DLS or OD call runs for at most time_budget_s seconds of optimizer time "
+        "(default 120, maximum 300; a larger value is refused). When the time runs out "
+        "the run is stopped, the partial result STAYS in the lens, and the result says "
+        "budget_reached: true with run_time_s and the engine's status text; such a lens "
+        "is not converged whatever the verdict reads, so call optimize again to continue. "
+        "The checks after the run are outside this budget. Hammer does not use it. "
+        "A DLS or OD result also says what ended its pass loop, in stop_reason: "
+        "gain_below_threshold (the last pass changed the merit by less than 1 part in "
+        "10000, so the loop stopped by itself, even when that was the last pass allowed), "
+        "pass_limit (all max_passes passes ran and the last one still moved the merit: "
+        "the run may be unfinished, so call optimize again or raise max_passes), or "
+        "time_budget (the time ran out). max_passes is echoed (default 1, so a default "
+        "call usually reads pass_limit), and last_pass_improvement_pct is the last "
+        "pass's gain in percent of the merit before that pass (null when that pass was "
+        "cut short or no pass ran). verdict describes the merit, not the stop: it "
+        "can read improved in all three cases. A Hammer result has none of these three keys. "
         "algorithm defaults to DLS (damped least squares); OD is orthogonal descent; "
         "algorithm='Hammer' runs a wall-time-bounded global search (run_time_m minutes, "
         "default 1.0, cap 10.0) that escapes a shallow local minimum and best-restores if "

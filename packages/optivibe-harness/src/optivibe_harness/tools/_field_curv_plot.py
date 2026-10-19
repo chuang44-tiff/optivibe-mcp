@@ -11,6 +11,7 @@ import math
 
 from . import _plot_style as ps
 from ._mtf_field_plot import _close
+from ._ray_fan_plot import _isolated  # ONE isolated-sample rule for both plots
 
 TITLE = "Field Curvature / F-Tan(θ) Distortion"
 _UNIT_NAMES = {"um": "µm"}
@@ -93,6 +94,11 @@ def fcd_model(axis, waves, scales, title_values, config_line, footer_lines, lens
                             "xs": _nan(w[key], factor), "color": hexc, "linestyle": style})
         d_lines.append({"gid": "fcd:%s:dist" % w["index"], "ys": list(ys), "xs": _nan(w["distortion"]),
                         "color": hexc, "linestyle": "-"})
+    # A finite sample whose two neighbours are null strokes no segment, so it is drawn as a marker and
+    # counted (the ray fan's rule, same function). Not on a zero field range: every sample is a marker there.
+    for ln in s_lines + d_lines:
+        ln["isolated"] = [] if axis["zero_range"] else _isolated(ln["xs"])
+    n_isolated = sum(len(ln["isolated"]) for ln in s_lines + d_lines)
     disp = _disp_unit(curv, lens_token, lens_label)
     reason = dist.get("reason") if dist["value"] is None else None
     annotation = None if reason is None else {
@@ -106,6 +112,8 @@ def fcd_model(axis, waves, scales, title_values, config_line, footer_lines, lens
             footer.append("wave %d: S/T not available (every sample is null)" % w["index"])
         if dist["value"] is not None and all(v is None for v in w["distortion"]):
             footer.append("wave %d: distortion not available (every sample is null)" % w["index"])
+    if n_isolated:
+        footer.append("%d isolated sample(s) drawn as markers" % n_isolated)
     if factor != 1.0:
         footer.append("curvature axis shown in %s (lens unit %s x 1000)"
                       % (disp, lens_label))
@@ -173,6 +181,9 @@ def build_fcd_figure(model):
                     ax.plot(ln["xs"], ln["ys"], linestyle="None" if zero else ln["linestyle"],
                             marker="o" if zero else "None", markersize=3, clip_on=not zero,
                             color=ln["color"], linewidth=1.0, gid=ln["gid"])
+                    for k in ln["isolated"]:
+                        ax.plot([ln["xs"][k]], [ln["ys"][k]], marker="o", markersize=2, linestyle="None",
+                                color=ln["color"], gid="isolated:%s:%s" % (ln["gid"][len("fcd:"):], k))
                 ax.set_title(title, loc="left", fontsize=8, pad=18)
                 ax.annotate(model["field_label"], xy=(0.0, ymax), xytext=(4, 3), textcoords="offset points",
                             fontsize=7, ha="left", va="bottom", annotation_clip=False, gid="axis_label:y")

@@ -19,14 +19,22 @@ Structure:
    object/image at the ends and would miss a CB at surface 0 / a mirror at the image
    surface). The SAME predicate ``get_first_order`` uses, so the two readout tools'
    fold decision can never drift. Drives the per-gap audit's applicability.
-2. **Per-gap thickness audit (UNFOLDED only)** — for each real gap ``i -> i+1``
-   (skip the object gap; skip + flag a gap with no finite-positive aperture):
-   ``kind`` glass/air; ``center_thickness`` = LDE thickness_i; ``edge_thickness`` via
-   the probe formula; a ``violation`` when center OR edge ``< threshold`` (min_glass
+2. **Per-gap thickness audit (unfolded systems)** — for each real gap ``i -> i+1``
+   (skip the object gap; a gap with no finite-positive aperture is audited at its centre
+   only and flagged):
+   ``kind`` glass/air; ``center_thickness`` = LDE thickness_i; ``edge_thickness`` at each
+   face's own semi-diameter for a glass gap with both semis readable, else at the smaller
+   semi-diameter; a ``violation`` when center OR edge ``< threshold`` (min_glass
    for glass, min_air for air) or NEGATIVE. The back-airgap (last optic -> image) is
    audited as an air gap. A read-only audit REPORTS (``ok:true``), never refuses.
-3. **Folded systems** — emit NO per-gap thickness VIOLATIONS (the -525.7 fold trap);
-   report per-gap ``center_thickness`` as INFORMATIONAL ``folded_gaps`` + a ``note``.
+3. **Folded systems** — a per-gap audit with the same min_air / min_glass floors runs
+   between consecutive BOUNDING surfaces (coordinate breaks and flat air dummies
+   collapsed; ``_fold_gaps.audit_folded_gaps``): centre = the summed LDE thickness x
+   reflection parity, so a negative fold-leg thickness is not a violation (the -525.7
+   fold trap); each gap is cross-checked against a traced ray, and a gap that cannot be
+   measured (no shared frame, trace disagreement or unavailable, ray budget) is listed
+   in ``fold_audit.not_measured``. No ceilings apply. ``folded_gaps`` is the parallel
+   informational centre-only list.
 4. **Global BFD (BOTH)** — ``image_global_z`` (slot [12]); ``behind_first_optic`` /
    ``behind_last_optic`` (image_global_z - first/last OPTICAL surface global z); the
    first/last optical surface numbers. A degraded global frame -> that field ``None``
@@ -695,6 +703,15 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
         center = ri["thickness"]
 
         h = _cl.controlling_height(ri["semi_diameter"], rip1["semi_diameter"])
+        # A glass gap with both semis readable is read at each surface's OWN
+        # semi (OpticStudio's edge thickness); ``h`` becomes the element rim. An air gap,
+        # and a glass gap with one semi unreadable, keep the smaller-aperture reading.
+        own = (_cl.glass_edge_heights(ri["semi_diameter"], rip1["semi_diameter"])
+               if kind == "glass" else None)
+        h_i = h_ip1 = h
+        legacy_edge = None
+        if own is not None:
+            h_i, h_ip1, h = own
         edge_approximate = False
         approx_surfaces = []
         if h is None:
@@ -710,8 +727,7 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
             # into the edge math so the edge is modelled from the FULL sag (sphere +
             # conic base + polynomial), not the base only. A non-asphere row carries
             # ``aspheric_coefficients = None`` -> the conic-only byte-identical edge.
-            edge = _cl.edge_thickness(
-                center, ri["radius"], ri["conic"], rip1["radius"], rip1["conic"], h,
+            sag_inputs = dict(
                 coeffs_i=ri.get("aspheric_coefficients"),
                 coeffs_ip1=rip1.get("aspheric_coefficients"),
                 norm_i=ri.get("asphere_norm_radius"),
@@ -719,22 +735,33 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
                 norm_ip1=rip1.get("asphere_norm_radius"),
                 power_ip1=rip1.get("asphere_power"),
             )
+            edge = _cl.edge_thickness_at(
+                center, ri["radius"], ri["conic"], rip1["radius"], rip1["conic"],
+                h_i, h_ip1, **sag_inputs,
+            )
+            if own is not None:
+                # The previous (smaller-aperture) reading, kept for one release so a design that
+                # flipped can be explained. It never enters the floor test.
+                legacy_edge = _cl.edge_thickness(
+                    center, ri["radius"], ri["conic"], rip1["radius"], rip1["conic"],
+                    min(h_i, h_ip1), **sag_inputs,
+                )
             # (FIX 2) Conic sphere-fallback honesty: if EITHER bounding surface used
             # a NON-ZERO conic whose sag radical went negative at the controlling
             # aperture h, sag_profile fell back to the paraxial sphere term — finite
             # but an APPROXIMATION that can UNDER-estimate a steep-conic sag (the real
             # edge may be THINNER than computed). Disclose it; the violation logic is
             # UNCHANGED (still flag on the computed edge).
-            if _cl.conic_sphere_fallback_fired(ri["radius"], ri["conic"], h):
+            if _cl.conic_sphere_fallback_fired(ri["radius"], ri["conic"], h_i):
                 approx_surfaces.append(i)
-            if _cl.conic_sphere_fallback_fired(rip1["radius"], rip1["conic"], h):
+            if _cl.conic_sphere_fallback_fired(rip1["radius"], rip1["conic"], h_ip1):
                 approx_surfaces.append(i + 1)
             if approx_surfaces:
                 edge_approximate = True
                 surf_list = ", ".join(f"S{s}" for s in approx_surfaces)
                 flags.append(
                     f"edge thickness for gap S{i}->S{i + 1} is APPROXIMATE (conic sag "
-                    f"beyond its radical at the controlling aperture on {surf_list} — "
+                    f"beyond its radical at the aperture it was evaluated at on {surf_list} — "
                     "sphere fallback; the true edge may be thinner)"
                 )
 
@@ -742,6 +769,18 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
         candidates = [v for v in (center, edge) if v is not None and math.isfinite(v)]
         worst = min(candidates) if candidates else None
         is_violation = worst is not None and worst < threshold
+
+        # The back airgap gets a SECOND edge reading, at the last optic's own rim against
+        # the flat end surface. It is a DISCLOSURE: which clearance matters depends on the
+        # design, so it never joins the floor test -- with one exception, a NEGATIVE rim
+        # reading, which is the optic's rim through the end plane and not a judgement.
+        rim = None
+        if i == n - 2 and kind == "air":
+            rim = _cl.optic_rim_edge(center, ri, rip1)
+            if rim["status"] == "measured" and rim["edge_thickness"] < 0.0:
+                is_violation = True
+                worst = rim["edge_thickness"] if worst is None else min(
+                    worst, rim["edge_thickness"])
 
         # S6 Delta-2: a per-gap FROZEN-SemiDiameter flag (Fixed-solve ONLY — a Variable/
         # Automatic aperture is the REAL clear aperture, not a frozen value). It ANNOTATES
@@ -761,7 +800,8 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
             "edge_thickness": _safe(edge) if edge is not None else None,
             "edge_height": _safe(h) if h is not None else None,
             "edge_height_source": (
-                _cl.controlling_height_source(
+                _cl.GLASS_EDGE_SOURCE if own is not None
+                else _cl.controlling_height_source(
                     ri["semi_diameter"], rip1["semi_diameter"]
                 ) if h is not None else None
             ),
@@ -772,6 +812,9 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
             "frozen_semi": frozen_semi,
             "frozen_surfaces": frozen_surfaces,
         }
+        if own is not None:
+            gap["edge_thickness_min_aperture"] = (
+                _safe(legacy_edge) if legacy_edge is not None else None)
         # Tier-1: the ADDITIVE nested ceiling object. Computed from the RAW ``center``
         # above, never from the ``_safe()``-stringified value in the record. Absent
         # entirely when this gap's kind carries no stated limit, so a no-budget
@@ -813,6 +856,9 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
                 # int (``per_config`` is a LIST of records for the same reason).
                 limits_by_surface[_mceil.surface_key(i)] = {
                     "kind": kind, "limit": lookup_limit}
+        if rim is not None:
+            gap["rim_edge"] = _rim_edge_record(rim, edge, h)
+            flags.extend(_rim_edge_flags(i, gap))
         gaps.append(gap)
         if frozen_semi:
             flags.append(
@@ -832,6 +878,9 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
                 "threshold": threshold,
                 "is_back_airgap": (i == n - 2),
             })
+            if rim is not None and rim["status"] == "measured":
+                # Additive: the reading a negative-rim violation was raised on.
+                violations[-1]["rim_edge_thickness"] = _safe(rim["edge_thickness"])
     ceiling = (
         {"exceedances": exceedances, "unresolved": unresolved}
         if audit_ceiling else None
@@ -842,6 +891,52 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
         # encoding of the same fact.
         ceiling["limits_by_surface"] = limits_by_surface
     return gaps, violations, flags, ceiling
+
+
+def _rim_edge_record(rim, edge, edge_height):
+    """The back gap's additive ``rim_edge`` object (see ``_clearance_common.optic_rim_edge``).
+
+    ``tightest`` names which of the two edge readings is the SMALLER one, so a reader
+    cannot pick the comfortable number by accident: ``"edge_thickness"`` (read at the
+    smaller semi-diameter, the image circle) or ``"rim_edge"`` (read at the optic's rim).
+    """
+    if rim["status"] != "measured":
+        return {"status": "not_computed", "reason": rim["reason"]}
+    value = rim["edge_thickness"]
+    record = {
+        "status": "measured",
+        "edge_thickness": _safe(value),
+        "edge_height": _safe(rim["edge_height"]),
+        "edge_height_source": "surface_i",
+        "against": "flat_end_surface",
+    }
+    if edge is not None and math.isfinite(edge):
+        record["tightest"] = "rim_edge" if value < edge else "edge_thickness"
+        record["difference"] = _safe(edge - value)
+    return record
+
+
+def _rim_edge_flags(i, gap):
+    """One sentence when the back gap's two edge readings differ, or when the rim
+    reading could not be computed. Empty when they agree (nothing to choose between)."""
+    rim = gap["rim_edge"]
+    if rim["status"] != "measured":
+        return [
+            f"back gap S{i}->S{i + 1}: edge_thickness is read at the SMALLER semi-diameter "
+            "(usually the image circle, close to the axis); the reading at the rim of "
+            f"surface {i} was not computed ({rim['reason']})"
+        ]
+    diff = rim.get("difference")
+    if not isinstance(diff, (int, float)) or abs(diff) < 1e-6:
+        return []
+    return [
+        f"back gap S{i}->S{i + 1} has TWO edge readings: {gap['edge_thickness']:.4f} at "
+        f"height {gap['edge_height']:.4f} (the smaller semi-diameter, usually the image "
+        f"circle) and {rim['edge_thickness']:.4f} at the rim of surface {i} (height "
+        f"{rim['edge_height']:.4f}, against the flat end surface). The smaller is "
+        f"{rim['tightest']}. Use the one that matches the clearance you mean: a sample "
+        "or sensor wider than the image circle meets the rim reading"
+    ]
 
 
 def _folded_gaps(rows, n, walk=None):
@@ -1758,6 +1853,13 @@ CHECK_CLEARANCE_SPEC = ToolSpec(
         "violations flagged when a gap falls below min_air (default 0.5) for an air "
         "gap or min_glass (default 1.0) for a glass element (a NEGATIVE edge means a "
         "steep surface crosses its neighbour) — the back-airgap is audited as air. "
+        "An unfolded glass gap with both semi-diameters readable has OpticStudio's edge "
+        "thickness as its edge: each face's sag at its OWN semi-diameter, the narrower face "
+        "held flat out to the element rim; edge_height is that rim (the larger semi), "
+        "edge_height_source reads own_semi_each, and edge_thickness_min_aperture carries the "
+        "older smaller-aperture reading for comparison only. An air gap, a glass gap with one "
+        "semi unreadable (at the readable semi), and every gap of a folded system are read at "
+        "the smaller semi-diameter. "
         "The floor comparison is STRICT with no tolerance: a gap even 3e-5 mm under its floor is a violation "
         "(a stock sample reads 0.99997 against 1.0), so lower min_air/min_glass deliberately to state a "
         "different basis rather than expecting rounding. For "
@@ -1779,6 +1881,17 @@ CHECK_CLEARANCE_SPEC = ToolSpec(
         "promote_best never refuses a design for being long. Omit both and a budget "
         "declared at build_merit for this design is applied automatically while it still "
         "provably describes it; pass explicit values to override. "
+        "The BACK airgap (last optic to image) carries TWO edge readings. edge_thickness is "
+        "read at the smaller semi-diameter, which there is usually the image circle, so it "
+        "is close to the vertex distance. rim_edge.edge_thickness is read at the rim of "
+        "the surface before the image (normally the last optic) against the flat image "
+        "surface: the distance a sample, cover "
+        "glass or sensor wider than the image circle has to the lens rim. rim_edge.tightest "
+        "names the smaller of the two. The rim reading is a disclosure, not a floor test "
+        "(which clearance matters depends on the design), except that a NEGATIVE rim "
+        "reading is a violation. It is computed only for a flat image surface and a surface "
+        "type whose shape is modelled exactly; otherwise "
+        "rim_edge.status is not_computed with a reason. "
         "Run after optimize to catch a thin/negative gap a merit floor missed. An authored "
         "GRIN element (Gradient2/Gradient3) is audited as a solid (glass) element at "
         "min_glass; see grin_geometric_audit. A non-authorable GRIN family member is listed "

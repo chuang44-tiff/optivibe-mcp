@@ -349,8 +349,14 @@ def _ax_params(basis, opts):
 
 
 def _ax_extract(result):
-    return [Reading(column="axial_color_fc_mm",
-                    raw=result.get("f_minus_c_shift_mm"),
+    # The column ranks lower-is-better, so it holds the SIZE of the colour error. The
+    # tool's value is signed (short minus long focus); a signed number would rank an
+    # ordinary under-corrected lens ahead of a perfectly corrected one. Only a real
+    # number is made positive: None / a "nan" string pass through to the null grading.
+    raw = result.get("f_minus_c_shift_mm")
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        raw = abs(raw)
+    return [Reading(column="axial_color_fc_mm", raw=raw,
                     suspicious=bool(result.get("suspicious")))]
 
 

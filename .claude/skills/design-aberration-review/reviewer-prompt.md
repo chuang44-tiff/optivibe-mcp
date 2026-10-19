@@ -10,7 +10,9 @@ One image and its raw data (the full tool result, untrimmed) per configuration:
 {CONFIG_FILES}
 
 For each line that says `render it`, draw that figure yourself first: call the render tool for this figure with that
-`config`, the `waves` given and `path` set to the image path. Check the result's `config_evaluated` is that
+`config`, the `waves` given and `path` set to the image path. For the ray fan, render a second image of the same
+configuration at a fixed scale, with `scale_um` set to 3 times the first render's `airy_radius.um`, to the body image
+path given. If `airy_radius.um` is null, skip the second render and say so under Receipt. Check the result's `config_evaluated` is that
 configuration; render again on a mismatch. The tool saves the data beside the image and names it in `data_path`. If
 `data_path` is null, read its `data_sidecar_failed:<reason>` flag, render again with the image path in a fresh sibling
 folder (`review_<n>` with the next free number), and if that fails too, say so under Receipt. Never retype the data. The image and the data file are the
@@ -43,6 +45,15 @@ reference is the PRIMARY-wave chief ray (`primary_wave`), so the primary curve c
   axial colour as a slope difference.
 - A `null` is an untraced ray, not a zero; `null_runs` and `edge_samples` say where and why. A vignetted pupil has a
   shorter x axis (`tan.x`, `sag.x`): do not read the missing edge as perfect.
+- **Read the two fan images for different things.** The auto-scale image shows the largest error, often a spike at
+  the pupil rim. The fixed-scale image (about three Airy radii) shows the body of the pupil, which the auto scale
+  flattens once a spike exists. A triangle at its edge marks a clipped sample; its value is in `beyond_scale` and
+  `fields`. Name the body terms from the fixed-scale image.
+- **Say whether the form can be walked out of, by what dominates.** If the largest errors lie across the body of the
+  pupil, in one or two terms you can name with a similar shape at every field, the form is readable: optimization
+  can still move it, even when its error is the larger. A small rim turn does not change that. If instead the
+  largest error is a spike in the outer tenth of the pupil, growing with field and far above the body, the form is
+  stuck: several high orders are cancelling at the rim, and running longer will not free it. Give one verdict.
 
 ### Field curvature / distortion
 
@@ -71,6 +82,8 @@ you return it. Apart from a figure you were asked to render, write nothing else 
 <one JSON-only value and its location>
 ## Shape
 <what the image shows, no magnitudes>
+## Form
+<ray fan only: readable (name the dominant terms) or stuck (where the rim spike is, and its size against the body); field curvature: "n/a">
 ## Sizes
 <magnitudes, each quoted from the JSON with unit, field and wave>
 ## Suggestions

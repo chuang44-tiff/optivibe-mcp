@@ -20,7 +20,9 @@ OpticStudio manual.
   the ZOS-API. Each returns a uniform result envelope rather than raising, so the
   agent checks a read-back value instead of assuming a call succeeded. Beyond
   spherical surfaces it authors aspheres, coordinate breaks, fold mirrors,
-  diffraction gratings, and gradient-index media.
+  diffraction gratings, and gradient-index media. For a settled lens it can also show which
+  elements carry the colour and field-curvature terms and trial glass swaps against a control
+  (see [Glass tools](#glass-tools)).
 - **Reference layer** (`optivibe-reference`) — operand and glass lookups plus manual
   search, to help ground the agent's choices. Engine-free and license-free; its data
   is built locally (see [Build the reference data](#build-the-reference-data)).
@@ -140,6 +142,30 @@ The equivalent JSON configuration:
 { "command": "/path/to/python", "args": ["-m", "optivibe_harness"] }
 ```
 
+## Glass tools
+
+Once the optimizer has settled a lens, two tools help with the glass step. `explain_glass_swaps`
+is read-only: it lists which glass elements carry the colour and Petzval terms. `trial_glass_swaps`
+tries up to four swap sets, each re-optimized beside an unchanged control, and judges them on
+measured image quality; it edits the open lens while it runs and restores it at the end.
+`substitute_glass` makes one swap and leaves it in place. The `design-glass-matching` skill runs
+this step.
+
+To have Claude Code ask you before either tool that edits the lens runs, add an `ask` rule to your
+settings (for example `.claude/settings.json`):
+
+```json
+{
+  "permissions": {
+    "ask": ["mcp__optivibe__trial_glass_swaps", "mcp__optivibe__substitute_glass"]
+  }
+}
+```
+
+An `ask` rule takes precedence over an `allow` rule and still asks under `bypassPermissions`. In a
+headless run (`claude -p`) or in `dontAsk` mode there is no one to ask, so a matching call is
+denied.
+
 ## Build the reference data
 
 The reference layer's data is built locally from your own licensed install; nothing
@@ -189,6 +215,7 @@ The repository includes a few Claude Code skills for common tasks:
 | `design-vision-review` | Observe a rendered layout and report what lens data does not show (advisory) |
 | `design-aberration-review` | Read the ray fan and field curvature / distortion plots and report how the aberrations are balanced (advisory) |
 | `optimize-loop` | Run optimization with monitoring |
+| `design-glass-matching` | Choose glass for a settled lens: find the elements that carry the colour or field-curvature terms, trial swaps against a control, and keep a swap only when overall image quality improves |
 | `bench-catalog` | Benchmark and rank a folder of lens designs against a target spec or each other |
 | `zos-api-debug` | Troubleshoot OpticStudio connection / license errors |
 

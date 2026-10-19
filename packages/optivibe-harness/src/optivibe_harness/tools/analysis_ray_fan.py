@@ -23,7 +23,7 @@ from . import _mce_cells
 from . import _plot_style as ps
 from . import analysis_raytrace
 from ._config_common import _coerce_config_int, resolve_single_config_selector, with_configuration
-from ._measurement_common import image_surface_index, suspicious_sentinel
+from ._measurement_common import image_surface_index, read_operand_slots, suspicious_sentinel
 from ._plot_publish import publish, write_data_sidecar
 from ._ray_fan_plot import build_fan_figure, fan_model
 from ._solve_trace import _primary_wave
@@ -37,6 +37,8 @@ N = ps.NUM_PUPIL_SAMPLES
 UNPROVEN = "field_geometry_unproven"
 CHIEF_FAILED = "chief_ray_failed"
 TOOL_PARAM = "tool_param"
+FIXED_RULE = "fixed (scale_um)"
+AIRY_BASIS = "1.22 x primary wavelength x WFNO (working F/#, which follows the real marginal ray)"
 ACTIVE_NOT_RESTORED = "active_config_not_restored"
 
 DESCRIPTION = (
@@ -51,7 +53,10 @@ DESCRIPTION = (
     "trace, NEVER 0; null_runs says why), x axes (shortened for a vignetted pupil), the scale actually drawn, "
     "wavelength colours and every title/footer string. Gotcha: a drawn sample next to a blocked run is listed "
     "in edge_samples because the native plot may omit it. Pure read; the fan scale is 1-2-5 of 1.1x the data "
-    "maximum. PNG minted in <workspace_root>/evaluation/ray_fan_NNNN.png (no overwrite). "
+    "maximum, unless scale_um (optional number > 0) fixes the y axis at +-scale_um um: a value beyond it is "
+    "clipped and marked by a triangle at the edge, counted in beyond_scale, and still returned in full; scale.data_max "
+    "is always reported. airy_radius gives 1.22 x primary wavelength x working F/# in um (null if unreadable), "
+    "so a fixed scale can be chosen in Airy radii. PNG minted in <workspace_root>/evaluation/ray_fan_NNNN.png (no overwrite). "
     "Also writes the full returned envelope, unchanged, as strict JSON to <png stem>.data.json beside the PNG: its path is data_path (null plus a data_sidecar_failed:<reason> flag if that write failed; a refusal writes none). Not the reviewable figure: save_candidate's png_sha256 PNG is."
 )
 
@@ -241,6 +246,58 @@ def _validate_waves(waves):
             raise ToolParamError("waves[%d] repeats wavelength number %s" % (i, _int_text(v)))
         seen.add(v)
     return list(waves)
+
+
+def _validate_scale_um(scale_um):
+    """``scale_um`` (pre-engine): ``None`` (the automatic scale) or a finite real number > 0, the half-height of
+    the y axis in um. A bool, a string, nan, inf, zero or a negative is a ``ToolParamError``."""
+    if scale_um is None:
+        return None
+    if isinstance(scale_um, bool) or not isinstance(scale_um, (int, float)):
+        raise ToolParamError("scale_um must be a number (the y-axis half-height in um), got %s"
+                             % type(scale_um).__name__)
+    value = float(scale_um)
+    if not math.isfinite(value) or value <= 0.0:
+        raise ToolParamError("scale_um must be finite and > 0, got %s" % safe_repr(scale_um))
+    return value
+
+
+def _airy_radius(system, geo):
+    """``(record, flag | None)``. The Airy radius ``1.22 * lambda * WFNO`` at the primary wavelength, from the
+    engine's working F/# (``WFNO``), which follows the REAL marginal ray: on an NA 0.70 objective it matched the
+    real image-space ray to 1e-11, while ``ISNA`` read the paraxial 0.573 (live probe). An unreadable,
+    sentinel or non-positive WFNO serves ``um: None`` with the flag ``airy_radius_unread``; never a guessed value."""
+    lam = next((w["um"] for w in geo["all_waves"] if w["index"] == geo["primary"]), None)
+    rec = {"um": None, "basis": AIRY_BASIS, "wave": geo["primary"], "wavelength_um": lam, "wfno": None}
+    try:
+        raw, susp = read_operand_slots(system, "WFNO", {3: ("Wave", int(geo["primary"]))})
+    except Exception as exc:  # noqa: BLE001
+        t = _transport_loss(exc)
+        if t is not None:
+            raise t
+        return rec, "airy_radius_unread"
+    if susp or not ps._finite(raw) or raw <= 0 or not ps._finite(lam):
+        return rec, "airy_radius_unread"
+    rec["wfno"] = float(raw)
+    rec["um"] = ps.round_value(1.22 * lam * float(raw), ps.ROUND_UM)
+    return rec, None
+
+
+def _fixed_scale(scale_um, data_max, data_at):
+    """The scale dict for a caller-fixed axis: same keys as ``fan_scale`` plus ``fixed``."""
+    return {"value": scale_um, "unit": "um", "rule": FIXED_RULE, "k": None, "data_max": data_max,
+            "data_max_at": data_at, "floor_applied": False, "fixed": True}
+
+
+def _beyond_scale(fields_out, limit):
+    """Per panel, the count of drawn samples with ``|value| > limit`` (they are clipped and marked)."""
+    out = []
+    for rec in fields_out:
+        for fan, tab in (("tan", rec["ey"]), ("sag", rec["ex"])):
+            n = sum(1 for vals in tab.values() for v in vals if v is not None and abs(v) > limit)
+            if n:
+                out.append({"field": rec["f"]["index"], "fan": fan, "n": n})
+    return out
 
 
 def _select_waves(geo, requested):
@@ -447,7 +504,7 @@ def _field_env(rec, geo, label, max_field):
                     "ex": {"unit": "um", "by_wave": {str(w): v for w, v in rec["ex"].items()}}}}, tan_x, sag_x
 
 
-def _render(session, system, k, path, requested=None):
+def _render(session, system, k, path, requested=None, scale_um=None):
     target, minted, fault, root, rfault = _resolve_png_path(session, path)
     if fault:
         raise _Refuse("workspace_unlistable", fault)
@@ -465,6 +522,7 @@ def _render(session, system, k, path, requested=None):
                 traced[f["index"]] = _trace_bound(session, _build_rays(f["hy"], wave_idx, geo["primary"]),
                                                   geo["image_surf"])
             fields_out, runs, edges, usable_any, chief_reasons = _assemble(geo, traced)
+            airy, airy_flag = _airy_radius(system, geo)
     except _Refuse as r:
         # A refusal raised after ``_geometry`` returned
         # carries the geometry's flags (and the unresolved-root flag), merged by MEMBERSHIP -- the FCD pattern.
@@ -482,7 +540,15 @@ def _render(session, system, k, path, requested=None):
         data_max, data_at = _data_max(fields_out)
         if data_max is None:
             raise _Refuse("analysis_empty", "no finite aberration value in any fan", flags=flags)
-        scale = ps.fan_scale(data_max, data_at)
+        if scale_um is not None:
+            scale = _fixed_scale(scale_um, data_max, data_at)
+        else:
+            try:
+                scale = ps.fan_scale(data_max, data_at)
+            except ValueError as exc:
+                raise _Refuse("analysis_malformed", "the fan scale could not be chosen: %s" % exc,
+                              flags=flags) from None
+        beyond = _beyond_scale(fields_out, scale_um) if scale_um is not None else []
         max_field = max(abs(f["y"]) for f in geo["fields"])
         env_fields, model_fields, label_flags, clip_flags, n_clipped = [], [], [], [], 0
         for rec in fields_out:
@@ -513,13 +579,15 @@ def _render(session, system, k, path, requested=None):
         remap = any(f["vcx"] != 0 or f["vdx"] != 0 for f in geo["fields"])
         flags += label_flags + clip_flags + (["wave_colour_cycled"] if cycled else []) + (
             ["sagittal_vignetting_remap_unmeasured"] if remap else []) + [
-            "chief_ray_failed:%d" % i for i in sorted(chief_reasons)]
+            "chief_ray_failed:%d" % i for i in sorted(chief_reasons)] + (
+            ["fan_values_beyond_scale"] if beyond else []) + ([airy_flag] if airy_flag else [])
         k_ev, n_ev = ident["config_evaluated"], ident["n_configs"]
         config_line = ("Configuration %d of %d" % (k_ev, n_ev)) if k_ev is not None and n_ev is not None \
             else "Configuration: unread"
         footer = _footer(runs, edges, fields_out, geo, chief_reasons, remap, n_clipped)
         model = fan_model(model_fields, [{"index": w["index"], "um": w["um"], "colour": w["_hex"]}
-                                         for w in waves_env], scale, config_line, footer)
+                                         for w in waves_env], scale, config_line, footer,
+                          airy_um=airy["um"])
         final, sha, overwrote, pfault, cleanup = None, None, None, None, []
         try:
             final, sha, overwrote, pfault, cleanup = publish(build_fan_figure, model, target, minted, STEM)
@@ -543,10 +611,12 @@ def _render(session, system, k, path, requested=None):
                                   "primary_drawn": geo["primary"] in wave_idx},
                "wavelengths": [{kk: vv for kk, vv in w.items() if kk != "_hex"} for w in waves_env],
                "pupil_p": {"unit": "normalized pupil (traced)", "values": grid},
-               "scale": scale, "fields": env_fields, "null_runs": runs, "edge_samples": edges,
+               "scale": scale, "airy_radius": airy, "fields": env_fields, "null_runs": runs, "edge_samples": edges,
                "rounding": {"aberration_um": 1e-4}, "n_values": n_total,
                "ray_identity": {"requested": total, "returned": total, "bound_by": "rayNumber"},
                "title_block": model["title_lines"], "footer_lines": model["footer_lines"], "flags": flags}
+        if scale_um is not None:
+            env["beyond_scale"] = {"n": sum(b["n"] for b in beyond), "by_panel": beyond}
         if win["mutation_warning"]:
             env["mutation_warning"] = win["mutation_warning"]
         if not minted:
@@ -599,10 +669,11 @@ def render_ray_fan(session, params):
             raise ToolParamError(f"path must be a non-empty string without NUL, got {safe_repr(path)}")
         _refuse_non_png_extension(path)
     requested = _validate_waves(params.get("waves"))  # shape only, pre-engine; the bound needs the table
+    scale_um = _validate_scale_um(params.get("scale_um"))
     system = session.system
     try:
         k = _resolve_config(system, params.get("config"))
-        return _render(session, system, k, path, requested)
+        return _render(session, system, k, path, requested, scale_um)
     except _Refuse as r:
         return _ac.error_envelope(TOOL, r.family, str(r), **r.extra)
 
@@ -611,7 +682,7 @@ RENDER_RAY_FAN_SPEC = ToolSpec(
     name=TOOL,
     handler=render_ray_fan,
     required_params=(),
-    param_types={"config": "number", "path": "string", "waves": "array"},
+    param_types={"config": "number", "path": "string", "waves": "array", "scale_um": "number"},
     description=DESCRIPTION,
 )
 

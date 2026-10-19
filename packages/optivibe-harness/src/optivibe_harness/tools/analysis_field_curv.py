@@ -341,6 +341,12 @@ def _runs(wave, series, reasons):
     return out
 
 
+def _finite_or_none(value):
+    """``value`` unchanged when finite, else ``None`` (a quotient that overflowed is a missing value, never
+    an ``inf`` in the envelope). The value is NOT rounded: the envelope stays byte-identical for finite data."""
+    return value if isinstance(value, float) and math.isfinite(value) else None
+
+
 def _focal(tables, axis, unit_token):
     """``(distortion_focal_length, reference_slope)`` blocks of one wave."""
     x, ref = axis["samples"], tables["ref_height"]
@@ -355,13 +361,13 @@ def _focal(tables, axis, unit_token):
         fd["basis"] = "ref_height / tan(theta), native reference"
         if last is not None and math.tan(math.radians(x[last])) not in (0.0,) \
                 and math.isfinite(math.tan(math.radians(x[last]))):
-            fd["value"] = ref[last] / math.tan(math.radians(x[last]))
+            fd["value"] = _finite_or_none(ref[last] / math.tan(math.radians(x[last])))
     else:
         fd["basis"] = ("native's height-field focal-length convention is unmeasured "
                        "(cfg3 header 90.33708 != slope*EFFL 90.310)")
         sl["basis"] = "ref_height / X at the last positive sample, native reference"
         if last is not None:
-            sl["value"] = ref[last] / x[last]
+            sl["value"] = _finite_or_none(ref[last] / x[last])
     return fd, sl
 
 
@@ -526,7 +532,10 @@ def _render(session, system, k, path, waves=None):
             acq = _run_fcd_window(system, geo["waves"])
             axis = _axis(acq, geo)
             derived = [_derive_wave(s, axis) for s in acq["series"]]
-            p_pos = next(i for i, w in enumerate(geo["waves"]) if w["index"] == geo["primary"])
+            p_pos = next((i for i, w in enumerate(geo["waves"]) if w["index"] == geo["primary"]), None)
+            if p_pos is None:
+                raise _Refuse(MALFORMED, "the primary wavelength %r is not among the system's wavelengths"
+                              % (geo["primary"],))
             cross = _cross_check(system, geo, axis, derived[p_pos][0])
     except _Refuse as r:
         own = _module_flags(geo, acq, rfault)
@@ -541,19 +550,28 @@ def _render(session, system, k, path, waves=None):
         if ft is None:
             raise _Refuse("analysis_empty", "no finite sagittal or tangential focus shift in any "
                           + ("wavelength" if waves is None else "selected wavelength"), flags=flags)
-        curvature = ps.curvature_scale(ft, geo["unit_token"], geo["unit_label"])
+        try:
+            curvature = ps.curvature_scale(ft, geo["unit_token"], geo["unit_label"])
+        except ValueError as exc:
+            raise _Refuse(MALFORMED, "the field-curvature scale could not be chosen: %s" % exc,
+                          flags=flags) from None
         dmax = ps.max_abs(*[[tb["distortion"]] for tb in drawn])
         if axis["zero_range"]:
             dscale, dnote = ps.empty_scale("distortion", "zero_field_range"), "not computed: zero_field_range"
         elif dmax is None:
             dscale, dnote = ps.empty_scale("distortion", "native_non_finite"), "not computed: native_non_finite"
         else:
-            dscale = ps.distortion_scale(dmax)
+            try:
+                dscale = ps.distortion_scale(dmax)
+            except ValueError as exc:
+                raise _Refuse(MALFORMED, "the distortion scale could not be chosen: %s" % exc,
+                              flags=flags) from None
             dnote = ("F-Tan(theta), native reference" if axis["quantity"] == "angle"
                      else "linear in paraxial image height, native reference")
         scales = {"curvature": curvature, "distortion_pct": dscale}
         flags += list(curvature["flags"]) + (["zero_field_range"] if axis["zero_range"] else []) + (
-            ["object_height_axis_unmeasured"] if geo["field_type"] == "ObjectHeight" else [])
+            ["object_height_axis_unmeasured"] if geo["field_type"] == "ObjectHeight" else []) + (
+            ["cross_check_unmeasured"] if not cross["rows_checked"] else [])
         waves_env, runs, model_waves, cycled = {}, [], [], False
         prim_fd, prim_sl = _focal(tables[p_pos], axis, geo["unit_token"])   # primary-wave, drawn or not
         for pos, (w, s, (tb, rs)) in enumerate(zip(geo["waves"], acq["series"], derived)):
@@ -574,7 +592,7 @@ def _render(session, system, k, path, waves=None):
             flags.append("wave_colour_cycled")
         ptb = tables[p_pos]
         endpoints = lambda col: None if col[0] is None or col[-1] is None or axis["zero_range"] else \
-            round(col[0] - col[-1], ps.ROUND_LENS)  # noqa: E731
+            ps.round_value(col[0] - col[-1], ps.ROUND_LENS)  # noqa: E731
         pdist = [v for v in ptb["distortion"] if v is not None]
         title_values = {"field_curvature_sag": endpoints(ptb["sag_shift"]),
                         "field_curvature_tan": endpoints(ptb["tan_shift"]), "unit": geo["unit_token"],

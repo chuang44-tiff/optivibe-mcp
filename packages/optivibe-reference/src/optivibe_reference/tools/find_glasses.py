@@ -29,12 +29,21 @@ in-band-valid. Every window predicate is built as
 ``vd`` is null can NEVER match a Vd window — only rows with a genuinely-computed
 in-band value are returned.
 
-THE ΔPg,F CAVEAT: ``delta_pg_f`` is stored VERBATIM from the ``.agf`` (ED token 4)
-and is UNVALIDATED raw vendor data (the probe saw values down to -81.0). A
-``delta_pg_f`` window matches on that raw stored value, and the result carries
+THE ΔPg,F CAVEAT: ``delta_pg_f`` comes from the ``.agf`` (ED token 4) and is
+UNVALIDATED vendor data. ``build_glass_db`` stores a value whose magnitude is beyond
+``glass_build.DELTA_PG_F_LIMIT`` (0.1) as NULL (the probe saw values down to -81.0),
+so such a row cannot match a ``delta_pg_f`` window and sorts last. A window matches on
+the stored value, and the result carries
 ``delta_pg_f_unvalidated: True`` so the caller knows the trustworthy
 partial-dispersion quantity is the COMPUTED ``pg_f`` (with its ``pg_f_valid``
 gate), not this field.
+
+CATALOG AND KIND CONTROL: ``catalog`` is one catalog or a comma-separated whitelist
+(``"SCHOTT,OHARA"``); an item that matches no catalog in the database is a
+``ToolParamError``. ``exclude`` (comma-separated kinds, default every non-lens kind;
+see ``_glass_kind``) leaves rows of those kinds out; the result carries ``left_out``
+(always), ``left_out_kinds`` (only when > 0) and ``unclassified`` (only when > 0).
+Rows are classified in Python BEFORE the limit, so the counts cover every match.
 
 An empty result over a WELL-FORMED window is ``ok: True`` with an empty
 ``candidates`` list — a valid window can legitimately match nothing.
@@ -43,7 +52,8 @@ import math
 
 from ..errors import ToolParamError
 from ..server import ToolSpec
-from ._glass_common import normalize_catalog
+from ._glass_common import check_catalogs_exist, normalize_catalogs
+from ._glass_kind import material_kind, parse_exclude
 
 _TOOL = "find_glasses"
 
@@ -69,10 +79,10 @@ _RESULT_COLUMNS = (
 # The window params: each maps the public ``<field>_min`` / ``<field>_max`` pair
 # onto a real glass column. ``valid_only=True`` adds the ``<col> IS NOT NULL``
 # clause (the cardinal-defense gate — a NULL computed field is out-of-band and
-# must never match a window). ``delta_pg_f`` is raw/unvalidated so it does NOT
-# get the NOT NULL gate keyed to a *_valid flag (its NULLs are absent-in-.agf,
-# not out-of-band), but a NULL still cannot satisfy a BETWEEN, so SQLite filters
-# it naturally; we mark the result as unvalidated instead.
+# must never match a window). ``delta_pg_f`` is unvalidated so it does NOT get the
+# NOT NULL gate keyed to a *_valid flag (its NULLs are absent in the .agf or beyond
+# the +-0.1 limit applied at DB build), but a NULL still cannot satisfy a BETWEEN, so
+# SQLite filters it naturally; we mark the result as unvalidated instead.
 _WINDOW_FIELDS = (
     # (public_prefix, column, valid_only)
     ("vd", "vd", True),
@@ -80,6 +90,26 @@ _WINDOW_FIELDS = (
     ("nd", "nd", True),
     ("delta_pg_f", "delta_pg_f", False),
 )
+
+
+# The caller may order the matches by any window field.
+# The SQL column comes from this fixed tuple, never from the caller's text.
+_SORT_FIELDS = ("vd", "nd", "pg_f", "delta_pg_f")
+_DEFAULT_SORT = "vd"
+_ORDERS = ("ascending", "descending")
+
+
+def _resolve_sort(params):
+    """Resolve ``(sort, order)``; default ``("vd", "ascending")``, the order of a call without ``sort``."""
+    sort = params.get("sort", _DEFAULT_SORT)
+    if not isinstance(sort, str) or sort not in _SORT_FIELDS:
+        raise ToolParamError(
+            f"'sort' must be one of {', '.join(_SORT_FIELDS)}; got {sort!r}"
+        )
+    order = params.get("order", "ascending")
+    if not isinstance(order, str) or order not in _ORDERS:
+        raise ToolParamError(f"'order' must be ascending or descending; got {order!r}")
+    return sort, order
 
 
 def _validate_bound(name, value):
@@ -168,8 +198,10 @@ def find_glasses(db_conn, params):
 
     See the module docstring for the full contract.
     """
-    catalog = normalize_catalog(params.get("catalog"))
+    catalogs = normalize_catalogs(params.get("catalog"))
+    excluded = parse_exclude(params.get("exclude"))
     limit = _resolve_limit(params)
+    sort, order = _resolve_sort(params)
     clauses, sql_params, queried_fields = _collect_windows(params)
 
     if not queried_fields:
@@ -177,24 +209,43 @@ def find_glasses(db_conn, params):
             "give at least one of vd_/pg_f_/nd_/delta_pg_f_ window bounds"
         )
 
+    check_catalogs_exist(db_conn, catalogs)
+
     where_parts = list(clauses)
-    if catalog is not None:
-        # catalog is normalized to the stored ``<BASENAME>.AGF`` form; a single
-        # case-insensitive equality matches the stored value.
-        where_parts.append("LOWER(catalog) = LOWER(?)")
-        sql_params.append(catalog)
+    if catalogs is not None:
+        # catalogs are normalized to the stored ``<BASENAME>.AGF`` form; a
+        # case-insensitive IN matches the stored value.
+        marks = ", ".join("?" for _ in catalogs)
+        where_parts.append(f"LOWER(catalog) IN ({marks})")
+        sql_params.extend(c.lower() for c in catalogs)
 
     where_sql = " AND ".join(where_parts)
-    # Fetch one extra to detect truncation, then order by vd (a sensible, stable
-    # key for crown/flint scanning) with name as a tiebreaker for determinism.
+    # Fetch every match (the kind of a row is decided in Python, so the count of rows
+    # left out covers the whole match set), ordered by the sort field (vd by default, a
+    # stable key for crown/flint scanning; a null field last in either direction) with
+    # catalog and name as tiebreakers for determinism.
     cols = ", ".join(_RESULT_COLUMNS)
+    direction = " DESC" if order == "descending" else ""
     sql = (
         f"SELECT {cols} FROM glass WHERE {where_sql} "
-        "ORDER BY vd IS NULL, vd, catalog, name LIMIT ?"
+        f"ORDER BY {sort} IS NULL, {sort}{direction}, catalog, name"
     )
-    rows = db_conn.execute(sql, (*sql_params, limit + 1)).fetchall()
+    all_rows = db_conn.execute(sql, sql_params).fetchall()
 
-    truncated = len(rows) > limit
+    rows = []
+    left_out_kinds = {}
+    unclassified = 0
+    for r in all_rows:
+        kind = material_kind(r[0], r[1])
+        if kind in excluded:
+            left_out_kinds[kind] = left_out_kinds.get(kind, 0) + 1
+            continue
+        if kind == "unclassified":
+            unclassified += 1
+        rows.append(r)
+
+    matched = len(rows)
+    truncated = matched > limit
     rows = rows[:limit]
     candidates = [_row_to_dict(r) for r in rows]
 
@@ -202,16 +253,25 @@ def find_glasses(db_conn, params):
         "ok": True,
         "candidates": candidates,
         "candidate_count": len(candidates),
+        "matched": matched,
         "truncated": truncated,
+        "sort": sort,
+        "order": order,
         "match_kind": "range",
         "queried_fields": queried_fields,
+        "left_out": sum(left_out_kinds.values()),
     }
+    if left_out_kinds:
+        result["left_out_kinds"] = left_out_kinds
+    if unclassified:
+        result["unclassified"] = unclassified
     if "delta_pg_f" in queried_fields:
         # Flag the caveat: delta_pg_f is raw, unvalidated .agf data.
         result["delta_pg_f_unvalidated"] = True
         result["note"] = (
-            "delta_pg_f is raw unvalidated .agf data (manufacturer ED token 4); "
-            "the trustworthy partial dispersion is the computed pg_f (pg_f_valid)"
+            "delta_pg_f is unvalidated .agf data (manufacturer ED token 4); a stored "
+            "value beyond +-0.1 reads as null; the trustworthy partial dispersion is "
+            "the computed pg_f (pg_f_valid)"
         )
     return result
 
@@ -225,15 +285,27 @@ FIND_GLASSES_SPEC = ToolSpec(
         "number (vd_min/max), relative partial dispersion (pg_f_min/max), "
         "refractive index (nd_min/max), or raw delta-Pg,F (delta_pg_f_min/max) - the "
         "glass-selection step for chromatic / apochromat (secondary-color) design. "
-        "At least one window bound is required. Gotcha: a glass whose computed "
+        "At least one window bound is required. "
+        "catalog takes one catalog or a comma-separated whitelist such as "
+        "SCHOTT,OHARA; a name that matches no catalog is refused. By default the "
+        "known non-lens kinds are left out: exclude lists the kinds to leave out "
+        "(liquid, adhesive, plastic, gas, birefringent, other), the result counts "
+        "them in left_out, and exclude=\"\" searches every row. "
+        "Matches are ordered by sort (vd, nd, pg_f or delta_pg_f; default vd, "
+        "order=descending reverses) and cut at limit; matched counts the glasses in the "
+        "window that are not left out, so truncated means only the first limit of matched are listed. Gotcha: a glass whose computed "
         "field is out-of-band (null) never matches that window, and the delta-Pg,F "
-        "bounds are raw manufacturer data (unvalidated). See find_glass_pair for "
+        "bounds are raw manufacturer data (unvalidated); a stored delta-Pg,F beyond "
+        "+-0.1 reads as null. See find_glass_pair for "
         "matched apochromat pairs. See lookup_glass for one glass's full data."
     ),
     kind="glass",
     param_types={
         "catalog": "string",
+        "exclude": "string",
         "limit": "integer",
+        "sort": "string",
+        "order": "string",
         "vd_min": "number", "vd_max": "number",
         "pg_f_min": "number", "pg_f_max": "number",
         "nd_min": "number", "nd_max": "number",

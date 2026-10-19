@@ -16,14 +16,25 @@ PARAMS (all optional):
 - ``min_delta_vd`` (default 20.0): the minimum Abbe separation — a pair closer
   than this gives too little power split to be useful.
 - ``anchor`` (+ optional ``anchor_catalog``): partners FOR a specific glass.
-  Resolved like ``lookup_glass`` (unknown -> ``glass_unknown``; a colliding bare
-  name across catalogs -> ``ambiguous_glass`` candidate list — NEVER a silent
-  vendor pick). Absent -> the global top-ranked pairs.
-- ``catalog``: restrict BOTH glasses to this catalog (case-insensitive).
+  Without ``anchor_catalog`` the name is resolved over the whole database: one row ->
+  that row; several rows, exactly one inside the ``catalog`` set -> that row;
+  otherwise ``ambiguous_glass`` (every candidate listed, NEVER a silent vendor
+  pick); no row -> ``glass_unknown``. Absent -> the global top-ranked pairs.
+- ``catalog``: one catalog or a comma-separated whitelist (``"SCHOTT,OHARA"``,
+  case-insensitive) the PARTNERS must come from; an item matching no catalog in the
+  database is a ``ToolParamError``. The anchor is exempt (see below).
+- ``exclude``: comma-separated kinds to leave out (default every non-lens kind; see
+  ``_glass_kind``). The anchor is never left out. The result carries ``left_out``
+  (always; rows removed by ``exclude``, counted before the physical-glass de-dup, and
+  in anchored mode only those that pass the anchor's two numeric gates),
+  ``left_out_kinds`` and ``unclassified`` (each only when > 0).
 - ``limit`` (default 20, hard cap 100).
 
 SCORE: ``|ΔVd| / (1.0 + 200.0 * |ΔPg,F|)`` — rewards a big Abbe split and a tiny
 Pg,F mismatch. Top ``limit`` by score.
+
+PAIR NUMBERS: each pair also carries ``secondary_per_focal``, ``power_sum`` and
+``petzval_per_power`` (thin cemented doublet in air; see ``_pair_numbers``).
 
 EFFICIENCY: the pair-eligible rows (``vd IS NOT NULL AND pg_f IS NOT NULL AND
 nd_valid AND pg_f_valid``) are SORTED by ``pg_f``; a SLIDING WINDOW pointer
@@ -58,7 +69,13 @@ import math
 from .._envelope import error_envelope
 from ..errors import ToolParamError
 from ..server import ToolSpec
-from ._glass_common import normalize_catalog
+from ._glass_common import (
+    _same_physical_glass,
+    check_catalogs_exist,
+    normalize_catalog,
+    normalize_catalogs,
+)
+from ._glass_kind import material_kind, parse_exclude
 
 _TOOL = "find_glass_pair"
 
@@ -66,15 +83,6 @@ _DEFAULT_MAX_DELTA_PG_F = 0.005
 _DEFAULT_MIN_DELTA_VD = 20.0
 _DEFAULT_LIMIT = 20
 _HARD_CAP = 100
-
-# Physical-glass identity tolerances: two rows sharing a NAME are the SAME
-# physical glass (a cross-catalog redistributed copy) only when ALL THREE optical
-# properties also match within these tolerances. Any property beyond tolerance =>
-# a DIFFERENT glass that happens to share the name (which must still pair / stay
-# distinct). These are the audit-specified bounds.
-_IDENT_ND_TOL = 1e-3
-_IDENT_VD_TOL = 0.5
-_IDENT_PG_F_TOL = 1e-3
 
 # The score's Pg,F-mismatch penalty weight (1 + 200*|dPgF|): a 0.005 Pg,F gap
 # halves the score vs. a perfect match, so a tiny-mismatch pair outranks a
@@ -117,27 +125,6 @@ def _resolve_limit(params):
     return min(value, _HARD_CAP)
 
 
-def _same_physical_glass(row_a, row_b):
-    """True when two eligible rows are the SAME physical glass (name + props in tol).
-
-    Rows are ``(catalog, name, vd, pg_f, nd)``. Same physical glass = same NAME AND
-    ``|Δnd| <= 1e-3`` AND ``|Δvd| <= 0.5`` AND ``|Δpg_f| <= 1e-3`` — i.e. a
-    cross-catalog redistributed copy. A None property (shouldn't occur for
-    pair-eligible rows, but be defensive) is treated as a non-match on that axis.
-    """
-    if row_a[1] != row_b[1]:
-        return False
-    vd_a, pgf_a, nd_a = row_a[2], row_a[3], row_a[4]
-    vd_b, pgf_b, nd_b = row_b[2], row_b[3], row_b[4]
-    if None in (vd_a, pgf_a, nd_a, vd_b, pgf_b, nd_b):
-        return False
-    return (
-        abs(nd_a - nd_b) <= _IDENT_ND_TOL
-        and abs(vd_a - vd_b) <= _IDENT_VD_TOL
-        and abs(pgf_a - pgf_b) <= _IDENT_PG_F_TOL
-    )
-
-
 def _assign_identity_clusters(eligible):
     """Group pair-eligible rows into physical-glass clusters; return an id per row.
 
@@ -178,8 +165,10 @@ def _assign_identity_clusters(eligible):
     return [find(i) for i in range(n)]
 
 
-def _load_pair_eligible(db_conn, catalog):
+def _load_pair_eligible(db_conn, catalogs):
     """Load the pair-eligible rows (sorted by pg_f), optionally catalog-restricted.
+
+    ``catalogs`` is a list of stored catalogue strings (a whitelist) or ``None``.
 
     Pair-eligible = a genuinely-computed in-band Vd AND Pg,F (the cardinal-defense
     gate, surfaced here so an out-of-band row never enters a pairing). Returns a
@@ -190,9 +179,10 @@ def _load_pair_eligible(db_conn, catalog):
         "AND nd_valid = 1 AND pg_f_valid = 1"
     )
     sql_params = []
-    if catalog is not None:
-        where += " AND LOWER(catalog) = LOWER(?)"
-        sql_params.append(catalog)
+    if catalogs is not None:
+        marks = ", ".join("?" for _ in catalogs)
+        where += f" AND LOWER(catalog) IN ({marks})"
+        sql_params.extend(c.lower() for c in catalogs)
     sql = (
         "SELECT catalog, name, vd, pg_f, nd FROM glass "
         f"WHERE {where} ORDER BY pg_f, catalog, name"
@@ -200,14 +190,17 @@ def _load_pair_eligible(db_conn, catalog):
     return db_conn.execute(sql, sql_params).fetchall()
 
 
-def _resolve_anchor(db_conn, anchor, anchor_catalog, catalog):
-    """Resolve the anchor glass like ``lookup_glass`` (returns row tuple or envelope).
+def _resolve_anchor(db_conn, anchor, anchor_catalog, catalogs):
+    """Resolve the anchor glass (returns ``(row, None)`` or ``(None, envelope)``).
 
-    Returns ``(row, None)`` on a clean resolve, or ``(None, envelope)`` when the
-    anchor is unknown / ambiguous (the caller returns the envelope directly).
-    The returned row is ``(catalog, name, vd, pg_f, nd, pg_f_valid, vd_present)``;
+    The row is ``(catalog, name, vd, pg_f, nd, pg_f_valid, vd_present, nd_valid)``;
     a resolved-but-not-pair-eligible anchor is handled by the caller (it yields an
     empty pairs list, since it can pair with nothing).
+
+    With ``anchor_catalog``: that catalogue. Without it, over every row whose name
+    equals ``anchor``: none -> ``glass_unknown``; one -> that row, whatever
+    ``catalogs`` holds; several with exactly one inside the ``catalogs`` set -> that
+    row; otherwise ``ambiguous_glass`` listing every candidate.
     """
     if not isinstance(anchor, str):
         raise ToolParamError(
@@ -217,21 +210,27 @@ def _resolve_anchor(db_conn, anchor, anchor_catalog, catalog):
         return None, error_envelope(
             _TOOL, "glass_unknown", "empty anchor name", anchor=anchor
         )
+    try:
+        anchor.encode("utf-8")
+    except UnicodeEncodeError:
+        # A name that cannot be encoded (a lone surrogate) can match no stored row.
+        return None, error_envelope(
+            _TOOL, "glass_unknown", "no glass matched the anchor name",
+            anchor=repr(anchor), anchor_catalog=anchor_catalog,
+        )
 
-    # An anchor_catalog (or the BOTH-restricting catalog) disambiguates the anchor.
-    effective_cat = anchor_catalog if anchor_catalog is not None else catalog
     sql_params = [anchor]
     where = "name = ?"
-    if effective_cat is not None:
+    if anchor_catalog is not None:
         where += " AND LOWER(catalog) = LOWER(?)"
-        sql_params.append(effective_cat)
+        sql_params.append(anchor_catalog)
     rows = db_conn.execute(
         "SELECT catalog, name, vd, pg_f, nd, pg_f_valid, "
-        "(vd IS NOT NULL) FROM glass "
+        "(vd IS NOT NULL), nd_valid FROM glass "
         f"WHERE {where} ORDER BY catalog",
         sql_params,
     ).fetchall()
-    # Byte-exact name (defensive — no COLLATE NOCASE on the column, but assert it).
+    # Byte-exact name (defensive - no COLLATE NOCASE on the column, but assert it).
     rows = [r for r in rows if r[1] == anchor]
 
     if not rows:
@@ -239,7 +238,13 @@ def _resolve_anchor(db_conn, anchor, anchor_catalog, catalog):
             _TOOL, "glass_unknown", "no glass matched the anchor name",
             anchor=anchor, anchor_catalog=anchor_catalog,
         )
-    if effective_cat is None and len(rows) > 1:
+    if anchor_catalog is None and len(rows) > 1:
+        inside = rows
+        if catalogs is not None:
+            wanted = {c.lower() for c in catalogs}
+            inside = [r for r in rows if r[0].lower() in wanted]
+        if len(inside) == 1:
+            return inside[0], None
         candidates = [{"catalog": r[0], "name": r[1]} for r in rows]
         return None, error_envelope(
             _TOOL, "ambiguous_glass",
@@ -254,8 +259,47 @@ def _score(delta_vd, delta_pg_f):
     return delta_vd / (1.0 + _PGF_PENALTY * delta_pg_f)
 
 
+_PAIR_CAVEAT = (
+    "secondary_per_focal, power_sum and petzval_per_power are exact for a thin "
+    "cemented doublet in air: a guide to which pairs are worth a trial, not a "
+    "forecast for a given lens. All dimensionless. "
+    "secondary_per_focal: g focus minus the common F and C focus = "
+    "-secondary_per_focal x f; nearer zero means less secondary colour between g "
+    "and F, and it says nothing about another wavelength pair. "
+    "power_sum: the two elements' absolute powers summed, over the doublet's power; "
+    "lower means weaker elements, which may permit gentler curves. "
+    "petzval_per_power: Petzval radius = -f / petzval_per_power; smaller in "
+    "magnitude means a flatter field."
+)
+
+
+def _pair_numbers(a, b):
+    """The three thin-doublet numbers of two ``(catalog, name, vd, pg_f, nd)`` tuples.
+
+    With ``a`` the higher-Abbe glass and ``dv = a.vd - b.vd``: ``secondary_per_focal =
+    (a.pg_f - b.pg_f) / dv``, ``power_sum = (a.vd + b.vd) / abs(dv)``,
+    ``petzval_per_power = (a.vd / a.nd - b.vd / b.nd) / dv``. Unchanged when ``a`` and
+    ``b`` swap. Returns ``None`` for all three on a ``None`` input or ``dv == 0``.
+    """
+    none = {"secondary_per_focal": None, "power_sum": None, "petzval_per_power": None}
+    if None in (a[2], a[3], a[4], b[2], b[3], b[4]):
+        return none
+    if a[4] == 0 or b[4] == 0:
+        return none
+    if a[2] < b[2]:
+        a, b = b, a
+    dv = a[2] - b[2]
+    if dv == 0:
+        return none
+    return {
+        "secondary_per_focal": (a[3] - b[3]) / dv,
+        "power_sum": (a[2] + b[2]) / abs(dv),
+        "petzval_per_power": (a[2] / a[4] - b[2] / b[4]) / dv,
+    }
+
+
 def _pair_dict(a, b, delta_vd, delta_pg_f, score):
-    """Build one result pair dict with the lower-Vd glass as ``a`` for stability."""
+    """Build one result pair dict with the HIGHER-Vd glass as ``a`` for stability."""
     # Canonical orientation: the higher-Vd (crown-ish) glass first is a stable,
     # readable convention. a/b are (catalog, name, vd, pg_f, nd) tuples.
     if a[2] < b[2]:
@@ -266,6 +310,7 @@ def _pair_dict(a, b, delta_vd, delta_pg_f, score):
         "delta_vd": delta_vd,
         "delta_pg_f": delta_pg_f,
         "score": score,
+        **_pair_numbers(a, b),
     }
 
 
@@ -355,6 +400,43 @@ def _dedupe_by_physical_pair(pairs):
     return out
 
 
+def _build_pool(db_conn, catalogs, excluded, anchor_row, max_delta_pg_f, min_delta_vd):
+    """Build the pairing pool; return ``(pool, left_out_kinds, unclassified)``.
+
+    The pool is the pair-eligible rows inside the ``catalogs`` set whose kind is not in
+    ``excluded``, plus the anchor row (added ONCE when it is not already there, before
+    the pool is sorted by pg_f; the anchor is never left out and never counted). The
+    counts are of ROWS, taken before the physical-glass de-duplication; in anchored
+    mode only rows that pass the anchor's two numeric gates are counted, for
+    ``left_out`` and for ``unclassified`` alike.
+    """
+    eligible = _load_pair_eligible(db_conn, catalogs)
+    pool = []
+    left_out_kinds = {}
+    unclassified = 0
+    for row in eligible:
+        kind = material_kind(row[0], row[1])
+        counted = True
+        if anchor_row is not None:
+            counted = (
+                abs(row[3] - anchor_row[3]) <= max_delta_pg_f
+                and abs(row[2] - anchor_row[2]) >= min_delta_vd
+            )
+        if kind in excluded:
+            if counted:
+                left_out_kinds[kind] = left_out_kinds.get(kind, 0) + 1
+            continue
+        if kind == "unclassified" and counted:
+            unclassified += 1
+        pool.append(row)
+    if anchor_row is not None and not any(
+        r[0] == anchor_row[0] and r[1] == anchor_row[1] for r in pool
+    ):
+        pool.append(anchor_row)
+        pool.sort(key=lambda r: (r[3], r[0], r[1]))
+    return pool, left_out_kinds, unclassified
+
+
 def find_glass_pair(db_conn, params):
     """Find apochromat glass pairs (matched Pg,F, separated Vd); never raises.
 
@@ -367,26 +449,31 @@ def find_glass_pair(db_conn, params):
         "min_delta_vd", params.get("min_delta_vd"), _DEFAULT_MIN_DELTA_VD
     )
     limit = _resolve_limit(params)
-    catalog = normalize_catalog(params.get("catalog"))
+    catalogs = normalize_catalogs(params.get("catalog"))
+    excluded = parse_exclude(params.get("exclude"))
     anchor_catalog = normalize_catalog(
         params.get("anchor_catalog"), "anchor_catalog"
     )
+    check_catalogs_exist(db_conn, catalogs)
 
     anchor_row = None
     anchor = params.get("anchor")
     if anchor is not None:
         resolved, envelope = _resolve_anchor(
-            db_conn, anchor, anchor_catalog, catalog
+            db_conn, anchor, anchor_catalog, catalogs
         )
         if envelope is not None:
             return envelope
-        # resolved is (catalog, name, vd, pg_f, nd, pg_f_valid, vd_present). A
-        # resolved-but-not-pair-eligible anchor (null vd/pg_f or invalid flags)
-        # can pair with nothing -> empty pairs (ok:True), NOT an error.
-        a_vd, a_pgf, a_pgf_valid, a_vd_present = (
-            resolved[2], resolved[3], resolved[5], resolved[6]
+        # resolved is (catalog, name, vd, pg_f, nd, pg_f_valid, vd_present,
+        # nd_valid). A resolved-but-not-pair-eligible anchor (null vd/pg_f or
+        # invalid flags) can pair with nothing -> empty pairs (ok:True), NOT an error.
+        a_vd, a_pgf, a_pgf_valid, a_vd_present, a_nd_valid = (
+            resolved[2], resolved[3], resolved[5], resolved[6], resolved[7]
         )
-        if a_vd is None or a_pgf is None or not a_pgf_valid or not a_vd_present:
+        if (
+            a_vd is None or a_pgf is None or not a_pgf_valid or not a_vd_present
+            or not a_nd_valid
+        ):
             return {
                 "ok": True,
                 "pairs": [],
@@ -395,11 +482,21 @@ def find_glass_pair(db_conn, params):
                 "criterion": "matched_pgf_max_dvd",
                 "match_kind": "pair",
                 "anchor": {"catalog": resolved[0], "name": resolved[1]},
-                "note": "anchor has no valid Vd/Pg,F (out-of-band) — no pairs",
+                "left_out": 0,
+                "caveat": _PAIR_CAVEAT,
+                "note": (
+                    "anchor has no valid index nd (out-of-band) - no pairs"
+                    if (a_vd is not None and a_pgf is not None and a_pgf_valid
+                        and a_vd_present)
+                    else "anchor has no computed Vd/Pg,F (out-of-band or flat "
+                    "dispersion) - no pairs"
+                ),
             }
         anchor_row = (resolved[0], resolved[1], resolved[2], resolved[3], resolved[4])
 
-    eligible = _load_pair_eligible(db_conn, catalog)
+    eligible, left_out_kinds, unclassified = _build_pool(
+        db_conn, catalogs, excluded, anchor_row, max_delta_pg_f, min_delta_vd
+    )
     cluster_ids = _assign_identity_clusters(eligible)
 
     pairs = _emit_pairs(
@@ -426,7 +523,13 @@ def find_glass_pair(db_conn, params):
         "match_kind": "pair",
         "max_delta_pg_f": max_delta_pg_f,
         "min_delta_vd": min_delta_vd,
+        "left_out": sum(left_out_kinds.values()),
+        "caveat": _PAIR_CAVEAT,
     }
+    if left_out_kinds:
+        result["left_out_kinds"] = left_out_kinds
+    if unclassified:
+        result["unclassified"] = unclassified
     if anchor_row is not None:
         result["anchor"] = {"catalog": anchor_row[0], "name": anchor_row[1]}
     return result
@@ -442,9 +545,17 @@ FIND_GLASS_PAIR_SPEC = ToolSpec(
         "number (large |delta-Vd|), the doublet condition for cancelling secondary "
         "spectrum. Optionally anchor on one named glass to get its best partners; "
         "tune with max_delta_pg_f (the partial-dispersion mismatch limit) and "
-        "min_delta_vd (the minimum Abbe separation). Results rank "
-        "best-first (most Abbe separation at the smallest partial-dispersion "
-        "mismatch). Gotcha: an ambiguous bare anchor name returns an "
+        "min_delta_vd (the minimum Abbe separation). "
+        "catalog takes one catalog or a comma-separated whitelist such as "
+        "SCHOTT,OHARA; a name that matches no catalog is refused. By default the "
+        "known non-lens kinds are left out: exclude lists the kinds to leave out "
+        "(liquid, adhesive, plastic, gas, birefringent, other), the result counts "
+        "them in left_out, and exclude=\"\" searches every row. An anchor glass is "
+        "never left out by catalog or exclude. Results are ordered by score, a "
+        "heuristic prefilter, and cut at limit; a smaller max_delta_pg_f brings "
+        "low secondary-colour pairs to the top. Each pair also carries "
+        "secondary_per_focal, power_sum and petzval_per_power for a thin cemented "
+        "doublet of the pair; read caveat in the result. Gotcha: an ambiguous bare anchor name returns an "
         "ambiguous_glass candidate list - qualify the catalog. See find_glasses to "
         "window-search single glasses. See lookup_glass for one glass's full data."
     ),
@@ -454,6 +565,7 @@ FIND_GLASS_PAIR_SPEC = ToolSpec(
         "min_delta_vd": "number",
         "limit": "integer",
         "catalog": "string",
+        "exclude": "string",
         "anchor": "string",
         "anchor_catalog": "string",
     },

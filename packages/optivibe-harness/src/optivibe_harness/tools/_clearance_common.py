@@ -13,6 +13,8 @@ Probe facts honored here:
   ``h = min(semi_i, semi_{i+1})`` (the controlling clear aperture, the smaller of
   the two finite-positive semi-diameters). ``sag`` via
   ``_layout_geometry.sag_profile(R, conic, [h])`` -> ``(z_arr, valid)``.
+  That is now the rule for air gaps and for a glass gap missing a semi. An unfolded GLASS gap with both semis
+  readable is read at each surface's OWN semi (``glass_edge_heights``).
 - §Fold: a surface that is a coordinate-break OR a mirror folds the system; for a
   folded system the LDE ``thickness`` is the fold direction, NOT a clearance — so
   the per-gap thickness VIOLATION audit is UNFOLDED-ONLY (the -525.7 trap).
@@ -139,11 +141,135 @@ def edge_thickness(thickness_i, R_i, conic_i, R_ip1, conic_ip1, h,
     Extended-type p=r/norm + the physical power. All default ``None`` -> BYTE-IDENTICAL
     to the pre-S2a conic-only edge.
     """
-    sag_i = _sag_at(R_i, conic_i, h, coeffs=coeffs_i, norm_radius=norm_i, power=power_i)
+    return edge_thickness_at(
+        thickness_i, R_i, conic_i, R_ip1, conic_ip1, h, h,
+        coeffs_i=coeffs_i, coeffs_ip1=coeffs_ip1,
+        norm_i=norm_i, power_i=power_i, norm_ip1=norm_ip1, power_ip1=power_ip1,
+    )
+
+
+def edge_thickness_at(thickness_i, R_i, conic_i, R_ip1, conic_ip1, h_i, h_ip1,
+                      coeffs_i=None, coeffs_ip1=None,
+                      norm_i=None, power_i=None, norm_ip1=None, power_ip1=None):
+    """``thickness_i + sag_{i+1}(h_ip1) - sag_i(h_i)``: each surface's sag at its OWN height.
+
+    ``edge_thickness`` is this with ``h_i == h_ip1``. A GLASS gap passes each surface's own
+    semi-diameter (``GLASS_EDGE_SOURCE``). Returns a float; NEVER raises.
+    """
+    sag_i = _sag_at(R_i, conic_i, h_i, coeffs=coeffs_i, norm_radius=norm_i, power=power_i)
     sag_ip1 = _sag_at(
-        R_ip1, conic_ip1, h, coeffs=coeffs_ip1, norm_radius=norm_ip1, power=power_ip1
+        R_ip1, conic_ip1, h_ip1, coeffs=coeffs_ip1, norm_radius=norm_ip1, power=power_ip1
     )
     return float(thickness_i) + sag_ip1 - sag_i
+
+
+#: ``edge_height_source`` of a GLASS gap whose edge is read at each surface's own semi.
+GLASS_EDGE_SOURCE = "own_semi_each"
+
+
+def glass_edge_heights(semi_i, semi_ip1):
+    """``(semi_i, semi_ip1, rim)`` for a glass gap, or ``None`` unless BOTH are finite-positive.
+
+    OpticStudio's edge thickness (manual §15.9 "Edge Thickness") takes each
+    surface's sag at ITS OWN semi-diameter, and its mechanical model holds a surface flat
+    beyond that (the MEMA section of the surface-data chapter), so at the element's rim
+    ``rim = max(semi_i, semi_ip1)`` the gap is exactly that own-semi edge. The narrower
+    face is never continued past its own aperture. With only one semi readable there is
+    no own-semi edge: the caller keeps the single-semi reading and says so.
+    """
+    if not (_is_finite_positive(semi_i) and _is_finite_positive(semi_ip1)):
+        return None
+    return float(semi_i), float(semi_ip1), float(max(semi_i, semi_ip1))
+
+
+#: Why an optic-rim reading of an end gap was not computed (frozen tokens).
+RIM_END_NOT_FLAT = "end_surface_not_flat"
+RIM_NO_OPTIC_SEMI = "optic_semi_diameter_unreadable"
+RIM_SAG_NOT_EXACT = "optic_sag_not_exact_at_rim"
+RIM_CENTER_UNREADABLE = "center_thickness_unreadable"
+RIM_TYPE_NOT_MODELLED = "surface_type_not_modelled"
+
+
+def _row_is_flat(row):
+    """True iff the row's shape is a PLANE: an infinite (or zero) radius and no asphere
+    terms. A conic on a plane is inert. Never raises; an unreadable value is not flat."""
+    try:
+        radius = float(row.get("radius"))
+    except (TypeError, ValueError):
+        return False
+    if math.isfinite(radius) and radius != 0.0:
+        return False
+    if math.isnan(radius):
+        return False
+    coeffs = row.get("aspheric_coefficients")
+    try:
+        return not coeffs or all(float(c) == 0.0 for c in coeffs)
+    except (TypeError, ValueError):
+        return False
+
+
+def optic_rim_edge(center, optic_row, end_row):
+    """The END gap's edge read at the OPTIC's own rim against a FLAT end surface.
+
+    ``check_clearance`` reads an air gap's edge at the SMALLER of the two semi-diameters.
+    For the gap that ends at the image that is the image circle, close to the axis, so
+    the reading is nearly the vertex distance. This is the second reading: how far the
+    optic's own clear rim sits from the end PLANE (a sample, cover glass or sensor is
+    wider than the image circle). ``rim = center - sag_optic(optic semi-diameter)``.
+
+    Returns ``{"status": "measured", "edge_thickness", "edge_height"}`` or
+    ``{"status": "not_computed", "reason": <RIM_* token>}``. It is computed ONLY where it
+    is exact: a flat end surface (a curved one would have to be continued past the
+    aperture it is defined on), both surfaces of a type the sag model was written for,
+    every asphere term read, a readable optic semi-diameter, and an optic sag whose
+    radical is valid at the rim (past it the sag routine hands back a finite paraxial
+    value marked valid, which would read as a real gap). Never raises.
+    """
+    import numpy as np
+
+    def no(reason):
+        return {"status": "not_computed", "reason": reason}
+
+    try:
+        if not _row_is_flat(end_row):
+            return no(RIM_END_NOT_FLAT)
+        h = optic_row.get("semi_diameter")
+        if not _is_finite_positive(h):
+            return no(RIM_NO_OPTIC_SEMI)
+        if isinstance(center, bool) or not isinstance(center, (int, float)) \
+                or not math.isfinite(center):
+            return no(RIM_CENTER_UNREADABLE)
+        # The sag math is exact only for the surface types it was written for, and only
+        # with every asphere term read. Anything else is "not computed", never a number:
+        # a base-only sag can read NEGATIVE on a healthy surface and refuse a keeper.
+        for row in (optic_row, end_row):
+            if _geom.sag_model_is_faithful(row.get("type_name")) is not True:
+                return no(RIM_TYPE_NOT_MODELLED)
+        coeffs = optic_row.get("aspheric_coefficients")
+        if optic_row.get("coefficients_unreadable") or any(
+                not math.isfinite(float(c)) for c in (coeffs or ())):
+            return no(RIM_SAG_NOT_EXACT)
+        # The sag routine falls back to a paraxial term when the whole aperture is past
+        # the radical and still reports the point valid, so the radical is tested HERE.
+        radius, conic = float(optic_row.get("radius")), float(optic_row.get("conic") or 0.0)
+        if math.isnan(radius) or not math.isfinite(conic):
+            return no(RIM_SAG_NOT_EXACT)
+        if math.isfinite(radius) and radius != 0.0 \
+                and 1.0 - (1.0 + conic) * (h * h) / (radius * radius) < 0.0:
+            return no(RIM_SAG_NOT_EXACT)
+        z_arr, valid = _geom.sag_profile(
+            optic_row.get("radius"), optic_row.get("conic"), np.array([float(h)]),
+            coeffs=optic_row.get("aspheric_coefficients"),
+            norm_radius=optic_row.get("asphere_norm_radius"),
+            power=optic_row.get("asphere_power"),
+        )
+        z = float(z_arr[0])
+        if not bool(np.all(valid)) or not math.isfinite(z):
+            return no(RIM_SAG_NOT_EXACT)
+        return {"status": "measured", "edge_thickness": float(center) - z,
+                "edge_height": float(h)}
+    except Exception:  # noqa: BLE001 - an unreadable input is "not computed", said so
+        return no(RIM_SAG_NOT_EXACT)
 
 
 def _is_finite_positive(s):

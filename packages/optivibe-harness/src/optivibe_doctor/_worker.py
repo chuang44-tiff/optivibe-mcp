@@ -371,9 +371,15 @@ def worker_base():
 # ---------------------------------------------------------------------------
 # pkg — imports, planes, enrichment, doors, manifests, the server object.  60 s.
 # ---------------------------------------------------------------------------
+#: Distributions whose importable module is NOT the distribution name with ``-`` -> ``_``.
+#: A name missing from here is imported under the wrong name and reported as a broken
+#: dependency on a healthy install (``pillow`` was: its module is ``PIL``).
+_IMPORT_NAMES = {"pythonnet": "clr", "pillow": "PIL"}
+
+
 def _import_name_for(dist_name):
     """Map a distribution name to the module name that proves it importable."""
-    return {"pythonnet": "clr"}.get(dist_name, dist_name.replace("-", "_"))
+    return _IMPORT_NAMES.get(dist_name, dist_name.replace("-", "_"))
 
 
 def _probe_dependency(dist_name, declared=True, raw_name=None):

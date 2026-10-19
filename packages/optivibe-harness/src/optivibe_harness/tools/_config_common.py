@@ -708,6 +708,11 @@ def evaluate_over_configs(session, config, grader_fn):
             restore_warnings.append(ctx["mutation_warning"])
         entry = {"config": k}
         entry.update(graded)
+        if switch_failed:
+            # The switch to config k did not take, so this entry was graded on whichever
+            # config was active. Say so ON THE ENTRY (the single-config path does), not only
+            # in the aggregate coverage.
+            entry.setdefault("config_switch_warning", ctx["mutation_warning"])
         per_config.append(entry)
         headlines.append(_headline_value(graded) if graded_ok else None)
 

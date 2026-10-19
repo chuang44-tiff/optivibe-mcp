@@ -183,6 +183,33 @@ def _resolve_axes(template):
     return _default_axes(template)
 
 
+def _ranking_axes_absent(header, rows, template):
+    """Ranking axes that are NOT a column of this catalog (sorted, de-duplicated).
+
+    Such an axis reads empty for every design and drops out of every weighted mean, so the
+    ranking is computed WITHOUT it. That is not an error (an old template against a newer
+    catalog, or the reverse, is the ordinary cause: two output columns were renamed), but it
+    must be said at the top of the result and not only per design in ``axes_missing``.
+    Never raises.
+    """
+    try:
+        columns = {str(c) for c in (header or [])}
+        for row in rows or []:
+            if isinstance(row, dict):
+                columns.update(str(c) for c in row)
+        return sorted({a for a in _resolve_axes(template) if a not in columns})
+    except Exception:  # noqa: BLE001 - a disclosure helper must not fail the ranking
+        return []
+
+
+def _warn_axes_absent(summary, absent):
+    """Stamp ``ranking_axes_absent`` on ``summary`` and warn on stderr (no-op when empty)."""
+    if absent:
+        summary["ranking_axes_absent"] = absent
+        print(": WARNING ranking axis/axes not a column of this catalog, "
+              f"ranked WITHOUT them: {absent}", file=sys.stderr)
+
+
 def _axis_weight(weights, axis):
     """The base weight for an axis (``ranking.weights[axis]``, default 1.0). A
     non-numeric / non-finite (nan/inf) / negative weight defaults to 1.0.
@@ -547,6 +574,7 @@ def _rank_impl(args):
         json.dump(ranking, fh, indent=1, default=str)
 
     summary = {"ok": True, "out": args.out, "n_ranked": len(ranking)}
+    _warn_axes_absent(summary, _ranking_axes_absent(header, rows, template))
     # FIX-4: disclose any unknown requested metric (never a silent drop).
     unknown = _unknown_metrics(template)
     if unknown:
@@ -1049,6 +1077,7 @@ def _bench_impl(args):
             summary["unknown_metrics"] = unknown
             print(f": WARNING unknown metric(s) requested, dropped: {unknown}",
                   file=sys.stderr)
+        _warn_axes_absent(summary, _ranking_axes_absent(_header, rows, template))
         # A DIRECT-INVARIANT boundary: an all-designs-failed-to-load run is never
         # ok/rc0 (the run-level attribution is NEUTRAL — could be a foreign seat, bad/relative
         # staging paths, or corrupt .zmx; the ledger-visible seat is refused at preflight).

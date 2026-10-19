@@ -872,7 +872,8 @@ def _author_etgt_edge_floors(system, mfe, min_glass):
 def _etgt_authored_note(authored, target, min_glass, incomplete):
     """The §7.1 single-config authored-path note (LOAD-BEARING anti-silent-wrong copy).
 
-    Names the OWN-semi convention, the ~46% BOTH-directions divergence, that a satisfied
+    Names the OWN-semi convention (now also check_clearance's glass-gap
+    edge; it was ~46% divergent from the old min(semi) audit), that a satisfied
     ETGT does NOT certify the manufacturable edge, and that ``check_clearance`` / the
     post-optimize ``thin_edge_warning`` is the AUTHORITY. A partial author (``incomplete``
     non-empty) appends the reaped-surfaces clause.
@@ -881,11 +882,11 @@ def _etgt_authored_note(authored, target, min_glass, incomplete):
         f"Authored {authored} ETGT true-edge glass floor(s) at target {target:.3f} mm "
         f"(min_glass {min_glass} × {1.0 + _ETGT_EDGE_SAFETY_MARGIN:.2f}), weight "
         f"{_ETGT_EDGE_WEIGHT:g}, on the glass-edge surfaces. ETGT is an in-merit RESTORING "
-        "FORCE evaluated at each surface's OWN semi-diameter — which diverges from "
-        "check_clearance's common min(semi) audited edge by up to ~46% in BOTH directions "
-        "(gotcha #240 class). A SATISFIED ETGT floor does NOT certify the manufacturable "
-        "edge: on some geometries ETGT reads THICKER than the audited edge, so the audited "
-        "edge can still be below min_glass. check_clearance (and the post-optimize "
+        "FORCE evaluated at each surface's OWN semi-diameter, the same edge check_clearance "
+        "audits for an unfolded glass gap. A SATISFIED ETGT floor still does NOT certify "
+        "the manufacturable edge: the audit also checks the centre, folded gaps and "
+        "configurations ETGT does not see, and a weighted floor can be traded away by the "
+        "optimizer. check_clearance (and the post-optimize "
         "thin_edge_warning on `optimize`) is the AUTHORITY for edge safety — run/read it "
         "after optimize. The safety margin biases the force to converge manufacturable but "
         "does NOT guarantee it."
@@ -3675,10 +3676,12 @@ BUILD_MERIT_SPEC = ToolSpec(
         "image-quality baseline you add constraints onto. criterion='spot' (default, "
         "RMS spot radius) or 'wavefront' (RMS wavefront error — use for a "
         "near-diffraction-limited design); the criterion is pinned deterministically. "
-        "By DEFAULT authors positive thickness floors (min_air=0.5, min_glass=1.0, in "
-        "lens units — assumes a mm-scale ~10-500mm system; override for micro-optics, or "
-        "pass min_air=0/min_glass=0 to restore target-0 bounds) so optimization cannot "
-        "drive a center/edge thickness negative. Optional max_air/max_glass author the "
+        "By DEFAULT authors positive AIR thickness floors (min_air=0.5, in lens units — "
+        "assumes a mm-scale ~10-500mm system; override for micro-optics, or pass min_air=0 "
+        "to restore target-0 bounds) so optimization cannot drive an air gap negative. "
+        "The GLASS floors (min_glass=1.0, centre and edge) are authored ONLY with "
+        "glass=true; without it no glass floor exists and glass_floor_warning says so. "
+        "Optional max_air/max_glass author the "
         "matching CENTRE-THICKNESS CEILINGS (MXCA/MXCG) — the upper half of the box, and "
         "the only thing that makes a later 'this element looks too thick' judgement "
         "adjudicable rather than NO_ORACLE, since a floor measures a MINIMUM and says "

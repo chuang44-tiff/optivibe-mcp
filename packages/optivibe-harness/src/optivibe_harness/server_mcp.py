@@ -226,6 +226,17 @@ _CONFIG_ALL_SCHEMA = {
 }
 
 
+# An ARRAY param that also takes the literal string "all" (every member, resolved by the
+# handler). param_types keeps "array", so a stringified list is still JSON-reparsed and
+# "all" (not valid JSON) falls through raw to the handler, which validates both forms.
+# Opt-IN by (tool, param), like _CONFIG_ALL_TOOLS: an unlisted array never advertises "all".
+_ARRAY_OR_ALL_PARAMS = frozenset({("analyze_strehl", "fields")})
+_ARRAY_OR_ALL_SCHEMA = {
+    "anyOf": [{"type": "array", "items": {"type": "number"}},
+              {"type": "string", "enum": ["all"]}]
+}
+
+
 def _build_input_schema(entry):
     """Build an MCP ``inputSchema`` for one ``Dispatcher.list_tools()`` entry.
 
@@ -257,6 +268,8 @@ def _build_input_schema(entry):
                 # can't corrupt every other ACCEPTS tool (the composite.py
                 # _copy_entry aliasing footgun, closed here too).
                 properties[p] = copy.deepcopy(_CONFIG_ALL_SCHEMA)
+            elif t == "array" and (entry["name"], p) in _ARRAY_OR_ALL_PARAMS:
+                properties[p] = copy.deepcopy(_ARRAY_OR_ALL_SCHEMA)
             elif t == "array":
                 properties[p] = {"type": "array", "items": {}}
             else:

@@ -121,6 +121,8 @@ skill is selected:
 - **`design-aberration-review`** — read the ray fan and the field curvature /
   distortion plots and report how the aberrations are balanced. ADVISORY.
 - **`optimize-loop`** — set up, preflight, and run optimization with checkpoints.
+- **`design-glass-matching`** — the glass step for a settled lens: find the carrier
+  elements, trial swaps against a control, keep one only when image quality improves.
 - **`bench-catalog`** — benchmark and rank a folder of lens designs against a target spec
   or each other.
 - **`zos-api-debug`** — troubleshoot an OpticStudio connection / license error.

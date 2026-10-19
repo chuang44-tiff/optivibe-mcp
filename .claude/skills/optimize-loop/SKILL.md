@@ -72,13 +72,19 @@ seed: four STRH field rows took 14-30+ min a call and crashed the PC; per-field 
    only; cemented joins are allowed and stay cemented. Tighten packaging (track, thickness
    ceilings) early; it costs far more once the hard spec is close.
 2. Increments you set yourself: every hard spec's terms stay in the merit throughout; move the weights, the
-   packaging bounds and, when the diagnosis says so, the cause (colour terms, a glass) one step at a time. Save
+   packaging bounds and, when the diagnosis says so, the cause one step at a time. Save
    every increment as a candidate, even if later moves fail, so the series is visible in the candidates folder;
    each is a checkpoint, not permission to design a different lens. When you start optimizing for performance, run
    `design-aberration-review` first (an advisor, not a per-stage gate).
 3. The stated spec: from the last increment, move the hard spec the rest of the way.
 The plan is yours to revise along the way: after each stage re-read every spec item and re-rank what is left --
 a spec that came free, one that got harder, a better order. Say what changed and why.
+
+**Do not wait on a run that is not promising.** If one call (about 20 cycles) has not moved the measured targets,
+whether it ended at rest (`gain_below_threshold`) or on `pass_limit` / `time_budget` with a small
+`last_pass_improvement_pct`, do not call `optimize` again: change the merit or the start. Run on to rest only the
+runs that are winning. A right form moves fast and settles fast; a run left to grind tends to sink into a poor local
+minimum.
 
 **The craft is the weights.** Normally one merit for the walk-in; progress is chiefly re-weighting it.
 - Image terms: per-field polychromatic RWCE (ring 6, wave 0, one hy per stated field, target 0), or a `build_merit`
@@ -99,17 +105,21 @@ objective, the elements nearest the specimen), axial if the band-edge waves are 
 glass in the strong positives). Otherwise read field curvature and astigmatism; the levers are air spacings and power
 balance. A forced flat field made a colour-limited edge worse. Before you name a limiting aberration or launch an
 operand-targeted `optimize`, run `design-aberration-review`: it shows how the aberrations are balanced, so you do not
-chase one operand. A glass change is a trial: `save_snapshot`,
-`substitute_glass` one surface, a short `optimize`, compare every field, keep it or `load_design` back.
+chase one operand. Glass comes last: build the form and correct the third-order aberrations first. When the lens
+sits at a steady local minimum and secondary colour or field curvature is what remains, run `design-glass-matching`
+as the finishing step. Steady means a full `optimize` stopped by itself, and Strehl and wavefront were read at every
+field after it.
 
 **Hard rules.**
-1. STRH never sits in the merit at an `optimize`; RWCE drives. Read a field's Strehl at a stage end from a weight-0
-   STRH row (`add_operand` with `Field n`, `dump_merit_function`, `remove_operand`); `get_operand('STRH', hy=...)`
-   drops hy. Leave the row's sampling (Samp) at its default: a high Samp has stalled or killed the engine. A Marechal estimate from RWCE never stands in for that read. Before every `optimize`,
+1. STRH never sits in the merit at an `optimize`; RWCE drives. Read Strehl at a stage end with
+   `analyze_strehl(fields="all", best_focus=false)` and take each field's `per_field[].polychromatic`; it adds no
+   merit rows. A Marechal estimate from RWCE never stands in for that read. Before every `optimize`,
    `dump_merit_function`: no STRH row, and no stated field's image term, floor or ceiling (MNCA/MNEG/OPLT/CTGT...)
    at weight 0 (a measured operand a bound reads, such as TOTR under OPLT, stays at weight 0).
-2. Bound every call: the first at `cycles=10`, later ones sized from the envelope's `wall_time_s`; if one call
-   passes ~5 min, ask for fewer cycles next.
+2. Bound every call: the first at `cycles=10`, later ones sized from the envelope's `wall_time_s`. A DLS/OD call
+   stops at its time budget (`time_budget_s`, default 120 s) and keeps the partial result: when `budget_reached` is
+   true the lens is NOT converged, whatever the verdict reads, so call `optimize` again to continue. If repeated
+   stops gain little, change the merit or the variables rather than raise the budget.
 3. Every stage ends with `check_clearance`, a `save_candidate` under one `design_name`, and a stage review
    (`design-vision-review` with that candidate's seq). The review is advice; the readings decide.
 4. A stage you cannot reach after weights, a diagnosis and trial moves is the REPORTED LIMIT: reload the last good
@@ -129,9 +139,15 @@ aimed at, the moves, the readings, the candidate seq and the review outcome -- w
    read it:
    - `improved` — the merit came down **against the merit function you gave it**. This
      is not the same as "the lens got better." See the reality check below.
-   - `diverged` — the merit did not improve / an UNSTABLE configuration. Reload your
-     Step-1 snapshot if the result is worse, and make a high-level design change
-     (different form / starting point) rather than running more cycles.
+   - `diverged` — the merit got worse: an UNSTABLE configuration. Reload your
+     Step-1 snapshot, and make a high-level design change (different form / starting
+     point) rather than running more cycles.
+   - a verdict ending `_unphysical` (`improved_unphysical`, `stable_unphysical`) — the
+     geometry broke: reload your Step-1 snapshot and report.
+   - a verdict ending `_unverified` — the geometry audit established nothing (read
+     `geometry_audit.reason`; on a folded system this is the normal reading): check with
+     `check_clearance` before you count the gain, reload if it fails, else read it as the
+     verdict without the suffix.
 
    `optimize` can also REFUSE instead of running: `ok=false` with error_family
    `optimize_merit_uncomputable` and no verdict — a corner ray can't trace at full
@@ -206,7 +222,7 @@ Design class: unchanged  (or: name exactly what changed — see below)
 Setup changes: none  (or: list what YOU changed — wavelengths, fields, aperture, scale)
 Figure review: <n> recorded (<k> unanswered)  (or: silent — the eye found nothing; or: not asked)
 
-Verdict: improved / diverged  (cycles/passes as reported by optimize)
+Verdict: improved / stable / diverged, with any _unphysical / _unverified suffix  (cycles/passes as reported by optimize)
 ```
 
 **The last line of the report is the verdict line.** It begins with the literal token
@@ -280,8 +296,7 @@ Then:
 
 - Converged well: "Looks good. Run `/design-review` for a full assessment, or
   `save_candidate` / `promote_best` to keep it."
-- Stalled: "Free more variables, substitute glasses, relax a constraint, or change
-  the starting point."
+- Stalled: "Free more variables, relax a constraint, or change the starting point."
 - Diverged: "`diverged` means an UNSTABLE configuration — reload the saved snapshot if
   the result is worse, then change the design form; don't run more cycles."
 

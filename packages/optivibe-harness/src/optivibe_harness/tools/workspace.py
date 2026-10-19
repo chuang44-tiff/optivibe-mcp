@@ -5788,8 +5788,7 @@ def promote_best(session, params):
                 "error": (
                     "REFUSED: force=True would override a '%s' clearance verdict, and an "
                     "override must state its reason. Pass judgment={\"reason\": \"<why "
-                    "this is acceptable>\"}. Ten designs were force-promoted with no "
-                    "reason recorded anywhere; the reason is written to disk beside the "
+                    "this is acceptable>\"}. The reason is written to disk beside the "
                     "candidate bytes, not just returned." % (verdict,)
                 ),
                 "design_name": design_name,

@@ -276,6 +276,21 @@ def _run_with_watchdog(fn, timeout_s):
         return ("timeout", None)
 
 
+def _engine_parent_pid(pid):
+    """Parent PID of engine ``pid``, or ``None`` if it cannot be READ. NEVER raises.
+
+    Attribution: the engine our ``CreateNewApplication()`` spawns has the
+    spawning python as its parent (measured live on four engines). ``None`` means unattributable,
+    which callers must treat as NOT ours (never kill an engine we cannot prove is ours).
+    """
+    try:
+        import psutil as _psutil
+
+        return int(_psutil.Process(int(pid)).ppid())
+    except Exception:  # noqa: BLE001 -- NoSuchProcess / AccessDenied / anything: unknown
+        return None
+
+
 class ZemaxSession:
     """A single-handle ZOS-API engine session (open/dispatch/close lifecycle).
 
@@ -336,6 +351,11 @@ class ZemaxSession:
         self._tools_slot_arm = None
         self._closed = False
         self._tracked = {}  # {pid: create_time} — only PIDs WE spawned
+        self._unresolved = {}  # {pid: create_time} — parent unreadable; NO kill authority
+        # PIDs promoted from ``_unresolved``: each was admitted only by a diff against
+        # ITS OWN capture-time baseline (so it was not in it), hence a LATER baseline
+        # that merely contains the survivor must not make the reap guard refuse it.
+        self._rebased = set()
         self._baseline = set()  # engine PIDs present before our spawn (never touch)
         # the hang-watchdog §1.2: the pre-create instant persisted at the TOP of
         # _open_locked so close() can re-diff against the SAME create-time gate even
@@ -770,8 +790,10 @@ class ZemaxSession:
 
         The open/connect critical section runs UNDER ``_lock`` so two
         concurrent opens can never both call ``CreateNewApplication()`` and spawn
-        N>1 engines (single-seat: a 2nd create binds the same engine and poisons
-        the shared channel when the first handle closes). ``is_open`` is
+        N>1 engines of OUR OWN (the N=1 discipline is OptiVibe's). A 2nd create from
+        a SEPARATE process returns its own engine with its own PID; within ONE
+        process two sessions can share an engine. The ownership logic below relies
+        on neither. ``is_open`` is
         re-checked INSIDE the lock (double-checked) so the 2nd caller returns
         ``self`` without a 2nd create.
 
@@ -862,6 +884,10 @@ class ZemaxSession:
         # to its create_time. A failed attempt's un-reaped spawn stays here so it
         # remains reapable and is never confused with the baseline.
         tracked_acc = {}
+        # A2: candidates whose parent could not be READ (transient
+        # AccessDenied etc.). Grants NO kill authority; attribution is re-attempted
+        # at commit and at every reap/close path, promoting only proven-ours.
+        unresolved_acc = {}
 
         last_exc = None
         for attempt in range(self._max_connect_retries):
@@ -895,9 +921,9 @@ class ZemaxSession:
                 # rounds/skews fractionally before pre_create_time is not dropped.
                 # PID capture stays on the CALLING thread (unchanged ordering).
                 after = process_reaper.snapshot_engine_pids()
-                spawned = process_reaper.diff_spawned(
+                spawned = self._attributable(process_reaper.diff_spawned(
                     baseline, after, min_create_time=pre_create_time
-                )
+                ), unresolved=unresolved_acc)
                 for pid, info in spawned.items():
                     tracked_acc.setdefault(pid, info.create_time)
 
@@ -934,7 +960,14 @@ class ZemaxSession:
                 self._connection = connection
                 self._closed = False
                 self._baseline = set(baseline_pids)
+                self._retry_attribution(unresolved_acc, tracked_acc)
                 self._tracked = dict(tracked_acc)
+                self._unresolved.update(unresolved_acc)  # keep earlier opens' entries
+                # The open COMMITTED, so the attribution window is CLOSED.
+                # Left open it would let close() reap any engine another session
+                # started after our open (never kill an engine we did not start). Only an abandoned/failed connect
+                # keeps the window for ``_abandoned_connect_sweep``.
+                self._connect_pre_create_time = None
                 # Persist for cross-restart orphan reclaim. Best-effort:
                 # a failed write means at worst a future MISSED reap, never a failed
                 # open. ``_tracked`` is exactly the create-time-provenance-gated set we
@@ -966,13 +999,15 @@ class ZemaxSession:
                 # step; union into the accumulator so a PID can never slip the net.
                 # The create_time gate keeps an unrelated concurrent
                 # engine out of the reap set.
-                spawned_after = process_reaper.diff_spawned(
+                spawned_after = self._attributable(process_reaper.diff_spawned(
                     baseline,
                     process_reaper.snapshot_engine_pids(),
                     min_create_time=pre_create_time,
-                )
+                ), unresolved=unresolved_acc)
                 for pid, info in spawned_after.items():
                     tracked_acc.setdefault(pid, info.create_time)
+                self._retry_attribution(unresolved_acc, tracked_acc)
+                self._unresolved.update(unresolved_acc)
                 # Reap the FULL accumulated set against the ONE baseline. A PID a
                 # prior attempt failed to reap is retried here and, if it survives
                 # again, remains in tracked_acc (reapable) — it never folds into
@@ -987,7 +1022,7 @@ class ZemaxSession:
                 if isinstance(exc, SessionConnectTimeoutError):
                     # Catch a late orphan visible by now, then breadcrumb + re-raise.
                     self._connect_terminal_sweep(
-                        baseline, pre_create_time, tracked_acc
+                        baseline, pre_create_time, tracked_acc, unresolved_acc
                     )
                     self._log_slow_open(open_start, timed_out=True)
                     raise
@@ -1006,6 +1041,71 @@ class ZemaxSession:
             f"ZOS-API connect failed after {self._max_connect_retries} attempts: "
             f"{last_exc}"
         )
+
+    def _attributable(self, spawned, *, log=True, unresolved=None):
+        """: the SUBSET of ``spawned`` ({pid: ProcInfo}) this process can
+        attribute to itself -- PARENT PID == ``os.getpid()``. The ONE predicate every
+        provenance-window reap goes through, so the sites cannot drift. A foreign or
+        unreadable parent is excluded (never kill an engine we cannot prove is ours) and, when ``log``,
+        disclosed as UNATTRIBUTED. NEVER raises."""
+        ours = {}
+        try:
+            me = os.getpid()
+            for pid, info in spawned.items():
+                parent = _engine_parent_pid(pid)
+                if parent == me:
+                    ours[pid] = info
+                elif parent is None and unresolved is not None:
+                    # Unreadable, not foreign: remember it (NO kill authority) so
+                    # attribution can be retried instead of dropping our own engine.
+                    unresolved[pid] = getattr(info, "create_time", 0.0)
+                elif log:
+                    self._log(
+                        f"ZemaxSession: UNATTRIBUTED ENGINE pid={pid} "
+                        f"create_time={getattr(info, 'create_time', '?')} -- NOT "
+                        f"reaped (parent is not this process or unreadable; possibly "
+                        f"a concurrent session's engine)."
+                    )
+        except Exception:  # noqa: BLE001 -- attribution must never break open/close
+            pass
+        return ours
+
+    def _retry_attribution(self, unresolved, into, *, log=False):
+        """Re-read the parent of each unresolved candidate: proven-ours moves into
+        ``into`` ({pid: create_time}); a readable foreign parent is dropped; a still
+        unreadable one stays in ``unresolved`` (logged UNATTRIBUTED when ``log``,
+        never reaped). NEVER raises."""
+        try:
+            me = os.getpid()
+            for pid, ct in list(unresolved.items()):
+                parent = _engine_parent_pid(pid)
+                if parent == me:
+                    into.setdefault(pid, ct)
+                    unresolved.pop(pid, None)
+                elif parent is not None:
+                    unresolved.pop(pid, None)
+                elif log:
+                    self._log(
+                        f"ZemaxSession: UNATTRIBUTED ENGINE pid={pid} "
+                        f"create_time={ct} -- parent still unreadable at close; "
+                        f"NOT reaped."
+                    )
+        except Exception:  # noqa: BLE001 -- attribution retry must never break teardown
+            pass
+
+    def _resolve_unresolved(self):
+        """Close-time retry: promote proven-ours unresolved engines into ``_tracked``
+        (so they are reaped and un-recorded), drop foreign, log the rest."""
+        promoted = {}
+        self._retry_attribution(self._unresolved, promoted, log=True)
+        self._tracked.update(promoted)
+        self._rebased.update(promoted)
+        return promoted
+
+    def _reap_baseline(self):
+        """Baseline for reaping ``_tracked``: the session baseline minus PIDs promoted
+        from ``_unresolved`` (their own capture-time baseline already excluded them)."""
+        return set(self._baseline) - self._rebased
 
     def _log_slow_open(self, open_start, *, timed_out=False):
         """Durable breadcrumb (§4.2): log ``engine_open`` + elapsed when the open
@@ -1027,7 +1127,9 @@ class ZemaxSession:
         except Exception:  # noqa: BLE001 — breadcrumb must never break open()
             pass
 
-    def _connect_terminal_sweep(self, baseline, pre_create_time, tracked_acc):
+    def _connect_terminal_sweep(
+        self, baseline, pre_create_time, tracked_acc, unresolved=None
+    ):
         """One final provenance-gated re-diff + force-reap on the connect-timeout
         exit (the hang-watchdog §1.5, Layer 1). Catches a late orphan that became
         enumerable between the last per-attempt re-diff and the raise. NEVER raises.
@@ -1038,13 +1140,16 @@ class ZemaxSession:
         sweep failure can never break the fail-fast raise.
         """
         try:
-            spawned = process_reaper.diff_spawned(
+            spawned = self._attributable(process_reaper.diff_spawned(
                 baseline,
                 process_reaper.snapshot_engine_pids(),
                 min_create_time=pre_create_time,
-            )
+            ), unresolved=unresolved)
             for pid, info in spawned.items():
                 tracked_acc.setdefault(pid, info.create_time)
+            if unresolved is not None:
+                self._retry_attribution(unresolved, tracked_acc)
+                self._unresolved.update(unresolved)
             self._force_reap(dict(tracked_acc), set(baseline.keys()))
         except Exception:  # noqa: BLE001 — terminal sweep must never break the raise
             pass
@@ -1064,6 +1169,12 @@ class ZemaxSession:
         create_time gated): a foreign/baseline or pre-create engine is NEVER touched
         (L22). PIDs already in ``self._tracked`` are excluded (the normal-close reap
         already handled them).
+
+        — two more gates: (1) a COMMITTED open clears
+        ``_connect_pre_create_time`` so this is a no-op for a session whose open
+        succeeded (only a failed/timed-out connect keeps the window); (2) a candidate
+        is reaped only if its PARENT PID is this process (``_engine_parent_pid``); an
+        unreadable or foreign parent is NOT reaped and is disclosed below.
         """
         try:
             if self._connect_pre_create_time is None:
@@ -1075,10 +1186,18 @@ class ZemaxSession:
                 process_reaper.snapshot_engine_pids(),
                 min_create_time=self._connect_pre_create_time,
             )
+            # Create-time + baseline prove a PID's identity, not its
+            # OWNERSHIP. Reap only a candidate whose PARENT is this process (the
+            # python that called CreateNewApplication spawned it); an unreadable
+            # parent is NOT reaped (fail safe toward not killing) and falls into
+            # the unattributed-disclosure loop below.
             late = {
                 pid: info.create_time
-                for pid, info in spawned.items()
-                if pid not in self._tracked
+                for pid, info in self._attributable(
+                    {p: i for p, i in spawned.items() if p not in self._tracked},
+                    log=False,  # the disclosure loop below names every survivor
+                    unresolved=self._unresolved,  # retained, no kill authority
+                ).items()
             }
             if late:
                 self._force_reap(late, set(self._baseline))
@@ -1093,6 +1212,8 @@ class ZemaxSession:
             # never silent (the deferred in-process reap is a known follow-up). L26: this
             # branch owns NO kill path — it only reads the diff + writes one _log line
             # per surviving un-attributable PID; the only mutation is the durable log.
+            # A committed open clears the window, so this loop runs only for an
+            # open that never committed; a prior open's late orphan is then not logged here.
             for pid, info in spawned.items():
                 if pid in late:
                     continue  # already targeted by this sweep's reap above
@@ -1137,7 +1258,10 @@ class ZemaxSession:
     def _close_locked(self):
         """The close body, assumed to run while ``_lock`` is held."""
         if self._closed:
-            return  # idempotent: 2nd close is a no-op
+            # Idempotent for the engine handle (no 2nd CloseApplication), but PID-only
+            # recovery of retained unresolved identities must survive a first close.
+            self._force_reap(self._resolve_unresolved(), self._reap_baseline())
+            return
         app = self._app
         # Flip closed FIRST so any concurrent app/system access guards out cleanly
         # even though CloseApplication is async.
@@ -1147,6 +1271,7 @@ class ZemaxSession:
                 app.CloseApplication()
             except Exception:  # noqa: BLE001 — double-close / transport-loss is fine
                 pass
+        self._resolve_unresolved()
         self._reap_tracked()
         # the hang-watchdog §1.5 Layer 2: AFTER the normal tracked-reap, sweep for a
         # LATE orphan a leaked connect-worker may have spawned after open() returned
@@ -1247,7 +1372,7 @@ class ZemaxSession:
 
     def _reap_tracked(self):
         """PID-poll the tracked spawn(s); force-reap any straggler (L22)."""
-        self._force_reap(dict(self._tracked), self._baseline)
+        self._force_reap(dict(self._tracked), self._reap_baseline())
 
     def _reap_app(self, app, baseline, tracked):
         """Reap a half-open engine during a failed ``open()`` attempt."""
@@ -1334,7 +1459,8 @@ class ZemaxSession:
         ``_closed`` and does NOT call ``CloseApplication()``. NEVER raises.
         """
         try:
-            self._force_reap(dict(self._tracked), set(self._baseline))
+            self._resolve_unresolved()
+            self._force_reap(dict(self._tracked), self._reap_baseline())
         except Exception:  # noqa: BLE001 — shutdown reap must never raise
             pass
 
