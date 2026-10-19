@@ -118,6 +118,18 @@ def main():
                   "corpus WITHOUT --emit-raw; operand/tolerance catalogs stay "
                   "synonyms-only until the live-probe captures are regenerated.")
         build_manual_corpus.main(emit_args)
+    except ModuleNotFoundError as exc:
+        # PyMuPDF (fitz) is the optional [manual] extra; absent, the step degrades like
+        # a missing input. Keyed on the module NAME: any other missing module, or a
+        # present-but-broken PyMuPDF, is still a FAILED step.
+        if exc.name != "fitz":
+            failures += 1
+            print("[manual-build] FAILED - %s: %s" % (type(exc).__name__, exc))
+        else:
+            print("[manual-build] SKIPPED - PyMuPDF (fitz) is not installed. Install the "
+                  "[manual] extra: pip install -e \"packages/optivibe-reference[manual]\"")
+            print("[manual-build] search_reference answers corpus_unavailable and the "
+                  "operand/tolerance catalogs stay synonyms-only until this build runs.")
     except Exception as exc:  # noqa: BLE001 — report per-step, keep going
         failures += 1
         print("[manual-build] FAILED - %s: %s" % (type(exc).__name__, exc))

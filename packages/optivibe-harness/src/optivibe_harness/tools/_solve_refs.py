@@ -45,7 +45,7 @@ inherited from every cell read in this family (a known limit).
 ------------------------------------------------------------------------------------
 WHY THIS MODULE IS AS LARGE AS IT IS
 ------------------------------------------------------------------------------------
-The measurement is **258** ``ast.stmt``, and the size is deliberate rather than
+The measurement is **267** ``ast.stmt``, and the size is deliberate rather than
 incidental. The table below is EXCLUSIVE (every function in exactly one bucket) and
 EXHAUSTIVE (the buckets sum to the module total):
 
@@ -78,12 +78,19 @@ EXHAUSTIVE (the buckets sum to the module total):
 * **29 — the confirm** (both halves, ``type_after`` AND the re-read ``ref_after``, plus
   the ORDERED TOTAL four-row consequence partition):
   ``_confirm_one`` 12, ``confirm_after`` 11, ``_consequence`` 6.
-* **45 — the refusal prose** and its ordered three-tier ``(table, solve_type)`` routing:
-  ``refusal_message`` 31, ``_remedy`` 10, ``_replay`` 4.
+* **54 — the refusal prose** and its ordered three-tier ``(table, solve_type)`` routing:
+  ``_detail`` 31, ``refusal_message`` 3, ``failure_note`` 6, ``_remedy`` 10, ``_replay`` 4.
 * **18 — module-level**: the docstring, four imports, the three frozen vocabularies and
   the nine constants the wire and the prose share.
 
-124 + 42 + 29 + 45 + 18 = **258**.
+124 + 42 + 29 + 54 + 18 = **267**.
+
+THE LATEST CHANGE MOVED IT 258 -> 267 (+9). A ``remove_surface`` whose count read-back
+fails now carries the pre-mutation scan in its error, so the ``detail`` assembly moved out
+of ``refusal_message`` into ``_detail`` (unchanged) and the new ``failure_note`` reuses it
+without the refusal's tail, which says "nothing was mutated" and is false on that path.
+The +9 is two new function shells (def, docstring and return each) plus
+``failure_note``'s fallback (a ``try``, the verdict assignment and the fallback return).
 
 THE LAST THREE CHANGES MOVED IT 246 -> 250 -> 255 -> 258, AND EACH WAS REVIEWED BEFORE IT
 WAS MADE: (+4) the policy channel; (+5) the refusal channel; (+3) the positive allow-list.
@@ -1248,7 +1255,7 @@ def _replay(hit, name):
     still correct for it (the value is not available from this scan, and substituting a
     guess re-authors a different relationship), and serving a numeric-flavoured phrase is
     strictly better than serving a value the door rejects. A column-specific phrase costs a
-    module-level constant (+1 statement) against a ceiling pinned by EQUALITY at 258, so
+    module-level constant (+1 statement) against a ceiling pinned by EQUALITY, so
     it is DISCLOSED here rather than trimmed in, and ticketed.
     """
     value = hit.get(name)
@@ -1279,8 +1286,14 @@ def _remedy(hit):
                     "that solve family's other parameters, so it is not a re-author path")
 
 
-def refusal_message(at, scan):
-    """The strict-mode refusal prose. NEVER raises.
+def _detail(at, scan):
+    """The scan-to-prose ``detail`` clause shared by ``refusal_message`` and ``failure_note``. NEVER raises.
+
+    Split out of ``refusal_message`` so ``failure_note`` can share it: the assembly below is
+    unchanged, byte for byte; only the tail sentence stayed
+    with ``refusal_message`` because it says "nothing was mutated", which is false on the
+    count-read-back failure path ``failure_note`` serves. The prose below was written for
+    ``refusal_message`` and describes this assembly.
 
     Names each referencing solve (row, cell, table, solve type, reference field, source)
     and THE RE-AUTHOR DOOR PER ENTRY — not per table (see ``_remedy``).
@@ -1380,10 +1393,41 @@ def refusal_message(at, scan):
     elif not detail:
         detail = ((unknown or "the scan could not be completed")
                   + ", so whether any solve references this row is UNKNOWN")
+    return detail
+
+
+def refusal_message(at, scan):
+    """The strict-mode refusal prose. NEVER raises. The ``detail`` is ``_detail``'s."""
     return (
         "refusing to remove surface %s with refuse_on_solve_refs=true: %s. No surface was "
         "removed and nothing was mutated. Pass refuse_on_solve_refs=false (the default) to "
         "remove it anyway; the solve_refs disclosure then carries these references in "
         "full, every cell the scan could not read, and the measured post-removal "
-        "consequence of each reference." % (at, detail)
+        "consequence of each reference." % (at, _detail(at, scan))
     )
+
+
+def failure_note(at, scan):
+    """The note appended to the count-read-back ``SurfaceWriteError``. NEVER raises.
+
+    TOTAL: the whole body sits in one ``except Exception`` whose
+    fallback is a fixed literal that still says the scan predates the attempt, that the
+    outcome is UNKNOWN, and that the references could not be rendered. ``Exception``,
+    NEVER ``BaseException``: a ``KeyboardInterrupt`` must travel. The verdict is
+    compared only when it is an exact ``str``, so a hostile ``__eq__`` is never called and
+    a truthy-lying one cannot talk the note into "no solve referenced it".
+    """
+    try:
+        verdict = scan.get("verdict") if type(scan) is dict else None
+        return (
+            "; the solve-reference scan was taken BEFORE this removal attempt and the outcome "
+            "of the removal is UNKNOWN (the row may or may not be gone), so it describes "
+            "surface %s as it stood then: %s" % (at, "no solve on a surviving row referenced it"
+                                                 if type(verdict) is str and verdict == VERDICTS[0]
+                                                 else _detail(at, scan))
+        )
+    except Exception:  # noqa: BLE001
+        return ("; the solve-reference scan was taken BEFORE this removal attempt and the "
+                "outcome of the removal is UNKNOWN (the row may or may not be gone); the "
+                "referencing solves could not be rendered, so whether any solve references "
+                "this row is UNKNOWN")

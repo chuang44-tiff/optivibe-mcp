@@ -2,12 +2,36 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.1.15`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.1.16`). Each tag points at the merge
 commit that published that version, and every tag was verified against the four version
 literals in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.16] — 2026-10-19
+
+A housekeeping release: no new tools.
+
+- **`remove_surface` reports an unverified removal honestly.** When the surface count read back
+  after a removal does not match, the error now says the removal "could not be verified" (the
+  row may really be gone) instead of "did not take effect", and it ends with the
+  solve-reference scan taken before the attempt: which solves referenced the surface, that none
+  did, or that the scan could not run.
+- **Glass searches refuse a catalog item that names no catalog.** An item such as `/` or `\`
+  used to read as "no catalog given", so `find_glasses(catalog="/")` searched every catalog and
+  `"SCHOTT,/"` silently dropped the `/`. `find_glasses`, `find_glass_pair` and `lookup_glass` now
+  refuse it and name the item. A blank value still means no catalog.
+- **CDS, KDP and TEO2 in the MISC catalogs read as birefringent**, like their copies in the
+  birefringent catalog, so the default glass searches no longer offer them as lens glass. Rebuild
+  your local glass catalog to pick this up.
+- **`trial_glass_swaps` names the control in its messages.** A restore or abort on the unchanged
+  control now says "after the control" or "stopped at the control" instead of "trial 0".
+- **`build_vendor_data.py` skips the manual step when PyMuPDF is missing.** Without the
+  `[manual]` extra the step used to report FAILED and exit non-zero. It now reports SKIPPED with
+  the install command, and the operand and tolerance catalogs build synonyms-only, as the README
+  describes. Any other missing module still fails the step.
+- **`doc/glass-matching/`** states the reference-wavelength rule in its conventions table.
 
 ## [0.1.15] — 2026-10-19
 
@@ -225,6 +249,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Initial public release of optivibe-mcp.
 
+[0.1.16]: ../../compare/v0.1.15...v0.1.16
 [0.1.15]: ../../compare/v0.1.14...v0.1.15
 [0.1.14]: ../../compare/v0.1.13...v0.1.14
 [0.1.13]: ../../compare/v0.1.12...v0.1.13

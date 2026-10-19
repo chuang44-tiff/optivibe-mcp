@@ -39,6 +39,7 @@ another convention carries a *Sign note*.
 | Thin-lens power | $\phi = (n - 1)(c_1 - c_2)$ for a thin lens of index $n$ in air. Without an argument, $\phi$ is the power at the reference wavelength. |
 | Final image space | Index $n'_k$ (1 for an image in air) and marginal slope $u'_k$, where $k$ is the last surface. |
 | Image plane | The paraxial focus of the marginal ray at the reference wavelength. |
+| Reference wavelength | The system's primary wavelength, except when the system has three or more wavelengths and the primary is the shortest or the longest of them: then the reference is the interior wavelength nearest the centre of the band, $(\lambda_\mathrm{shortest} + \lambda_\mathrm{longest})/2$, and the shorter wins a tie. The library returns `reference_replaced: true` in that case, and `explain_glass_swaps` raises the flag of the same name. |
 | Wavelength labels | $s$ (short), $0$ (reference) and $l$ (long) bound the design waveband; $p$ and $q$ are any two wavelengths. The classical visible choice is $s = \mathrm{F}$ (486.13 nm), $0 = \mathrm{d}$ (587.56 nm), $l = \mathrm{C}$ (656.27 nm), with $\mathrm{g}$ = 435.83 nm for the partial dispersion. |
 | Focus position | $z_\lambda$ is the paraxial image position at wavelength $\lambda$, so $z_p - z_q > 0$ means wavelength $p$ focuses farther from the lens than $q$. |
 
