@@ -54,6 +54,11 @@ review produced a shorter lens than every run that worked from numbers alone (70
 against 140–221 mm), and every vision lens held an on-axis Strehl ratio of 0.93 or better at
 all four wavelengths.
 
+[An agent takes two microscope objectives through a form step and a glass step](demos/glass-picking/README.md)
+The 10× / NA 0.45 apochromat meets every target and kept its glass. On the 20× / NA 0.70 dry objective one swap
+gained at every field against its control; that lens reaches the diffraction limit on axis only and misses its
+lateral-colour target. The page lists what is still open.
+
 ## Prerequisites
 
 - **Windows.** OpticStudio and the ZOS-API .NET surface are Windows-only.
