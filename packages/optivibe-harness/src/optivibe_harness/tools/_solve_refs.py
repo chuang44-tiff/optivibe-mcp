@@ -1262,7 +1262,11 @@ def _replay(hit, name):
     return _REPLAY_NULL if value is None else value
 
 
-def _remedy(hit):
+def _remedy(hit, *, after_attempt=False):
+    # ``after_attempt`` is True only on the count-read-back FAILURE path (``failure_note``): no
+    # refusal happened there and the row may already be gone, so the two tiers written for the
+    # refusal ("this refusal is the only prevention" / "the disclosure records ...") would be
+    # false. It is chosen inside the existing ``return`` expressions so it costs no statement.
     where = ("surface %s %s (%s) carries a %s solve whose %s references surface %s"
              % (hit["surface"], hit["cell"], hit["table"], hit["solve_type"],
                 hit["ref_field"], hit["source"]))
@@ -1279,14 +1283,24 @@ def _remedy(hit):
             params = " (its set_solve parameters could not be rendered)"
         return where + " - re-author it with set_solve once the removal has been made" + params
     if hit["table"] == _CB_PAR:
-        return where + (" - NO public re-author door exists for a coordinate-break "
+        return where + (
+            (" - NO public re-author door exists for a coordinate-break "
                         "parameter cell, so this "
-                        "refusal is the only prevention")
-    return where + (" - the disclosure records the reference only and does not carry "
-                    "that solve family's other parameters, so it is not a re-author path")
+             "refusal is the only prevention")
+            if not after_attempt else
+            (" - NO public re-author door exists for a coordinate-break "
+             "parameter cell, so if the row is gone this reference cannot be "
+             "re-authored through the tools"))
+    return where + (
+        (" - the disclosure records the reference only and does not carry "
+         "that solve family's other parameters, so it is not a re-author path")
+        if not after_attempt else
+        (" - this message records only the reference, not that solve family's "
+         "other parameters, so if the row is gone the solve has to be "
+         "re-authored by hand"))
 
 
-def _detail(at, scan):
+def _detail(at, scan, *, after_attempt=False):
     """The scan-to-prose ``detail`` clause shared by ``refusal_message`` and ``failure_note``. NEVER raises.
 
     Split out of ``refusal_message`` so ``failure_note`` can share it: the assembly below is
@@ -1382,7 +1396,7 @@ def _detail(at, scan):
     unknown = "; ".join(told) or None
     for hit in hits:
         try:
-            parts.append(_remedy(hit))
+            parts.append(_remedy(hit, after_attempt=after_attempt))
         except Exception:  # noqa: BLE001 — an undescribable hit is still a DISCLOSED hit
             parts.append("a solve on a surviving row references surface %s but could not "
                          "be described" % (at,))
@@ -1424,7 +1438,7 @@ def failure_note(at, scan):
             "of the removal is UNKNOWN (the row may or may not be gone), so it describes "
             "surface %s as it stood then: %s" % (at, "no solve on a surviving row referenced it"
                                                  if type(verdict) is str and verdict == VERDICTS[0]
-                                                 else _detail(at, scan))
+                                                 else _detail(at, scan, after_attempt=True))
         )
     except Exception:  # noqa: BLE001
         return ("; the solve-reference scan was taken BEFORE this removal attempt and the "
