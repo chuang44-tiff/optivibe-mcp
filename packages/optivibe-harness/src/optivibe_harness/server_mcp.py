@@ -329,7 +329,7 @@ def _reparse_arguments(arguments, string_params=frozenset()):
 
 
 # Server-instructions preamble (the standing disciplines a CC-driven session needs;
-# they live only in CLAUDE.md + the doc tree otherwise — the MCP client never sees
+# they live only in AGENTS.md + the doc tree otherwise — the MCP client never sees
 # them). Split base + reference addendum (D1): the base applies with the
 # harness tools alone and MUST NOT name a reference tool (the absent-tool hazard); the
 # addendum is appended ONLY when the reference tool set is composed in.

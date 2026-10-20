@@ -22,4 +22,4 @@ author's own sources ship — the `*_synonyms.json` intent vocabularies and
 Any tool whose data has not been built degrades to a typed "unavailable" result
 instead of failing — the rest of the server keeps working.
 
-See `CLAUDE.md` for more detail. Python 3.11.
+See `AGENTS.md` for more detail. Python 3.11.

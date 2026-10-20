@@ -11,5 +11,5 @@ uniform result envelope rather than raising, so a caller checks a read-back valu
 instead of assuming a call succeeded. OpticStudio is opened lazily on the first
 design-touching call and reaped automatically; one design at a time.
 
-See the repo-root `README.md` for install and registration and `CLAUDE.md` for
+See the repo-root `README.md` for install and registration and `AGENTS.md` for
 the usage model. Python 3.11.

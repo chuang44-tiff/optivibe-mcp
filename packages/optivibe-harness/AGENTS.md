@@ -1,4 +1,4 @@
-# CLAUDE.md — optivibe-harness
+# AGENTS.md — optivibe-harness
 
 The ZOS-API automation layer for optivibe-mcp: typed tools wrapping Zemax
 OpticStudio (via pythonnet / `clr`), the MCP server, and the agent runtime. The
@@ -39,5 +39,5 @@ so the tools read back what they wrote and report the truth.
 - Handle ZOS-API / .NET errors gracefully; OpticStudio may not be running.
 - Python 3.11.
 
-See the repo-root `README.md` and `CLAUDE.md` for install, registration, and the
+See the repo-root `README.md` and `AGENTS.md` for install, registration, and the
 agent-facing usage guide.

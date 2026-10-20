@@ -1,4 +1,4 @@
-# CLAUDE.md — optivibe-reference
+# AGENTS.md — optivibe-reference
 
 The grounding (reference) layer for optivibe-mcp: deterministic lookup tables, a
 SQLite **FTS5** full-text store over the OpticStudio manual, and an
