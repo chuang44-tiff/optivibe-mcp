@@ -2,12 +2,24 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.1.16`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.1.17`). Each tag points at the merge
 commit that published that version, and every tag was verified against the four version
 literals in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.17] — 2026-10-20
+
+The agent instructions move to `AGENTS.md`. No tool or behaviour changes.
+
+- **`CLAUDE.md` is now `AGENTS.md`.** The operating guide at the repository root and the guides
+  in `packages/optivibe-harness/` and `packages/optivibe-reference/` are renamed to `AGENTS.md`,
+  the file name other coding agents look for, so every agent reads the same instructions. The
+  text is unchanged apart from the two package titles and one cross-reference. Claude Code reads
+  `AGENTS.md` by itself from version 2.1.277 when a folder has no `CLAUDE.md`; on an older
+  version, put a one-line `CLAUDE.md` containing `@AGENTS.md` beside each `AGENTS.md`.
+- The two package READMEs and one source comment now point to `AGENTS.md`.
 
 ## [0.1.16] — 2026-10-19
 
@@ -249,6 +261,7 @@ A housekeeping release: no new tools.
 
 - Initial public release of optivibe-mcp.
 
+[0.1.17]: ../../compare/v0.1.16...v0.1.17
 [0.1.16]: ../../compare/v0.1.15...v0.1.16
 [0.1.15]: ../../compare/v0.1.14...v0.1.15
 [0.1.14]: ../../compare/v0.1.13...v0.1.14
