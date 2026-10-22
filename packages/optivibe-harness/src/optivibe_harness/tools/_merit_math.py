@@ -370,7 +370,12 @@ def _constraint_to_recipe(operands, refs_by_index):
     - ``refs``   = the resolved ``{Op#Header: 0-based-recipe-index}`` from
       ``refs_by_index`` (added ONLY when this operand carries refs — a refs-free
       operand stays byte-identical to a non-math recipe entry);
-    - ``target`` / ``weight`` = the spec's values (defaults 0.0 / 1.0, §4).
+    - ``target`` / ``weight`` = the spec's values (defaults 0.0 / 1.0, §4). The one
+      exception is a ``derived`` HELPER row — a ``derived`` operand that another row
+      references: it exists only to be read by that row, so its weight defaults to 0.0
+      (measured at weight 1.0 it carried ~100% of the merit and drove the measured
+      quantity to zero). A weight the caller states on the helper is honoured; the
+      referencing (constraint) row keeps its own weight.
 
     The assembled recipe is consumed VERBATIM by ``apply_merit_recipe`` (its Phase-1
     ``_validate_refs`` re-checks every ``Op#`` Header vs the live signature + every
@@ -379,6 +384,11 @@ def _constraint_to_recipe(operands, refs_by_index):
     machinery (§4 — "everything funnels into apply_merit_recipe"). Pure;
     zero engine touch.
     """
+    referenced = {
+        target
+        for refs in refs_by_index.values()
+        for target in refs.values()
+    }
     recipe_operands = []
     for index, spec in enumerate(operands):
         entry = {"type": spec["code"]}
@@ -391,7 +401,8 @@ def _constraint_to_recipe(operands, refs_by_index):
             entry["refs"] = refs_by_index[index]
 
         entry["target"] = spec.get("target", 0.0)
-        entry["weight"] = spec.get("weight", 1.0)
+        is_helper = spec.get("relationship") == "derived" and index in referenced
+        entry["weight"] = spec.get("weight", 0.0 if is_helper else 1.0)
         recipe_operands.append(entry)
 
     return {

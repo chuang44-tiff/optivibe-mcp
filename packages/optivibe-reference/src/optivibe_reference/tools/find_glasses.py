@@ -61,6 +61,15 @@ _TOOL = "find_glasses"
 _DEFAULT_LIMIT = 50
 _HARD_CAP = 200
 
+# The normal line (g,F partial dispersion against d-line Abbe number) and the offset from it.
+_NORMAL_A, _NORMAL_B = 0.6438, -0.001682
+_NORMAL_LINE = {"a": _NORMAL_A, "b": _NORMAL_B, "lines": "g,F; d"}
+_ANOMALY_SQL = "pg_f - (%r + %r * vd)" % (_NORMAL_A, _NORMAL_B)     # NULL when pg_f or vd is NULL
+_FROM = "(SELECT *, %s AS pg_f_anomaly FROM glass)" % _ANOMALY_SQL
+_TRUNCATED = "first %d of %d by %s %s; %d not shown; %s"
+_TAIL_LIMIT = "set limit=%d to see them all"
+_TAIL_CAP = "limit stops at %d: narrow the window to see them all"
+
 # The result columns returned per candidate row, in a stable SELECT order. One
 # source of truth for the SELECT list and the dict keys (mirror GLASS_COLUMNS).
 _RESULT_COLUMNS = (
@@ -74,6 +83,7 @@ _RESULT_COLUMNS = (
     "formula_name",
     "min_wave",
     "max_wave",
+    "pg_f_anomaly",
 )
 
 # The window params: each maps the public ``<field>_min`` / ``<field>_max`` pair
@@ -89,12 +99,13 @@ _WINDOW_FIELDS = (
     ("pg_f", "pg_f", True),
     ("nd", "nd", True),
     ("delta_pg_f", "delta_pg_f", False),
+    ("pg_f_anomaly", "pg_f_anomaly", True),
 )
 
 
 # The caller may order the matches by any window field.
 # The SQL column comes from this fixed tuple, never from the caller's text.
-_SORT_FIELDS = ("vd", "nd", "pg_f", "delta_pg_f")
+_SORT_FIELDS = ("vd", "nd", "pg_f", "delta_pg_f", "pg_f_anomaly")
 _DEFAULT_SORT = "vd"
 _ORDERS = ("ascending", "descending")
 
@@ -124,7 +135,11 @@ def _validate_bound(name, value):
         raise ToolParamError(
             f"'{name}' must be a number; got {type(value).__name__}"
         )
-    if not math.isfinite(value):
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        raise ToolParamError(f"'{name}' is too large for a number") from None
+    if not finite:
         raise ToolParamError(f"'{name}' must be a finite number")
     return float(value)
 
@@ -206,7 +221,7 @@ def find_glasses(db_conn, params):
 
     if not queried_fields:
         raise ToolParamError(
-            "give at least one of vd_/pg_f_/nd_/delta_pg_f_ window bounds"
+            "give at least one of vd_/pg_f_/nd_/delta_pg_f_/pg_f_anomaly_ window bounds"
         )
 
     check_catalogs_exist(db_conn, catalogs)
@@ -227,7 +242,7 @@ def find_glasses(db_conn, params):
     cols = ", ".join(_RESULT_COLUMNS)
     direction = " DESC" if order == "descending" else ""
     sql = (
-        f"SELECT {cols} FROM glass WHERE {where_sql} "
+        f"SELECT {cols} FROM {_FROM} WHERE {where_sql} "
         f"ORDER BY {sort} IS NULL, {sort}{direction}, catalog, name"
     )
     all_rows = db_conn.execute(sql, sql_params).fetchall()
@@ -260,7 +275,12 @@ def find_glasses(db_conn, params):
         "match_kind": "range",
         "queried_fields": queried_fields,
         "left_out": sum(left_out_kinds.values()),
+        "normal_line": dict(_NORMAL_LINE),
     }
+    if truncated:
+        tail = _TAIL_LIMIT % matched if matched <= _HARD_CAP else _TAIL_CAP % _HARD_CAP
+        result["truncated_note"] = _TRUNCATED % (len(candidates), matched, sort, order,
+                                                 matched - len(candidates), tail)
     if left_out_kinds:
         result["left_out_kinds"] = left_out_kinds
     if unclassified:
@@ -292,7 +312,9 @@ FIND_GLASSES_SPEC = ToolSpec(
         "(liquid, adhesive, plastic, gas, birefringent, other), the result counts "
         "them in left_out, and exclude=\"\" searches every row. "
         "Matches are ordered by sort (vd, nd, pg_f or delta_pg_f; default vd, "
-        "order=descending reverses) and cut at limit; matched counts the glasses in the "
+        "order=descending reverses; sort=pg_f_anomaly ranks by pg_f minus the normal line "
+        "0.6438 - 0.001682*vd, null when either is null, window pg_f_anomaly_min/max; a "
+        "truncated list carries truncated_note saying what is hidden and how to see it) and cut at limit; matched counts the glasses in the "
         "window that are not left out, so truncated means only the first limit of matched are listed. Gotcha: a glass whose computed "
         "field is out-of-band (null) never matches that window, and the delta-Pg,F "
         "bounds are raw manufacturer data (unvalidated); a stored delta-Pg,F beyond "
@@ -310,6 +332,7 @@ FIND_GLASSES_SPEC = ToolSpec(
         "pg_f_min": "number", "pg_f_max": "number",
         "nd_min": "number", "nd_max": "number",
         "delta_pg_f_min": "number", "delta_pg_f_max": "number",
+        "pg_f_anomaly_min": "number", "pg_f_anomaly_max": "number",
     },
 )
 

@@ -351,7 +351,9 @@ TOOLS_SLOT_TOOLS = frozenset({
 #: ``check_clearance`` opens nothing and reports every fold pair ``not_measured`` (``ray_trace_unavailable``,
 #: or the pair's own earlier reason where it stopped before the trace, e.g. an unreadable bounding row),
 #: so the keeper gate refuses (fail closed). Unfolded calls open nothing and are unchanged.
-_TOOLS_SLOT_DEGRADERS = frozenset({"render_layout", "check_clearance", "promote_best"})
+#: ``get_mtf`` is a degrader too: its collimated-output check traces rays, so on a latched session it skips
+#: the check and flags that it was not run; the MTF answer itself is never refused.
+_TOOLS_SLOT_DEGRADERS = frozenset({"render_layout", "check_clearance", "promote_best", "get_mtf"})
 
 #: The THIRD partition set: tools whose handler module's import
 #: closure reaches a slot module but whose handler reaches NO opener on any call path.
@@ -371,7 +373,7 @@ _TOOLS_SLOT_IMPORT_ONLY = {
         ("a read / analysis handler with no call path to an opener",
          ("capture_graphic", "describe_configurations", "describe_surfaces",
           "explain_glass_swaps",
-          "get_mtf", "get_operand", "get_system_info", "list_catalogs",
+          "get_operand", "get_system_info", "list_catalogs",
           "list_glass_catalog", "read_lens_spec", "read_surface", "surface_count",
           "verify_zoom")),
 
@@ -384,6 +386,8 @@ _TOOLS_SLOT_IMPORT_ONLY = {
          "MakeSolveFixed); no opener",
          ("clear_all_variables",)),
         ("opens NOTHING: _preflight is a read", ("dry_run",)),
+        ("closes the session's own engine; it opens nothing and touches no tools slot",
+         ("release_engine",)),
         ("optimize_variable imports _optimize_common for _count_variables only",
          ("clear_variable", "set_variable")),
         ("merit authoring touches the MFE only; _optimize_common._render (:3080) is a "
@@ -556,6 +560,8 @@ _SINGLE_SPEC_MODULES = (
     "optivibe_harness.tools.glass_explain",
     # glass-matching A1: the swap-optimise-measure-restore trial (trial_glass_swaps).
     "optivibe_harness.tools.glass_trial",
+    # Hand the single OpticStudio seat back (release_engine).
+    "optivibe_harness.tools.engine_release",
 )
 # Tool modules exposing a ``TOOL_SPECS`` tuple of several ToolSpecs (lens tier
 # + analysis tier).

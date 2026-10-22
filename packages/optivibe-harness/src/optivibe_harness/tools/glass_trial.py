@@ -80,6 +80,10 @@ _MSG = {
     "swaps": "swaps must be 1 to 4 sets, each one {surface, glass, catalog} or a list of 1 to 3 "
              "of them on different elements",
     "free_stop": "require_free_stop must be true or false",
+    "drop": "drop must be true or false",
+    "open_dropped": "rerun this set with drop=false",
+    "not_run": "not measured: see this call's error",
+    "coverage": "slots at rest %d of %d; open %s; untried %s",
     "budget": "time_budget_s must be a number from 10 to 600",
     "budget_call": "time_budget_s is per arm (the control and each set) and one call is capped at "
                    "%g s: with %d sets each arm can have at most %g s",
@@ -112,8 +116,9 @@ _MSG = {
     "geometry": "the geometry audit did not certify the lens (%s)",
     "new_violation": "new clearance violation at surface %s (%s) the control does not have: the "
                      "merit function does not hold it; add the floor and run the trial again",
-    "off_control": "%s is %.2f%% off the control (limit 1%%): the merit function does not hold "
-                   "it; add the constraint and run the trial again",
+    "off_control": "%s is %.2f%% off the control (over 1%%): the merit function does not hold "
+                   "it; the arm is still measured, so judge the comparison with that in mind, or add "
+                   "the constraint and run the trial again",
     "unreadable": "%s could not be read on the %s",
     "first_load": "the checkpoint does not hold the lens as found; first differences: %s",
     "restore_unproven": "the lens could not be proven back at the lens as found (%s)",
@@ -172,7 +177,10 @@ def _validate(params):
     free_stop = dict.get(params, "require_free_stop", True)
     if not isinstance(free_stop, bool):          # never coerced, as optimize's own door
         raise _Refuse("tool_param", _MSG["free_stop"])
-    return sets, float(budget), name, free_stop
+    drop = dict.get(params, "drop", True)
+    if not isinstance(drop, bool):
+        raise _Refuse("tool_param", _MSG["drop"])
+    return sets, float(budget), name, free_stop, drop
 
 
 # --------------------------------------------------------------------------- #
@@ -230,11 +238,16 @@ def _gate(session, term, pair, sets, free_stop):
 
 
 def _binding(system, sets, primary_um):
-    """Step 3: every entry must bind to the named catalog, with a database index at the primary."""
+    """Step 3: every entry must bind to the named catalog, with a database index at the primary.
+
+    Every entry that an in-use catalog ahead of its own would capture is collected, so one refusal
+    names them all and ``rebind`` says what to resubmit; other refusals come first.
+    """
     from optivibe_reference.glass_build import open_glass_catalog
     cats = system.SystemData.MaterialCatalogs
     in_use = _lg._catalogs_in_use(cats)
     universe = in_use + _lg._available_catalogs(cats)
+    clashes, rebind = [], []
     conn = open_glass_catalog()
     try:
         for n, entries in enumerate(sets, 1):
@@ -252,11 +265,16 @@ def _binding(system, sets, primary_um):
                     if c.casefold() == canon.casefold():
                         break
                     if e["glass"].casefold() in {m.casefold() for m in cats.GetMaterialsInCatalog(c)}:
-                        raise _Refuse("glass_trial_unsupported", _MSG["no_bind"] % (
-                            n, c, canon, e["glass"], c), "catalog_would_not_bind")
+                        clashes.append(_MSG["no_bind"] % (n, c, canon, e["glass"], c))
+                        rebind.append({"set": n, "surface": e["surface"], "glass": e["glass"],
+                                       "catalog": canon, "binds": c})
+                        break
                 e["canon"], e["n_new"] = canon, n_new
     finally:
         conn.close()
+    if clashes:
+        raise _Refuse("glass_trial_unsupported", "; ".join(clashes), "catalog_would_not_bind",
+                      {"rebind": rebind})
 
 
 # --------------------------------------------------------------------------- #
@@ -298,9 +316,9 @@ def _parabola_vertex(xs, ys):
 class _Run:
     """One call's working state: the plan, the found lens and the results so far."""
 
-    def __init__(self, session, term, pair_um, budget, name, free_stop=True):
+    def __init__(self, session, term, pair_um, budget, name, free_stop=True, drop=True):
         self.session, self.term, self.budget, self.name = session, term, budget, name
-        self.free_stop = free_stop
+        self.free_stop, self.drop = free_stop, drop
         self.pair_um = pair_um
         self.control_violations = set()
         self.ckpt = None
@@ -534,7 +552,7 @@ def _arm(run, entries, label, control):
         if landed is not None:
             return fail("swap_not_landed", landed)
     stop, blocks, last, failed = _blocks(run.session, run.budget, run.free_stop,
-                                         _control_merit(control))
+                                         _control_merit(control) if run.drop else None)
     arm["stop"], d = stop, arm["detail"]
     d["blocks"] = blocks
     if stop == "dropped":
@@ -554,9 +572,7 @@ def _arm(run, entries, label, control):
             return fail("merit_uncomputable", _MSG["merit_uncomputable"])
         return fail("optimize_failed", _MSG["optimize_failed"] % (failed.get("error_family"),))
     verdict = str(last.get("verdict"))
-    gain = None
-    if len(blocks) and _num(blocks[-1]["merit_before"]) and _num(blocks[-1]["merit_after"]) is not None:
-        gain = (blocks[-1]["merit_before"] - blocks[-1]["merit_after"]) / blocks[-1]["merit_before"]
+    gain = _last_gain(blocks)
     ga = last.get("geometry_audit")
     d.update(last_block_gain_rel=gain, verdict=verdict, merit_verdict=last.get("merit_verdict"),
              geometry_audit_status=ga.get("status") if isinstance(ga, dict) else None)
@@ -593,6 +609,13 @@ def _arm(run, entries, label, control):
     return arm
 
 
+def _last_gain(blocks):
+    """The merit gain over the last block, relative; None without blocks or a usable merit_before."""
+    if blocks and _num(blocks[-1]["merit_before"]) and _num(blocks[-1]["merit_after"]) is not None:
+        return (blocks[-1]["merit_before"] - blocks[-1]["merit_after"]) / blocks[-1]["merit_before"]
+    return None
+
+
 def _arm_name(j):
     """How a message names arm ``j``: 0 is the control, 1.. are the trials."""
     return "the control" if j == 0 else "trial %d" % j
@@ -605,9 +628,10 @@ def _control_merit(control):
 
 
 def _gate_first_order(run, vec, control, detail, arm):
-    """The 1% gate. Returns ``(reason, message)`` or None."""
+    """The first-order check. Returns ``(reason, message)`` only when a value cannot be read; a
+    trial more than 1% off the control is still measured and carries ``first_order_warning``."""
     who = "control" if control is None else "trial"
-    table = {}
+    table, warn = {}, []
     for code, key in _GATE_QUANTITIES:
         value = vec.get(key)
         ref = control["vec"][key] if control is not None else None
@@ -620,9 +644,10 @@ def _gate_first_order(run, vec, control, detail, arm):
             reason = "control_not_usable" if control is None else "first_order_off_control"
             return reason, _MSG["unreadable"] % (code, who)
         if pct is not None and pct > _GATE_PCT:
-            detail["first_order"] = table
-            return "first_order_off_control", _MSG["off_control"] % (code, pct)
+            warn.append(_MSG["off_control"] % (code, pct))
     detail["first_order"] = table
+    if warn:
+        arm["first_order_warning"] = "; ".join(warn)
     return None
 
 
@@ -705,7 +730,7 @@ def trial_glass_swaps(session, params):
     try:
         return _run(session, params if isinstance(params, dict) else {}, state)
     except _Refuse as r:
-        extra = {"reason": r.reason} if r.reason else {}
+        extra = dict(r.extra, **({"reason": r.reason} if r.reason else {}))
         return _ac.error_envelope(_TOOL, r.family, r.message, **extra)
     except Exception as exc:  # noqa: BLE001 -- never-raise backstop (aperture_ramp precedent)
         extra = {"checkpoint_path": state["checkpoint_path"]} if state["touched"] else {}
@@ -729,11 +754,12 @@ def _checkpoint_refused(run, found):
 
 
 def _run(session, params, state):
-    sets, budget, name, free_stop = _validate(params)
+    sets, budget, name, free_stop, drop = _validate(params)
     term, pair = params.get("term"), params.get("pair")
     x1, predictions = _gate(session, term, pair, sets, free_stop)
-    run = _Run(session, term, x1.get("pair_um"), budget, name, free_stop)
+    run = _Run(session, term, x1.get("pair_um"), budget, name, free_stop, drop)
     run.plan()
+    run.slots = [s for e in x1["elements"] for s in range(e["surfaces"][0], e["surfaces"][1])]
     _binding(session.system, sets, run.prim_um)
     system = session.system
     saveas_issued = False
@@ -755,6 +781,7 @@ def _run(session, params, state):
     if refused:
         return _checkpoint_refused(run, found)
     state.update(touched=True, checkpoint_path=run.ckpt)
+    run.key = _lens_key(found, x1["detail"].get("stop_surface"))
     res = {"control": None, "arms": [], "halt": None, "fault": None, "first_load": None}
     try:
         try:
@@ -896,9 +923,55 @@ def _trial_row(run, i, entries, res, cvec, cvalue, prediction):
             "offsets_um": {"control": _offsets(cvec) if colour else None,
                            "trial": _offsets(tvec) if colour and status != "not_measured" else None},
             "better": better, "worse": worse, "layout": layout,
+            "first_order_warning": a.get("first_order_warning") if a else None,
             "candidate_path": a["candidate_path"] if a else None,
             "prediction_source": "none" if colour else "explanatory",
             "predicted": None if colour else ((prediction or {}).get("prediction") or {}).get("petzval_sum")}
+
+
+def _open_arms(sets, res, cmsg, trials, stops):
+    """Every arm not measured (the control first) with the action that closes it. Reads the rows."""
+    control, arms, out = res["control"], res["arms"], []
+
+    def entry(name, swaps, status, stop, arm, action):
+        blocks = arm["detail"].get("blocks") if arm else None
+        out.append({"arm": name, "swaps": swaps, "status": status, "stop": stop,
+                    "last_block_gain_rel": _last_gain(blocks), "action": action or _MSG["not_run"]})
+    if not control or control["status"] != "measured":
+        entry("the control", [], control["status"] if control else "not_measured",
+              control["stop"] if control else None, control, cmsg)
+    for i, e in enumerate(sets):
+        row = trials[i] if trials else None
+        if row and row["status"] == "measured":
+            continue
+        status = row["status"] if row else "not_measured"
+        swaps = [{k: x[k] for k in ("surface", "glass", "catalog")} for x in e]
+        entry(_arm_name(i + 1), swaps, status, stops[i], arms[i] if i < len(arms) else None,
+              _MSG["open_dropped"] if status == "dropped" else row and row["message"])
+    return out
+
+
+def _lens_key(found, stop):
+    key = {k: v for k, v in found.items()
+           if k != "catalogs" and not k.lower().endswith((".material", ".catalog"))}
+    return dict(key, stop=stop)
+
+
+def _coverage(run, sets, res):
+    led = getattr(run.session, "_glass_coverage", None)
+    if not isinstance(led, dict) or _ls.diff(led["key"], run.key):
+        led = run.session._glass_coverage = {"key": run.key, "tried": set(), "at_rest": set()}
+    for entries, arm in zip(sets, res["arms"]):          # an arm that never ran (None) marks nothing
+        if arm:
+            rows = {e["surface"] for e in entries}
+            led["tried"] |= rows
+            led["at_rest"] |= rows if arm["status"] == "measured" else set()
+    at_rest = [x for x in run.slots if x in led["at_rest"]]
+    open_ = [x for x in run.slots if x in led["tried"] and x not in led["at_rest"]]
+    untried = [x for x in run.slots if x not in led["tried"]]
+    names = lambda rows: ", ".join("S%d" % x for x in rows) or "none"  # noqa: E731
+    return {"slots": run.slots, "at_rest": at_rest, "open": open_, "untried": untried,
+            "summary": _MSG["coverage"] % (len(at_rest), len(run.slots), names(open_), names(untried))}
 
 
 def _assemble(run, sets, res, proof, predictions):
@@ -933,7 +1006,9 @@ def _assemble(run, sets, res, proof, predictions):
                    "trials": [_arm_detail(a) if a else None for a in arms],
                    "prediction": None if colour else predictions,
                    "restore_proof": {k: proof[k] for k in ("items", "n_differences",
-                                                           "first_differences", "optimizer_confirmed")}}}
+                                                           "first_differences", "optimizer_confirmed")}},
+        "open_arms": _open_arms(sets, res, cmsg, trials, stops),
+        "coverage": _coverage(run, sets, res)}
     restored, ckpt = proof["restored"], ({} if proof["restored"] else {"checkpoint_path": run.ckpt})
     if res["fault"]:
         return _ac.error_envelope(_TOOL, "glass_trial_failed", _MSG["failed"] % (res["fault"][1],),
@@ -951,7 +1026,7 @@ TRIAL_GLASS_SWAPS_SPEC = ToolSpec(
     required_params=("term", "swaps"),
     param_types={"term": "string", "pair": "string", "swaps": "array",
                  "time_budget_s": "number", "design_name": "string",
-                 "require_free_stop": "boolean"},
+                 "require_free_stop": "boolean", "drop": "boolean"},
     description=(
         "Changes glass, re-optimises, measures, saves and puts the lens back as found. swaps: 1 to "
         "4 sets, e.g. [{\"surface\":5,\"glass\":\"N-SK16\",\"catalog\":\"SCHOTT\"}]; a set may be a "
@@ -971,13 +1046,20 @@ TRIAL_GLASS_SWAPS_SPEC = ToolSpec(
         "not help. detail last_block_gain_rel is the merit gain over the whole last optimise block, "
         "not one pass. dropped: from the second block on, the trial's merit was over 10% above the "
         "control's and, at its last block's pace, could not reach it within its budget; it is not "
-        "measured. Both early verdicts judge merit, your objective, not the term. In the "
+        "measured. Both early verdicts judge merit, your objective, not the term. "
+        "first_order_warning: the trial's focal length, F-number or image-space NA ended more than "
+        "1% off the control's; the arm is still measured and compared, and the warning says which "
+        "moved. In the "
         "vector isna is the image-space NA, glass_thickness the largest centre "
         "thickness of any glass element. layout gives total track and largest glass thickness for "
         "control and trial, with no better or worse: compare them with the design's own targets. "
         "design_name (default glass_trial) names the saved candidate files. require_free_stop "
         "(default true) is passed to every optimise; pass false to trial a lens whose stop sits on "
-        "a glass vertex. not_measured gives a "
+        "a glass vertex. drop (default true) allows the dropped verdict; pass false to screen, so "
+        "no arm is dropped. open_arms lists every arm not measured (the "
+        "control included) with the action that closes it. coverage counts this lens's glass rows at "
+        "rest, open or untried across calls (information, not a gate); it resets when anything the lens state records changes except glass: radii, thicknesses, conics, "
+        "semi-diameters, surface types, solves, even-asphere terms, the stop, merit rows, wavelengths, fields, aperture; vignetting and other settings are not seen. not_measured gives a "
         "reason and says nothing about whether the glass helps. Nothing is applied: load_design "
         "applies your choice."
     ),

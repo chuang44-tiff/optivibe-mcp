@@ -73,6 +73,11 @@ SYSTEM_DIRECTIONS = ("not_the_expected_form", "wrong_kind_element")
 FINDING_PARAM = "finding_param"                      # malformed request or finding shape
 FINDING_UNBOUND = "finding_unbound"                  # no/ambiguous audit row, owner, digest
 FINDING_FIGURE_UNBOUND = "finding_figure_unbound"    # png_sha256 null on row, or != caller's
+#: A picture IS bound but its audit row records it as having no stampable universe
+#: (`figure_scoreable: false`). A DISTINCT family on purpose: `finding_figure_unbound`
+#: means "no picture is bound", and its remedy (save again, pass the right digest) would
+#: be wrong here, where the bound picture is blank by construction.
+FINDING_FIGURE_UNSCOREABLE = "finding_figure_unscoreable"
 
 #: The clause tokens :func:`normalize_findings` names in `bad_finding:<index>:<clause>`.
 #: FROZEN: a new refusal reason is a new token here, never a re-used one.

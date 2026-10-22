@@ -60,6 +60,7 @@ DIGEST_MISMATCH = "digest_mismatch" # Rule 7
 ZMX_UNREADABLE = "zmx_unreadable" # Rule 7
 PICTURE_UNBINDABLE = "picture_unbindable" # Rule 8
 PICTURE_MISMATCH = "picture_mismatch" # Rule 9
+PICTURE_UNSCOREABLE = "picture_unscoreable"              # R9b: bound, but nothing drawn to score
 
 #: Rule 10 — **NOT IN the contract, and REPORTED as amendment A16 rather than
 #: invented silently.** the contract enumerates nine refusals and none of them covers an
@@ -69,9 +70,11 @@ PICTURE_MISMATCH = "picture_mismatch" # Rule 9
 #: read this tool performs first stays `ok`. The idempotency question — "is this finding
 #: already recorded" — then has no answer, and the rule that `promotion_gate.py:32-36` forbids
 #: reading UNKNOWN as "no, record it again". It fails CLOSED, inside the EXISTING
-#: `finding_unbound` family (the three wire families are frozen at the contract), because a
-#: record whose prior state cannot be established is exactly a record that cannot be
-#: BOUND. No new family; one new reason token, disclosed.
+#: `finding_unbound` family (the wire families were frozen at the contract as three; a fourth,
+#: `finding_figure_unscoreable`, was added deliberately for the unscoreable figure, see
+#: `_finding.FINDING_FIGURE_UNSCOREABLE`), because a record whose prior state cannot be
+#: established is exactly a record that cannot be BOUND. No new family for this one;
+#: one new reason token, disclosed.
 FINDING_RECORD_UNREADABLE = "finding_record_unreadable" # Rule 10 [INTERPRETATION]
 
 #: A refusal that does not name a REMEDY is a defect report addressed to nobody. One
@@ -100,6 +103,11 @@ _REMEDY = {
     PICTURE_MISMATCH: (
         "png_sha256 does not match the picture recorded for this candidate; you are "
         "reviewing a different figure — pass the png_sha256 save_candidate returned"),
+    PICTURE_UNSCOREABLE: (
+        "the figure bound to this candidate has no stamped surfaces to score a finding "
+        "against (nothing was drawn, for example an all-coordinate-break fold), so a "
+        "finding about it could never be scored; fix the system so a figure is drawn, "
+        "save_candidate again and review that figure"),
     FINDING_RECORD_UNREADABLE: (
         "the finding records already on this design's manifest could not be read, so "
         "whether these findings are already recorded cannot be established; repair or "
@@ -293,6 +301,12 @@ def record_findings(session, params):
         # (`proposal-A-minimalist.md:165-167`).
         return _refusal(_finding.FINDING_FIGURE_UNBOUND, PICTURE_MISMATCH,
                         design_name=design_name, seq=seq, read_state=audit_state)
+    # ---- R9b: the picture is the bound one, but the row says nothing was drawn to
+    # score. Only an explicit `false` refuses; a legacy row without the key is unknown,
+    # and unknown is not refused (it predates the record).
+    if audit.get("figure_scoreable") is False:
+        return _refusal(_finding.FINDING_FIGURE_UNSCOREABLE, PICTURE_UNSCOREABLE,
+                        design_name=design_name, seq=seq, read_state=audit_state)
 
     # ---- The ids. Byte-identical findings within ONE reply are ONE finding. ---
     # Deduped BY ID, in REPLY ORDER, and the id is what decides sameness: two elements
@@ -433,7 +447,8 @@ RECORD_FINDINGS_SPEC = ToolSpec(
         "candidate or your png_sha256 is not the one recorded (finding_figure_unbound) "
         "- review the figure the candidate actually published, and NOT a render_layout "
         "PNG: that picture is scratch, drawn for your own eyes, and its digest is never "
-        "on a row. Recording is IDEMPOTENT: "
+        "on a row. It also refuses a figure that drew no surfaces to score "
+        "(finding_figure_unscoreable). Recording is IDEMPOTENT: "
         "the same finding about the same bytes is stored once, so calling twice is safe "
         "and n_already_recorded says how many were already there. finding_ids are "
         "COMPUTED from the finding's own content plus the picture digest - they are "

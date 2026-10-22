@@ -485,6 +485,16 @@ def get_operand(session, params):
             operand=operand, unplaced_params=unplaced, slot_headers=real_slots,
         )
 
+    # An out-of-range surf / wave is refused before any read: the engine clamps it silently
+    # (surf 99 reads the last surface) and the echoed applied_slots would then look right.
+    from ._measurement_common import slot_range_problem
+    range_problem = slot_range_problem(system, applied_slots.items())
+    if range_problem is not None:
+        return _ac.error_envelope(
+            "get_operand", "operand_param", f"operand {operand}: {range_problem}",
+            operand=operand,
+        )
+
     flags = []
     if density_unset is not None:
         flags.append(

@@ -153,6 +153,12 @@ def verify_beam_path(session, params):
     figure_error = None
     if draw and result.get("ok"):
         figure_path, figure_error = _emit_figure(session, params)
+    if figure_path is not None:
+        # The count was read during the ray evaluation, BEFORE this figure was drawn, by a
+        # different ``NumberOfSurfaces`` access: a count beside a picture it was not taken
+        # with. ``render_layout`` reads its own count inside the call that draws, so the key
+        # beside a figure means a qualified render ONLY there. Drop it where it would pair.
+        result.pop("n_surfaces", None)
     result["figure_path"] = figure_path
     result["figure_error"] = figure_error
     return result

@@ -1,113 +1,181 @@
-# Demo: an agent takes two microscope objectives through a form step and a glass step, unattended
+# Demo: the agent's glass step against OpticStudio's Hammer, on two microscope objectives
 
-![The 10x / NA 0.45 objective after the glass step, as OpticStudio draws it](10x/layout-glass-step.png)
+**OpticStudio's Hammer optimizer minimizes the merit function it is given and returns the lens with the lowest number.
+The agent optimizes the same merit, but keeps a glass change only if every field that passed still passes and no
+target is lost, and it explains each decision, element by element.**
 
-**An unattended agent built the form of two microscope objectives with every glass held fixed, then ran a separate
-glass step on each.** The 10× / NA 0.45 apochromat, widened from a 2 mm to a 2.5 mm field, meets every target. The
-20× / NA 0.70 dry objective, rebuilt from a published patent figure, reaches the diffraction limit (Strehl ≥ 0.8) on axis only and misses its
-lateral-colour target. Glass bought little. The 10× kept no glass change. On the 20×, one swap gained at every field
-against its control (0.0093 waves on axis, 0.0015 at the edge), and every swap that moved colour lost somewhere. The
-20× glass step started from the form-step lens after a rim-ray re-optimization done outside the agent runs; that step,
-not glass, moved the edge from 0.1908 to 0.1843 waves, and the swap's edge gain was later given back. On the 20× the
-limit is the form.
+| | agent | Hammer |
+|---|---|---|
+| how it decides | optimizes the merit; keeps a swap only if it beats a control given the same optimization and no field or target is lost | minimizes the merit function, with a substitute solve on every glass |
+| what it returns | a lens, plus a per-element trail: why it looked there, the glass property it changed, each trial against its control | a lens |
+| glasses changed | 10×: 3 of 14; 20×: 1 of 10 | 10×: 10 of 14; 20×: 3 of 10 |
+| 10× result | merit 13 % and 8 % lower than Hammer's; run 1 better at every field, run 2 at three of four | passes at every field |
+| 20× result | merit 7 % and 8 % higher; better at 0 and 0.5 field; on axis passes | lowest merit; best 0.7 and 1.0 fields; on axis fails |
+| repeatability | both 10× runs chose the same three glasses; both 20× runs changed S11 | one run per lens |
+| time | 32–37 min per run, end to end, report included | 60 min per lens |
+| search report | lists the positions left untried and whether the search finished; all four runs said it did not | none |
 
-Each lens had two runs with their own briefs. The **form step** fixed every glass and the element count, with no
-colour rows in the merit. The **glass step** started from a lens **at rest**: an optimizer run on it stops by itself
-with no real gain. It compared each glass change with a **control**, the unchanged lens re-optimized the same way, on
-the polychromatic RMS wavefront at every field. A colour term only points to the **carrier**, the element whose glass
-contributes most to it. Claude Opus 5.5 drove the OptiVibe MCP server through Claude Code, with Claude Sonnet 5.5 for
-subagents. It used the `optimize-loop`, `design-glass-matching` and `design-vision-review` skills. Surface numbers count
-from the tube side.
+**At a glance.** Both methods started from the same two microscope objectives, a 10× / NA 0.45 apochromat and a 20× /
+NA 0.70 objective, with the same merit function and the same glass catalogs. On the 10× every lens passes at every
+field. On the 20× no lens meets the off-axis target; both agent runs improved the three failing fields over the start
+lens and kept the on-axis target.
+
+This is an experimental feature, and the bench is small: one Hammer run and two agent runs per lens.
+
+## How the comparison was run
+
+Both methods started from the same two lenses, each a finished form with every glass still as the seed had it: a 10×
+form-step lens from an earlier unattended run ([10x/result_10x-form-step.zmx](10x/result_10x-form-step.zmx)), and a 20×
+form-step lens whose merit also holds the ray error at the pupil rim ([20x/result_20x-start.zmx](20x/result_20x-start.zmx)). Both used the same fixed merit function (294 rows on the 10×, 30 on
+the 20×) and the same five glass catalogs: SCHOTT, OHARA, HIKARI, LACROIX and INFRARED.
+
+| | agent | Hammer |
+|---|---|---|
+| driver | Claude Opus 5.5 driving the OptiVibe MCP server through Claude Code, Claude Sonnet 5.5 for subagents | OpticStudio's global optimizer, with a substitute solve on every glass |
+| rules | the `optimize-loop` and `design-glass-matching` skills; not allowed to change the merit function | limited to the same catalogs |
+| runs | two per lens, from the same starting lens and brief, unattended from start to finish | one per lens, 60 minutes each |
+
+**At rest.** Every lens was optimized to rest before it was compared: two damped-least-squares runs in a row, each of at
+least 50 cycles and each gaining under 0.5 % of the merit. Hammer's lenses were brought to rest separately. The agent
+brought its own lenses to rest during each run, with one exception: the second 10× lens had a single 50-cycle
+confirming run on its final glass set, which gained 0.0007 %.
+
+**Reading the tables.** Image quality is the polychromatic RMS wavefront error, in waves, at the 0, 0.5, 0.7 and 1.0
+fields. Lower is better, and the target is 0.075 waves or less at every field. Each agent cell gives the difference
+from Hammer in brackets; a negative number means the agent is better. Surface numbers (S1, S2, ...) count from the tube
+side.
 
 ## 10× / NA 0.45 apochromat, 2.5 mm field
 
-**Asked:** widen the [walk-in-10x demo](../walk-in-10x/README.md) lens (byte for byte) to a 2.5 mm field at Strehl
-≥ 0.80 everywhere, with working distance ≥ 5.0 mm at the rim, then try glass on what is left.
+| lens | merit at rest | 0 field | 0.5 field | 0.7 field | 1.0 field | glasses changed | run time |
+|---|---|---|---|---|---|---|---|
+| start (form step) | 0.005553 | 0.0174 | 0.0458 | 0.0454 | 0.0486 | — | — |
+| Hammer | 0.003686 | 0.0168 | 0.0313 | 0.0295 | 0.0322 | 10 of 14 | 60 min |
+| agent run 1 | 0.003225 (−13 %) | 0.0140 (−0.0028) | 0.0295 (−0.0018) | 0.0268 (−0.0027) | 0.0267 (−0.0055) | 3 of 14 | 33 min |
+| agent run 2 | 0.003381 (−8 %) | 0.0143 (−0.0025) | 0.0317 (**+0.0004**) | 0.0285 (−0.0010) | 0.0273 (−0.0049) | 3 of 14 | 33 min |
 
-| | seed, field widened | after form step | after glass step | target |
-|---|---|---|---|---|
-| RMS wavefront (waves), 0 / 0.5 / 0.7 / 1.0 | 0.0174 / 0.0407 / 0.0363 / 0.1272 | 0.0174 / 0.0458 / 0.0454 / 0.0486 | 0.0189 / 0.0452 / 0.0453 / 0.0488 | ≤ 0.075 |
-| Strehl, glass run's reading | — | 0.9886 / 0.9328 / 0.9284 / 0.9230 | 0.9867 / 0.9349 / 0.9293 / 0.9222 | ≥ 0.80 |
-| working distance at the rim | 4.925 mm (fails) | 5.299 mm | 5.2995 mm | ≥ 5.0 mm |
-| lateral colour at 1.0 field, F / C / g minus e (µm) | −0.051 / +0.167 / −0.018 | −0.173 / +0.361 / −0.234 | −0.1700 / +0.3561 / −0.2292 | no worse than loaded |
+**Every lens passes at every field.** Run 1 is better than Hammer at all four fields. Run 2 is better at three, and
+0.0004 waves behind at the 0.5 field. The other targets are working distance at the rim (≥ 5.0 mm), edge and gap
+floors, and total track (≤ 100 mm). All lenses meet them; the agent lenses have total tracks of 83.6 and 84.1 mm.
 
-The form step fixed the edge field and the working distance. It made lateral colour worse, as expected without colour
-rows. Field sag, track, edges and gaps also pass; see [runs.md](10x/runs.md).
+**Glass changes.** Both runs changed the same three glasses: S2 S-PHM52Q → N-PK52A, S16 S-FPL51Y → S-FPL53, and S1
+S-BAH28 → S-NBH52. They differ only in the radii the optimizer settled on.
 
-**Glass step.** The agent tried 22 swaps, mostly on the axial-colour carriers, and kept none. Every swap it ran to rest tied
-or lost, and the small changes in the last column come from one soft edge-thickness target that a layout reviewer
-asked for (see [runs.md](10x/runs.md)).
+**What got worse.** Lateral colour at 436 nm at the edge field grew slightly in both runs (−0.24 to −0.28 µm and −0.23
+to −0.29 µm). The other two colours improved. Both runs reported this.
 
-**Limit.** The limit is chromatic: primary lateral colour at the edge, the g line's change of aberration with
-wavelength at mid-field, and on axis the g line focusing about 0.36 µm apart from F and C.
+**What carried the gain.** In both runs most of the gain came from the front cemented doublet, S1/S2. In the one-swap
+screen, S2 alone lowered the merit by 25–30 %. A separate analysis of Hammer's lens found the same: Hammer's two front
+glasses alone gave most of its gain, and its other eight changes were neutral or harmful. The mechanism is
+partial-dispersion matching, with a flint of low partial dispersion cemented to an anomalous crown. The agent took most
+of its gain at those same two front elements and added one more change, at S16.
 
-![Ray fans before and after the glass step, at the same fixed scale](10x/fans-form-vs-glass-step-2p22um.png)
+**How the search ran.** Each run first tried one glass in every one of the 14 positions. It then ran three deeper
+rounds, re-trying positions next to each kept change, and kept one more glass in each round. Both runs stopped on time,
+said the search was not exhausted, and listed the positions left untried.
 
-Left, the form-step lens; right, the glass-step lens. Each half has the layout on top and the ray fans below. Both fans
-are drawn at the same fixed scale, ±2.2224 µm, which is three Airy radii (Airy radius 0.7408 µm). A triangle marks each
-sample beyond the scale.
+### Drawings
 
-## 20× / NA 0.70 dry objective, 1.5 mm working distance
+OpticStudio cross-sections of each lens at rest, with rays at each field.
 
-The seed is US 12174359 B2, FIG. 2, rebuilt without its cover glass and with the nearest catalog glasses, so as loaded
-it is not corrected.
+**Hammer:** 10 of 14 glasses changed.
 
-**Asked:** a dry 20× / NA 0.70 objective with Strehl ≥ 0.80 everywhere, working distance ≥ 1.5 mm, lateral colour
-≤ 0.30 µm, then a glass step with lateral-colour rows in the merit.
+![10x Hammer layout](10x-hammer.png)
 
-**Between the steps, outside the agent runs,** the form-step lens was re-optimized to rest with six extra rows that
-hold the ray error at the pupil rim. An earlier glass-step run from the form-step lens itself had let that rim error
-grow. The glass step below started from the rim-row lens.
+**Agent run 1:** S2 S-PHM52Q → N-PK52A, S16 S-FPL51Y → S-FPL53, S1 S-BAH28 → S-NBH52.
 
-| | seed | after form step | rim-row lens (glass-step start) | final | target |
-|---|---|---|---|---|---|
-| RMS (waves), 0 / 0.5 / 0.7 / 1.0 | 11.04 / 11.09 / 11.13 / 11.23 | 0.0598 / 0.1035 / 0.1347 / 0.1908 | 0.0691 / 0.1025 / 0.1301 / 0.1843 | 0.0528 / 0.0987 / 0.1299 / 0.1843 | ≤ 0.075 |
-| Strehl | 0.0126 / 0.0058 / 0.0037 / 0.0027 | 0.902 / 0.697 / 0.549 / 0.433 | 0.836 / 0.684 / 0.566 / 0.454 | 0.897 / 0.696 / 0.555 / 0.470 (glass run's reading) | ≥ 0.80 |
-| WD at rim (mm) | 1.330 | 1.613 | 1.6186 | 1.5739 | ≥ 1.5 |
-| lateral colour F / C / g minus e (µm) | −0.864 / +1.428 / −1.456 | −0.342 / +0.874 / −0.244 | −0.352 / +0.881 / −0.270 | −0.347 / +0.873 / −0.252 | ≤ 0.30 |
+![10x agent run 1 layout](10x-agent-run1.png)
 
-The form run's Strehl sampling is not recorded, and its Strehl and RMS disagree; compare on RMS. The edge moved from
-0.1908 to 0.1843 in the rim-row step, not in the glass step. The kept swap's 0.0015-wave edge gain was given back by a
-later centre-thickness step, so the glass step's edge reads 0.1843 going in and coming out. Field sag, centre thickness
-and gaps pass.
+**Agent run 2:** the same three glasses; the radii differ.
 
-**Glass step.** One swap was kept, S16 from S-LAH55VS to S-LAH58, of 20 sets tried. The swaps that cut lateral colour
-lost wavefront at one or more fields (see [runs.md](20x/runs.md)).
+![10x agent run 2 layout](10x-agent-run2.png)
 
-**Limit.** Lateral colour (C about +0.87 µm) sets the gap at 0.5 and 0.7 field. At the edge, C alone and g alone each
-fail. The C-line offset at the pupil centre moved only 0.004 µm across the glass step.
+## 20× / NA 0.70 dry objective
 
-This form was carried forward over a lower-RMS lens from the same seed (0.0151 / 0.0743 / 0.1029 / 0.1499 waves). That
-lens met the target on axis and at 0.5 field (Strehl 0.995 / 0.807). The project's reason was that the chosen form's
-main aberrations are easy to name; a blind reading of its ray fan called it stuck.
+Values over the 0.075-wave target are marked ✗.
 
-![Ray fans of the form-step and glass-step 20x lenses at a fixed ±1.5 µm scale](20x/fans-compare-1p5um.png)
+| lens | merit at rest | 0 field | 0.5 field | 0.7 field | 1.0 field | glasses changed | run time |
+|---|---|---|---|---|---|---|---|
+| start (rim-row lens) | 0.000870 | 0.0691 | 0.1025 ✗ | 0.1301 ✗ | 0.1843 ✗ | — | — |
+| Hammer | 0.000802 | 0.0873 ✗ | 0.1008 ✗ | 0.1194 ✗ | 0.1691 ✗ | 3 of 10 | 60 min |
+| agent run 1 | 0.000859 (+7 %) | 0.0695 (−0.0178) | 0.0986 ✗ (−0.0022) | 0.1251 ✗ (+0.0057) | 0.1807 ✗ (+0.0116) | 1 of 10 | 37 min |
+| agent run 2 | 0.000864 (+8 %) | 0.0713 (−0.0160) | 0.1002 ✗ (−0.0006) | 0.1266 ✗ (+0.0072) | 0.1818 ✗ (+0.0127) | 1 of 10 | 32 min |
 
-Top row: the form-step lens. Bottom row: the final glass-step lens. Both rows are drawn at the same fixed scale,
-±1.5 µm; curves beyond it are clipped. The Airy radius of the glass-step lens is 0.476 µm.
+**On axis,** the start and both agent lenses pass; that is 1 of 4 fields each. Hammer's lens moved from 0.069 to 0.087
+waves and fails, so it passes 0 of 4. **Off axis,** no lens meets the target at 0.5, 0.7 or 1.0 field. The limit is
+lateral colour, which single glass changes on this form do not remove. Hammer's lens has the lowest merit and the best
+0.7 and 1.0 fields. Both agent lenses are better than Hammer's at 0 and 0.5 field.
 
-## Still polishing
+**Lowest merit or every target kept.** Hammer minimizes the merit function it is given, and its lens has the lowest
+merit. The agent minimizes the same merit, but keeps a glass change only if every field that passed before still
+passes. On this merit the edge field weighs ten times the on-axis field, so the lowest merit came from trading the
+on-axis target for a better edge. The agent turned that trade down twice, once for the same S8 swap Hammer made.
 
-- **Dropped sets.** In these runs a set more than 10 % behind its control after one block was dropped, and a budget
-  above 120 s per set was accepted only for a single set. On the 10× the tool dropped every set after its first
-  completed call, including S8 CaF2 to FCD100 (+146 %); the agent then optimized two of the dropped swaps (S5 to
-  N-KZFS5, S16 to S-FPL53) and one untried pair (S18 + S20 to N-PK51) to rest by hand, and none beat its control. Past
-  winners were at or below 0.994× after one block. Since fixed: the control and each set get their own budget of up to
-  600 s, with (sets + 1) × the budget at most 1800 s (four sets: 360 s each); no set is dropped after its first block,
-  and from the second block a set is dropped only if it is more than 10 % behind and cannot catch up in its remaining
-  budget.
-- **Catalog binding.** A named glass can bind to the wrong catalog, and three 20× trial calls were refused for this.
-  Since fixed: `substitute_glass` now reports the catalog it bound and warns when more than one in-use catalog
-  holds the name; when a catalog is named, it refuses if another in-use catalog ahead of it holds the same name.
-- **Glass data.** Seven rows carried a wrong `delta_pg_f`; for example, Q-LASFH59S read −81.0. Since fixed: such
-  values now read as empty.
-- **Glass choice aimed at secondary colour** is still open.
-- **Process.** Neither glass-step agent used the ray-fan review.
-- **One run per step.** The two 20× glass-step runs started from different lenses and kept different glasses.
+**Glass changes.** Hammer changed S1 S-LAL59 → J-LASKH2, S8 S-FPL53 → NICF-A and S14 N-FK58 → S-FPL53. Both agent runs
+found their gain at the same position, S11, the middle glass of the cemented triplet. Run 1 changed it from N-LAF21 to
+N-LAF32, and run 2 to N-LASF44. Each improved the 0.5, 0.7 and 1.0 fields by 1–4 % and kept the on-axis field inside
+the target, with a small loss there (0.069 to 0.070 and 0.071).
+
+**What they turned down.** Each run optimized one other promising swap to rest and rejected it because the on-axis
+field then failed: S16 S-LAH59 in run 1 and S8 NICF-A in run 2. Hammer's S8 change is the same swap.
+
+**The search stopped early.** Neither run went back to S11's cemented partners after its keep, and both said so. They
+reported "stopped with open slots", not a limit of the form.
+
+### Drawings
+
+OpticStudio cross-sections of each lens at rest, with rays at each field.
+
+**Hammer:** S1 S-LAL59 → J-LASKH2, S8 S-FPL53 → NICF-A, S14 N-FK58 → S-FPL53.
+
+![20x Hammer layout](20x-hammer.png)
+
+**Agent run 1:** S11 N-LAF21 → N-LAF32.
+
+![20x agent run 1 layout](20x-agent-run1.png)
+
+**Agent run 2:** S11 N-LAF21 → N-LASF44.
+
+![20x agent run 2 layout](20x-agent-run2.png)
+
+## What the agent reports that Hammer does not
+
+Hammer returns a lens. Each agent run hands back, for every element position it tried:
+
+- the reason it looked there: primary colour, secondary colour, or a monochromatic error, read from single-wavelength
+  and polychromatic wavefront at every field;
+- the glass property it changed to address that reason (Abbe number, partial-dispersion anomaly, or index) and the
+  candidates it ranked;
+- each trial beside a control given the same optimization, at every field, labelled kept, rejected, screened (measured
+  once, not yet optimized to rest) or not measured;
+- the positions it left untried, and whether it calls the result a target met, a search stopped short, or a limit of
+  the form.
+
+## Limits
+
+- **One Hammer run against two agent runs per lens.** The comparison is narrow.
+- **The 10× run 2 rest evidence is thin.** Its final glass set had a single 50-cycle confirming run, which gained
+  0.0007 %. Run 1 had two.
+- **The 20× search ends after its first keep.** Both runs left the triplet partners of S11 untried, and each finished
+  well inside the hour. A deeper second round may find more.
+- **Candidate lists were capped.** Each glass search returned only the top 30–60 of up to 210 matches, and the agent
+  picked from those without asking for the rest. Because the lists are sorted by the property being corrected, the
+  glasses left out are the weakest candidates, but a close alternative could still be missed. Two of the four runs
+  said so in their reports.
+- **Hammer did better in places.** At 20× its lens has the lowest merit and the best 0.7 and 1.0 fields. At 10×, agent
+  run 2 is 0.0004 waves behind it at the 0.5 field.
+- **Some colour got worse.** On the 10×, lateral colour at 436 nm at the edge field grew slightly in both agent runs.
 - **Not done:** tolerancing and MTF.
 
 ## Files
 
-- `10x/` and `20x/`: briefs (`brief-form.md`, `brief-glass.md`, with `{SEED}` for the starting lens), the form agent's
-  `stage-log.md`, the compiled `runs.md`, form- and glass-step result `.zmx` files, and fan and layout PNGs. The
-  rim-row lens the 20× glass step started from is not included.
+| | 10× | 20× |
+|---|---|---|
+| brief given to each agent run | [10x/brief-glass-ab.md](10x/brief-glass-ab.md) | [20x/brief-glass-ab.md](20x/brief-glass-ab.md) |
+| start lens | [result_10x-form-step.zmx](10x/result_10x-form-step.zmx) | [result_20x-start.zmx](20x/result_20x-start.zmx) |
+| Hammer result, at rest | [result_10x-hammer.zmx](10x/result_10x-hammer.zmx) | [result_20x-hammer.zmx](20x/result_20x-hammer.zmx) |
+| agent run 1 | [result_10x-agent-run1.zmx](10x/result_10x-agent-run1.zmx) | [result_20x-agent-run1.zmx](20x/result_20x-agent-run1.zmx) |
+| agent run 2 | [result_10x-agent-run2.zmx](10x/result_10x-agent-run2.zmx) | [result_20x-agent-run2.zmx](20x/result_20x-agent-run2.zmx) |
+| layouts | [Hammer](10x-hammer.png), [run 1](10x-agent-run1.png), [run 2](10x-agent-run2.png) | [Hammer](20x-hammer.png), [run 1](20x-agent-run1.png), [run 2](20x-agent-run2.png) |
+
+The lens files open in OpticStudio. The glass catalogs they name ship with it.

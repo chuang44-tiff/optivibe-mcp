@@ -56,7 +56,7 @@ certified keeper (md5-identical, clearance_ok:true, forced:false).
 ``promote_best`` therefore binds the seq to ``design_name`` via the manifest's
 ``meta.workspace`` before promoting anything: a PROVEN mismatch REFUSES
 (``promote_candidate_owner_mismatch``); unrecorded ownership is DISCLOSED
-(``candidate_owner: null``), never assumed. See .md.
+(``candidate_owner: null``), never assumed.
 
 That binding closes the MEASURED defect, NOT the class. The clearance gate still audits
 the LIVE SESSION while the copy is a FILE, and nothing ties the two together: promoting
@@ -78,7 +78,6 @@ import json
 import math
 import os
 import stat
-import tempfile
 
 from .. import _io
 from .. import artifact_naming as _naming
@@ -350,8 +349,7 @@ _PROMOTING_VERDICTS = frozenset({"clean"})
 # save_candidate). It is the ONLY ownership evidence on disk, and it is written by
 # save_candidate ALONE — save_snapshot and optimize's per-pass trail write meta with
 # no owner (MEASURED: 94 of 1046 rows in DesignTask/ carry it). That asymmetry is why
-# _resolve_candidate is DISPROVE-and-refuse, never prove-or-refuse. See of
-# .md.
+# _resolve_candidate is DISPROVE-and-refuse, never prove-or-refuse.
 _OWNER_META_KEY = "workspace"
 
 # The tri-state clearance_ok map — ONE copy (was duplicated in save_candidate and in
@@ -1126,9 +1124,9 @@ def _sibling_companion_state(path):
 #: workspace's picture directory while a call is in flight.
 #:
 #: WHY THIS IS A DECLARATION AND NOT A GUARANTEE. The render transaction creates a
-#: name with ``tempfile.mkstemp``, closes the descriptor so the renderer can write to
+#: name with ``_io.exclusive_temp``, closes the descriptor so the renderer can write to
 #: it, gates and digests the bytes, then ``os.replace``s them onto the sibling.
-#: ``mkstemp`` grants exclusive CREATION and nothing beyond it: once the descriptor is
+#: ``exclusive_temp`` (``O_EXCL``) grants exclusive CREATION and nothing beyond it: once the descriptor is
 #: closed the entry is an ordinary file in a listable directory. A second writer that
 #: lists the directory and plants a picture at that name can satisfy the production
 #: predicate, and this call would then bind ``png_sha256`` to the other writer's bytes.
@@ -1550,11 +1548,44 @@ def _declared_parent(params):
             {"lineage": "declared"})
 
 
+def _figure_scoreable(render_keys):
+    """Whether the render's own facts give the figure a stampable universe: bool or ``None``.
+
+    The two structural conditions the analyzer's ``stamped_universe`` refuses on: a
+    non-empty ``surface_labels`` list and a plain-int ``n_surfaces`` of at least 2. An
+    all-coordinate-break fold renders ``ok`` with ``surface_labels == []``: a picture
+    is bound and nothing in it can be scored. Recorded on the audit row at save time so
+    ``record_findings`` can refuse while the driver can still act.
+
+    ``False`` only when a fact the render ESTABLISHED disqualifies the figure; ``True``
+    when both are established and qualify; ``None`` (the key is then not written) when
+    a fact is simply absent, because absent means "not established" and is not a refusal
+    ground (the same absent-is-not-None discipline as ``_FIGURE_ENVELOPE_KEYS``).
+    NEVER raises.
+    """
+    try:
+        have_labels = "surface_labels" in render_keys
+        have_count = "n_surfaces" in render_keys
+        labels = render_keys.get("surface_labels")
+        count = render_keys.get("n_surfaces")
+        labels_ok = isinstance(labels, (list, tuple)) and len(labels) > 0
+        count_ok = (isinstance(count, int) and not isinstance(count, bool)
+                    and count >= 2)
+        if (have_labels and not labels_ok) or (have_count and not count_ok):
+            return False
+        if have_labels and have_count:
+            return True
+        return None
+    except Exception:  # noqa: BLE001 - a fact about the figure, never a gate
+        return None
+
+
 def _write_audit_record(zmx_dir, *, seq, design_name, filename, zmx_sha256,
                         png_filename, png_sha256, active_configuration,
                         verdict, scope, summary, min_air, min_glass,
                         scorecard=None, scorecard_failure=None,
-                        parent=None, parent_source="undeclared"):
+                        parent=None, parent_source="undeclared",
+                        figure_scoreable=None):
     """Append ONE ``candidate_audit`` row to ``<zmx_dir>/manifest.jsonl``.
 
     Returns ``"written"`` or ``"not_written:<reason>"``. NEVER raises.
@@ -1581,6 +1612,11 @@ def _write_audit_record(zmx_dir, *, seq, design_name, filename, zmx_sha256,
             "png_filename": png_filename,
             "png_sha256": png_sha256,
             "active_configuration": active_configuration,
+            # Whether the figure this row's ``png_sha256`` names has a stampable
+            # universe (see ``_figure_scoreable``). Written only when the caller
+            # established it, so a row from a caller that did not stays as it was.
+            **({} if figure_scoreable is None
+               else {"figure_scoreable": figure_scoreable}),
             # DECLARED lineage, written UNCONDITIONALLY: both keys are written on
             # EVERY row from this release onward, contracted or not, so an uncontracted
             # design gets lineage too and there is no second sidecar file to keep
@@ -1813,6 +1849,9 @@ def _validated_audit_row(row):
         return False
     design_name = row.get("design_name")
     if not isinstance(design_name, str) or design_name.strip() == "":
+        return False
+    # OPTIONAL, and a real boolean when present: a legacy row carries no such key.
+    if "figure_scoreable" in row and not isinstance(row.get("figure_scoreable"), bool):
         return False
     # === ROW-LEVEL OPTIONAL BLOCKS — ABOVE the audit ladder, and the position is the
     # fix (found by the lineage test itself, NOT by review).
@@ -3773,12 +3812,12 @@ def _get_snapshot_sink(session):
 #: list present ``stamped_universe`` refuses with "surface_labels is EMPTY"; without it
 #: the analyzer can only say the envelope is unstamped. Both refuse; one says why.
 #:
-#: The trap that remains is NOT in this propagation and is not an earlier cycle's to close:
-#: ``png_sha256`` IS bound on such a save, so ``record_findings`` will ACCEPT a
-#: judgement against a figure the analyzer will then refuse to score. That is
-#:. Pinned here as a measured
-#: state by ``the unit test...`` so it is known rather
-#: than discovered.
+#: ``png_sha256`` IS still bound on such a save (the digest is a truthful statement about
+#: bytes that exist), so the audit row also records ``figure_scoreable`` (see
+#: ``_figure_scoreable``) and ``record_findings`` refuses a finding against a figure
+#: whose row says ``false`` (``finding_figure_unscoreable``) instead of accepting a
+#: judgement the analyzer would later refuse to score. The empty-labels state itself is
+#: pinned by a unit test.
 _FIGURE_ENVELOPE_KEYS = (
     "surface_labels",       # the surfaces DRAWN, stamped; NEVER the row count
     "n_surfaces",           # lde.NumberOfSurfaces read INSIDE that render; image = n-1
@@ -4044,12 +4083,12 @@ def save_candidate(session, params):
     # Sync; no ticket token is written here until it exists.
     #
     # REACHABILITY: on the shipped path ``workspace_root`` is pinned ONCE at launch
-    # (``__main__.py``). For an ABSOLUTE pinned root the two strings cannot disagree
-    # and this never fires. A RELATIVE ``OPTIVIBE_WORKSPACE_ROOT`` is a pinned
-    # attribute, not a pinned location: a cwd move between validation and the build
-    # now refuses here (it landed before this cycle). Otherwise it guards a session
-    # whose root attribute answers differently on successive reads, or a ``chdir``
-    # under the tier-4 cwd fallback.
+    # (``__main__.py``), ANCHORED with ``os.path.abspath`` there, so the pinned root is
+    # absolute and the two strings cannot disagree: this never fires on a shipped
+    # launch. A RELATIVE root can still reach it through a session whose attribute is
+    # set relative by hand (a cwd move between validation and the build refuses here,
+    # rows T10b), a session whose root attribute answers differently on successive
+    # reads, or a ``chdir`` under the tier-4 cwd fallback.
     #
     # The family is the EXISTING ``judgment_unresolvable`` rather than a new one: the
     # condition genuinely is "these ids could not be resolved against the manifest this
@@ -4241,8 +4280,8 @@ def save_candidate(session, params):
         #
         # (This heading used to assert the name was SECRET to this call. It is not:
         # the entry sits in a shared, listable directory the moment the descriptor
-        # is closed. Creation is what ``mkstemp`` establishes; secrecy is what it
-        # does not. The retired wording is quoted once, in /9 cycle
+        # is closed. Creation is what ``exclusive_temp`` (``O_EXCL``) establishes; secrecy is what it
+        # does not. The retired wording is quoted once, in a cycle
         # report -- NOT here, because a guard cannot tell a returning claim from a
         # note about it. See the ESTABLISHED/ASSUMED block and
         # ``_SINGLE_WRITER_MODEL``.)
@@ -4258,15 +4297,15 @@ def save_candidate(session, params):
         # sixth instance and wait for the seventh.
         #
         # So the question is RETIRED rather than answered again. The render goes to a
-        # name EXCLUSIVELY CREATED here by ``tempfile.mkstemp``, and only once the
+        # name EXCLUSIVELY CREATED here by ``_io.exclusive_temp``, and only once the
         # bytes at it are gated and digested are they moved onto the shared sibling
         # with ``os.replace``. Nothing is inferred from a pre-state, a digest
         # comparison, or any other fact that can go missing or unreadable.
         #
         # *** WHAT IS ESTABLISHED, AND WHAT IS ASSUMED. READ BOTH. ***
         #
-        # ESTABLISHED: this call CREATED that name. ``mkstemp`` opens ``O_EXCL`` and
-        # retries a collision, so the name was not in use and no crashed leftover is
+        # ESTABLISHED: this call CREATED that name. ``exclusive_temp`` opens ``O_EXCL`` and
+        # retries a collision (at most 3 fresh names), so the name was not in use and no crashed leftover is
         # adopted. Under the supported single-writer model (below) the bytes found
         # there are therefore this call's.
         #
@@ -4274,7 +4313,7 @@ def save_candidate(session, params):
         # between creation and publication. **An earlier revision asserted that no
         # other writer could KNOW the name, and derived the provenance from that as
         # a matter of construction. It was FALSE, and it is corrected rather than
-        # softened.** ``mkstemp`` grants exclusive CREATION, never
+        # softened.** ``exclusive_temp`` (``O_EXCL``) grants exclusive CREATION, never
         # continuing ownership: after ``os.close`` the entry sits in a shared, listable
         # directory, and a second writer does not have to guess it or receive this
         # local -- it lists the directory. An external reader built exactly that
@@ -4289,7 +4328,7 @@ def save_candidate(session, params):
         # the larger claim and it exceeded the experiments. The untested form, and
         # why the decision does not rest on any of this, are in
         # ``_SINGLE_WRITER_MODEL``. The four:
-        #   * holding the ``mkstemp`` descriptor open excludes NOBODY. Measured: a
+        #   * holding the ``O_EXCL`` descriptor open excludes NOBODY. Measured: a
         #     separate PROCESS opened the same path for writing and succeeded while
         #     the descriptor was held.
         #   * holding it open also BREAKS publication -- ``os.replace`` onto the
@@ -4334,7 +4373,7 @@ def save_candidate(session, params):
         # does not make the preceding stat, gate, digest and rename one transaction,
         # and nothing here claims it does.
         #
-        # The other caveat this block used to carry -- "``mkstemp`` yields a name no
+        # The other caveat this block used to carry -- "``exclusive_temp`` yields a name no
         # concurrent writer holds" -- is RETIRED as the wrong question. Exclusive
         # creation is documented and was independently confirmed; it was never the
         # missing property. Ownership AFTER creation was, and that is now declared
@@ -4342,9 +4381,7 @@ def save_candidate(session, params):
         _minted_png = None
         _png_published = False
         try:
-            _fd, _minted_png = tempfile.mkstemp(
-                suffix=".png", prefix=".optivibe_save_", dir=png_dir)
-            os.close(_fd)
+            _minted_png = _io.exclusive_temp(png_dir, prefix=".optivibe_save_", suffix=".png")
         except (OSError, ValueError) as exc:  # noqa: BLE001 — never raise
             _minted_png = None
             render_error = (f"the private render name could not be minted: "
@@ -4713,6 +4750,7 @@ def save_candidate(session, params):
             # the three facts it is. Already resolved and already well formed.
             parent=parent,
             parent_source=parent_source,
+            figure_scoreable=_figure_scoreable(_render_keys),
         )
 
     # V-INT Part 2 — the JUDGMENT row, beside the exact bytes it judges.
@@ -5141,19 +5179,17 @@ def _atomic_copy(src: str, dst: str) -> None:
     orphans a ``.tmp`` over an unchanged ``dst``.
     """
     dst_dir = os.path.dirname(dst) or "."
-    # D5 (persistence-workspace): makedirs BEFORE mkstemp — the BEST_*.zmx parent (the
+    # D5 (persistence-workspace): makedirs BEFORE exclusive_temp — the BEST_*.zmx parent (the
     # workspace root in the flat layout) may not exist yet if a promote runs before any
-    # candidate carved the tree. mkstemp(dir=dst_dir) would raise on a missing dir;
+    # candidate carved the tree. exclusive_temp(dst_dir) would raise on a missing dir;
     # create it first (exist_ok). A genuinely unwritable dir still raises -> the
     # promote_best wrapper envelopes it as promote_failed (never a raw escape).
     os.makedirs(dst_dir, exist_ok=True)
-    # Unique temp (mkstemp) so two concurrent promotes of the same design never
-    # race on a shared fixed ``.tmp`` name. CLOSE the mkstemp fd immediately and
+    # Unique temp (exclusive_temp, O_EXCL) so two concurrent promotes of the same design never
+    # race on a shared fixed ``.tmp`` name. exclusive_temp CLOSES the fd immediately and
     # reopen BY NAME (mirrors layout_render): if ``open(src)`` below raises first,
     # there is no dangling fd to leak (and on Windows no fd lock orphaning the temp).
-    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(dst)}.", suffix=".tmp",
-                               dir=dst_dir)
-    os.close(fd)
+    tmp = _io.exclusive_temp(dst_dir, prefix=f".{os.path.basename(dst)}.", suffix=".tmp")
     try:
         with open(src, "rb") as rfh, open(tmp, "wb") as wfh:
             while True:
@@ -6174,7 +6210,8 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "name_scheme reads 'v2'. label defaults to the literal 'candidate' and is "
         "sanitized for the filesystem — label_sanitized:true says yours was changed. "
         "The workspace root is set ONCE at MCP launch from OPTIVIBE_WORKSPACE_ROOT "
-        "(else the launch cwd) and is echoed as workspace_root; no tool takes a path "
+        "(else the launch cwd; a relative value is made absolute against the launch "
+        "cwd) and is echoed as workspace_root; no tool takes a path "
         "argument. SaveAs also writes a .ZDA companion beside the .zmx — that is the "
         "engine's own state file, it is tracked as zda_present and is not removed. "
         "index_advanced:true (normally false) says the name this save asked for was "

@@ -28,6 +28,7 @@ from ..errors import (SolveDrivenError, SolveRefsRefusalError, SurfaceWriteError
                       ToolParamError)
 from ..server import ToolSpec
 from . import _asphere_cells as _asph
+from . import _by_number_refs as _bnr
 from . import _lens_common as _c
 from . import _measurement_common as _mc
 from . import _optimize_common as _oc
@@ -583,6 +584,7 @@ def remove_surface(session, params):
     if refuse and scan["verdict"] != _refs.VERDICTS[0]:
         raise SolveRefsRefusalError(_refs.refusal_message(at, scan))
 
+    rows_before = _bnr.snapshot(system, at)
     removed = lde.RemoveSurfaceAt(at)
     new_count = int(lde.NumberOfSurfaces)
     if not bool(removed) or new_count != n - 1:
@@ -596,7 +598,8 @@ def remove_surface(session, params):
             surface=at,
         )
     confirmed = _refs.confirm_after(system, lde, at, scan)
-    return {"at": at, "count": new_count, **_refs.disclosure(scan, confirmed)}
+    return {"at": at, "count": new_count, **_refs.disclosure(scan, confirmed),
+            **_bnr.report(system, rows_before)}
 
 
 def set_stop_surface(session, params):
@@ -859,10 +862,11 @@ REMOVE_SURFACE_SPEC = ToolSpec(
         "in 'par_refs_not_audited' -- a COVERAGE statement, not a fault, so it does not "
         "make the state could_not_scan and refuse_on_solve_refs=true does NOT refuse on "
         "it; a surface whose type could not be READ or recognised is a fault and lands "
-        "in 'unscanned', which does refuse. Limitation: this "
-        "reports solve references only, from this call only -- not merit-function, "
-        "tolerance or multi-configuration surface references, and the shrink path "
-        "inside apply_lens_spec does not report them at all."
+        "in 'unscanned', which does refuse. Merit and tolerance rows that name the "
+        "removed surface by number slide to the next surface; they are listed in "
+        "'by_number_refs', and the multi-configuration rows the engine deleted in "
+        "'mce_rows_deleted'. A surface range that only spans it is not listed, and the "
+        "shrink path inside apply_lens_spec reports none of this."
     ),
 )
 

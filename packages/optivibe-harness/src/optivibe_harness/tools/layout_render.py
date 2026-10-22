@@ -26,7 +26,6 @@ against FakeLDE/FakeRow doubles + a real Agg render asserting PNG magic bytes.
 import math
 import os
 import re
-import tempfile
 from dataclasses import dataclass as _dataclass
 from dataclasses import replace as _dc_replace
 from time import perf_counter
@@ -34,6 +33,7 @@ from time import perf_counter
 from .. import artifact_naming as _naming
 from ..artifact_sink import _ILLEGAL_CHARS as _ILLEGAL_STEM_CHARS
 from ..artifact_sink import _safe_name
+from .._io import exclusive_temp
 from ..errors import SessionClosedError, ToolParamError, map_dotnet_exception
 from . import _workspace_paths as _wsp  # S-1 — cycle-safe (never imports layout_render)
 from ..server import ToolSpec
@@ -4040,11 +4040,10 @@ def _native_attempt(session, *, rows, n, apertures, rims, draw_heights, folded,
                         "(their arrowhead extent is unmodelled)")
     # export --------------------------------------------------------------------- #
     os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(suffix=".png", prefix="native_", dir=directory)
+    tmp = exclusive_temp(directory, prefix="native_", suffix=".png")
     # Registered with the CALLER at once, so its `finally` removes the raster on every
     # exit -- including an exception raised anywhere below.
     tmp_sink.append(tmp)
-    os.close(fd)
     out.tmp_path = tmp
     res = _native.export_cross_section(
         system, tmp, W=W, H=H, start=start, end=end,
@@ -4247,9 +4246,8 @@ def _native_3d_attempt(session, *, renderer, rows, n, decision, draw_rays,
     out.range_decision = decision
     n_rays = _native.DEFAULT_N_RAYS_3D[kind] if draw_rays else 0
     os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(suffix=".png", prefix="native3d_", dir=directory)
+    tmp = exclusive_temp(directory, prefix="native3d_", suffix=".png")
     tmp_sink.append(tmp)
-    os.close(fd)
     out.tmp_path = tmp
     res = _native.export_3d(system, kind, tmp, config_count=config_identity.count,
                             start=start, end=end, n_rays=n_rays, n_surfaces=n)
@@ -5176,13 +5174,12 @@ def _render_layout_at(session, params, *, exact_path=None):
         _legend_seat = getattr(fig, "_optivibe_legend_seat", None)
 
         # Atomic durability gate (§3.8): UNIQUE temp in the target dir -> _is_png ->
-        # replace. A unique temp (tempfile.mkstemp) avoids the race where two
+        # replace. A unique temp (_io.exclusive_temp) avoids the race where two
         # concurrent renders to the same path collide on a fixed "<name>.png.tmp" and
         # one returns ok:true for the other's figure (FIX 6).
         directory = os.path.dirname(attempted) or "."
         os.makedirs(directory, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(suffix=".png", dir=directory)
-        os.close(fd)  # mkstemp opens the file; savefig reopens by path.
+        tmp = exclusive_temp(directory, prefix="", suffix=".png")  # created + closed; savefig reopens by path.
         # bbox_inches="tight" crops the whitespace the box mechanism leaves
         # around a tall-or-wide axes. Measured against every consumer first:
         # nothing downstream reads pixel dimensions (the workspace gate is

@@ -39,17 +39,18 @@ from ..errors import (AnalysisResultError, SessionClosedError, ToolParamError,
                       map_dotnet_exception)
 from ..server import ToolSpec
 from . import _analysis_common as _ac
+from . import _config_common as _cfg
 from . import _mce_cells
 from . import analysis_raytrace
 from ._image_gate import _is_png
 from ._measurement_common import image_surface_index, suspicious_sentinel
 from ._optimize_common import _base_token  # the ONE base-slot token read [R-B]
-from ._mtf_field_plot import (ReferenceInvalid, exclusive_temp, plot_model, reference_digest, render_png,
-                              validate_reference)
+from ._mtf_field_plot import (ReferenceInvalid, exclusive_temp, line_disclosure, plot_model,
+                              reference_digest, render_png, validate_reference)
 from ._solve_trace import _primary_wave
 from .workspace import _resolve_root  # import != edit; the root, never a fixed name
-from .analysis_mtf import (_MTF_AUTO_EXTEND_MAX, _MTF_AUTO_EXTEND_PAD, _MTF_DEFAULT_GRID_MAX,
-                           _as_finite, _interp_at, _validate_at_frequencies)
+from .analysis_mtf import (_as_finite, _auto_extended_ceiling, _interp_at, _series_xy,
+                           _validate_at_frequencies)
 
 TOOL = "render_mtf_vs_field"
 #: FROZEN, exact-token compared [P-3][P-4] — ``"Angle" in "TheodoliteAngle"`` is True.
@@ -86,12 +87,12 @@ def _describe(printed_unit):
     E5): derived from the map so a widened map can never be served under a narrower sentence."""
     units = "/".join(sorted(set(printed_unit.values()), key=lambda u: (u != "mm", u)))
     return ("MTF vs REAL image height (geometric chief ray; %s lens or Angle fields); T solid, S dashed. "
-            "Only defined fields, no segments between. Bound by content (ties: list order, flagged); "
-            "diffraction limit apart. Missing never drawn as 0. Untraceable chief ray REFUSES "
-            "(chief_ray_failed). Engine messages verbatim ('Sampling too low': pass sample_size). "
-            "Reference: context only. ACTIVE config named (set_current_configuration switches). PNG "
-            "minted in <workspace_root>/evaluation/ (no overwrite); path *.png = file, else a folder. "
-            "Not the reviewable figure: save_candidate's png_sha256 PNG is." % units)
+            "Defined fields only, no segments. Bound by content (ties flagged); diffraction limit apart. "
+            "Missing never drawn as 0. Untraceable chief ray: chief_ray_failed. Engine messages verbatim "
+            "('Sampling too low': raise sample_size). Reference: context only. config=k: "
+            "configuration k, restored (default ACTIVE). PNG: <workspace_root>/evaluation/ (no overwrite); path *.png = "
+            "file, else folder. Not the reviewable figure: save_candidate's png_sha256 PNG is. "
+            "include_plot_model=true adds line data." % units)
 
 
 def _transport_loss(exc):
@@ -368,15 +369,13 @@ def _series_at(results, i, frequencies, disc):
         raise _Refuse("analysis_malformed", f"series {i}: Description could not be read: "
                       f"{safe_exc(exc, repr_form=True)}", series_index=i, **disc) from None
     try:
-        x = _ac._marshal_array(ds.XData.Data)
-        t, s = _ac._split_mtf_columns(_ac._marshal_array(ds.YData.Data))
+        x, t, s, mismatch = _series_xy(ds, i)
     except AnalysisResultError as exc:  # relabel: only analysis_empty / analysis_malformed pass
         family = exc.family if exc.family in ("analysis_empty", "analysis_malformed") \
             else "analysis_malformed"
         raise _Refuse(family, f"series {i}: {safe_exc(exc)}", series_index=i, **disc) from None
-    if len(x) != len(t):
-        raise _Refuse("analysis_malformed", f"series {i}: frequency length {len(x)} != "
-                      f"modulation row count {len(t)}", series_index=i, **disc)
+    if mismatch is not None:
+        raise _Refuse("analysis_malformed", mismatch, series_index=i, **disc)
     bad = next((j for j, v in enumerate(x) if _as_finite(v) is None or (j and v <= x[j - 1])), None)
     if bad is not None:
         raise _Refuse("analysis_malformed", f"series {i}: X grid is not finite and STRICTLY "
@@ -397,10 +396,8 @@ def _run_fftmtf(system, frequencies, sample_size, *, harvest=False):
     ``harvest=True`` (the chief-failed path only): a setting that did not take is FLAGGED and
     the ONE window still runs so the engine's messages are harvested [A6]. An engine raise
     anywhere in the window -> ``analysis_malformed`` with the window closed."""
-    needed = max(frequencies)
-    extend = _MTF_DEFAULT_GRID_MAX < needed <= _MTF_AUTO_EXTEND_MAX
-    maxf = float(max(_MTF_DEFAULT_GRID_MAX, math.ceil(needed * _MTF_AUTO_EXTEND_PAD))) \
-        if extend else None
+    maxf = _auto_extended_ceiling(frequencies)
+    extend = maxf is not None
     requested = sample_size or DEFAULT_SAMPLE_SIZE  # ALWAYS written [P2R6-OWN-1]
     token, dflt = f"S_{requested}x{requested}", "" if sample_size else " (the default 256)"
     disc = {"messages": [], "settings_written": [], "settings_read_back": None, "flags": [],
@@ -748,15 +745,44 @@ def render_mtf_vs_field(session, params):
     """The handler (the steps, in order). Raises only ``ToolParamError``."""
     frequencies = _validate_frequencies(params.get("frequencies"))
     sample_size = _validate_sample_size(params.get("sample_size"))
+    include_plot_model = params.get("include_plot_model", False)
+    if not isinstance(include_plot_model, bool):
+        raise ToolParamError(f"include_plot_model must be a boolean, got {safe_repr(include_plot_model)}")
     path = params.get("path")
     if path is not None:  # [P2R3-OWN-2] a .png FILE, or a FOLDER to mint into
         if not isinstance(path, str) or not str.strip(path) or "\x00" in path:
             raise ToolParamError(f"path must be a non-empty string without NUL, got {safe_repr(path)}")
         _refuse_non_png_extension(path)
     try:
-        return _render(session, frequencies, sample_size, path, params.get("reference"))
+        cfg = _cfg.resolve_single_config_selector(session.system, params.get("config"), TOOL)
+        if cfg is None:
+            return _render(session, frequencies, sample_size, path, params.get("reference"),
+                           include_plot_model)
+        return _render_in_config(session, cfg, frequencies, sample_size, path,
+                                 params.get("reference"), include_plot_model)
     except _Refuse as r:
         return _ac.error_envelope(TOOL, r.family, str(r), **r.extra)
+
+
+def _render_in_config(session, cfg, *args):
+    """``_render`` with configuration ``cfg`` active, inside the helper that ALWAYS restores.
+
+    ``config_evaluated`` stays the strict read ``_render`` makes after the switch (it refuses when that
+    read is not ``cfg``); the request is never echoed. A restore that did not verify is disclosed as
+    ``mutation_warning`` on the success and on a refusal alike."""
+    refusal = env = None
+    with _cfg.with_configuration(session.system, cfg) as ctx:
+        try:
+            env = _render(session, *args, expect_config=cfg)
+        except _Refuse as r:
+            refusal = r
+    if refusal is not None:
+        if ctx["mutation_warning"]:
+            refusal.extra["mutation_warning"] = ctx["mutation_warning"]
+        raise refusal
+    if ctx["mutation_warning"]:
+        env["mutation_warning"] = ctx["mutation_warning"]
+    return env
 
 
 def _geometry(session, system, lens_unit):
@@ -795,7 +821,8 @@ def _geometry(session, system, lens_unit):
         session, fields, primary, image_surf)
 
 
-def _render(session, frequencies, sample_size, path, reference):
+def _render(session, frequencies, sample_size, path, reference, include_plot_model=False,
+            expect_config=None):
     system = session.system
     try:  # the helper re-raises only a transport loss (E5); this wrapper relays it via _transport_loss [#6]
         lens_unit = _ac._lens_units_string(system)
@@ -819,6 +846,10 @@ def _render(session, frequencies, sample_size, path, reference):
     if fault:
         raise _Refuse("workspace_unlistable", fault)
     ident = _config_identity(system)
+    if expect_config is not None and ident["config_evaluated"] != expect_config:
+        raise _Refuse(_ac.SETTINGS_UNVERIFIED_FAMILY,
+                      f"configuration {expect_config} was requested and the evaluated configuration "
+                      f"reads {ident['config_evaluated']!r}; nothing was drawn")
     flags = ident.pop("flags") + (["lens_unit_unresolved"] if lens_unit == "unknown" else []) + (
         ["workspace_root_unresolved"] if rfault else [])  # an absolute path published regardless
     field_type, fields, primary, image_surf, waves, wfault, heights = _geometry(session, system, lens_unit)
@@ -897,6 +928,8 @@ def _render(session, frequencies, sample_size, path, reference):
                "note": HEIGHT_NOTE},
            "curve_note": curve_note, "n_field_points": len(points) - len(unplaced),
            "flags": flags}
+    if include_plot_model:  # the drawn model itself, not a second derivation
+        env["plot_model"] = {"lines": line_disclosure(model)}
     if not minted:
         env["overwrote"] = overwrote
     if cleanup:  # an owned cleanup failed; the success is still a success [A3]
@@ -920,7 +953,7 @@ RENDER_MTF_VS_FIELD_SPEC = ToolSpec(
     handler=render_mtf_vs_field,
     required_params=(),
     param_types={"frequencies": "array", "sample_size": "integer", "path": "string",
-                 "reference": "object"},
+                 "reference": "object", "include_plot_model": "boolean", "config": "number"},
     description=_describe(_PRINTED_UNIT),
 )
 

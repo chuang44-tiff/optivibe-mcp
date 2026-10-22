@@ -22,9 +22,11 @@ import math
 from .._io import safe_exc, safe_float
 from ..errors import (AnalysisResultError, SessionClosedError, ToolParamError,
                       map_dotnet_exception)
-from ..server import ToolSpec
+from ..server import ToolSpec, _wedge_recorded
 from . import _analysis_common as _ac
+from . import _collimation as _col
 from . import _config_common as _cfg
+from ._optimize_common import _base_token  # the ONE base-slot token read
 
 # (S7 #16) Auto-extend the FFT-MTF grid to cover requested at_frequencies. The default
 # grid caps at 30.0 cyc/mm (probe-frozen), so an at_frequencies element above it silently
@@ -36,6 +38,34 @@ _MTF_AUTO_EXTEND_PAD = 1.1       # round needed UP so the target sits strictly I
                                  # grid (not at the excluded grid edge); ceil() after
 _MTF_AUTO_EXTEND_MAX = 2000.0    # SOFT cap (cyc/mm): beyond it, fall through to the honest
                                  # null+note, never auto-author a garbage grid
+
+
+def _auto_extended_ceiling(frequencies):
+    """The FFT-MTF grid ceiling that covers ``frequencies``, or ``None`` when the default grid does.
+
+    ONE rule for every tool that asks for the engine's MTF at chosen frequencies: only a request
+    above the default cap (and within the soft cap) raises the ceiling, rounded up with a pad so the
+    target sits strictly inside the grid. The caller decides whether an explicit ceiling overrides it."""
+    needed = max(frequencies)
+    if _MTF_DEFAULT_GRID_MAX < needed <= _MTF_AUTO_EXTEND_MAX:
+        return float(max(_MTF_DEFAULT_GRID_MAX, math.ceil(needed * _MTF_AUTO_EXTEND_PAD)))
+    return None
+
+
+def _series_xy(ds, index, pair_note=""):
+    """One data series -> ``(frequency, tangential, sagittal, mismatch)`` (marshalled, split, paired).
+
+    X and Y both go through the marshalling helper that owns the None/empty canary, and the split
+    owns the 2-column check: either raises ``AnalysisResultError`` (the caller maps its family).
+    ``mismatch`` is ``None``, or the text of the frequency-count != modulation-row-count fault: a
+    misaligned pair must never go out as a number. ``pair_note`` is appended to that text."""
+    freq = _ac._marshal_array(ds.XData.Data)
+    tangential, sagittal = _ac._split_mtf_columns(_ac._marshal_array(ds.YData.Data))
+    mismatch = None
+    if len(freq) != len(tangential):
+        mismatch = (f"series {index}: frequency length {len(freq)} != modulation row "
+                    f"count {len(tangential)}{pair_note}")
+    return freq, tangential, sagittal, mismatch
 
 
 def _resolve_single_config(system, params, tool_name):
@@ -176,6 +206,28 @@ def _analysis_idm(system, member_name):
         )
 
 
+#: Served on a latched tool slot: the collimated-output check traces rays through the slot, so it is
+#: skipped there and the caller is told the flag's absence proves nothing.
+_COLLIMATED_CHECK_SKIPPED_MSG = (
+    "collimated-output check not run: the engine's tool slot is busy, so whether this output is "
+    "collimated (afocal) is unknown and the absence of a collimated_output flag does not rule it out."
+)
+
+
+def _read_engine_messages(results):
+    """``(messages, unread)``: the engine's own analysis messages, read as text (empty list when none).
+
+    A read fault is disclosed (``unread=True``, empty list), never fabricated; a transport loss
+    is re-raised unchanged."""
+    try:
+        return [_base_token(results.GetMessageAt(i).Text)
+                for i in range(int(results.NumberOfMessages))], False
+    except Exception as exc:  # noqa: BLE001 -- disclosed as engine_messages_unread
+        if isinstance(map_dotnet_exception(exc), SessionClosedError):
+            raise
+        return [], True
+
+
 def get_mtf(session, params):
     """Run FFT MTF and return per-series frequency/tangential/sagittal lists.
 
@@ -255,12 +307,9 @@ def _get_mtf_at(session, params):
     # rejected a non-finite element pre-mutation.
     max_frequency_auto_extended = False
     if at_frequencies and max_frequency is None:
-        needed = max(at_frequencies)
-        if _MTF_DEFAULT_GRID_MAX < needed <= _MTF_AUTO_EXTEND_MAX:
-            max_frequency = float(max(
-                _MTF_DEFAULT_GRID_MAX,
-                math.ceil(needed * _MTF_AUTO_EXTEND_PAD),
-            ))
+        extended = _auto_extended_ceiling(at_frequencies)
+        if extended is not None:
+            max_frequency = extended
             max_frequency_auto_extended = True
 
     try:
@@ -295,11 +344,18 @@ def _get_mtf_at(session, params):
             pass
     with _ac._run_analysis(analysis) as results:
         n = int(results.NumberOfDataSeries)
+        # The engine says WHY a result is empty or inaccurate; read it before any early return.
+        messages, messages_unread = _read_engine_messages(results)
         # Completion canary (§d): zero series is a void result.
         if n <= 0:
+            extra = {"messages": messages}
+            if messages_unread:
+                extra["engine_messages_unread"] = True
             return _ac.error_envelope(
                 "get_mtf", "analysis_empty",
-                f"FFT MTF produced {n} data series",
+                f"FFT MTF produced {n} data series"
+                + (f"; engine messages: {messages}" if messages else ""),
+                **extra,
             )
 
         if series_sel is not None:
@@ -323,26 +379,22 @@ def _get_mtf_at(session, params):
             # pairing (X.Length == Y rows) so a misaligned result surfaces as a
             # structured error, never `ok:true` with mismatched/empty arrays.
             try:
-                freq = _ac._marshal_array(ds.XData.Data)
-                y_marshalled = _ac._marshal_array(ds.YData.Data)
-                # _split_mtf_columns must sit INSIDE this try (NEW-1): a non-2-col
-                # Y raises AnalysisResultError(family="analysis_malformed"); if the
-                # call were outside, that exception would escape past the tool
-                # boundary instead of returning the locked {ok:false} envelope.
-                tangential, sagittal = _ac._split_mtf_columns(y_marshalled)
+                # The split must sit INSIDE this try (NEW-1): a non-2-col Y raises
+                # AnalysisResultError(family="analysis_malformed"); outside it, that
+                # exception would escape past the tool boundary instead of returning
+                # the locked {ok:false} envelope.
+                freq, tangential, sagittal, mismatch = _series_xy(
+                    ds, i, " (X/Y arrays misaligned)")
             except AnalysisResultError as exc:
                 return _ac.error_envelope(
                     "get_mtf", exc.family, str(exc), series_index=i,
                 )
-            if len(freq) != len(tangential):
+            if mismatch is not None:
                 # Frequency count != modulation row count: frequency[i] no longer
                 # pairs with tangential[i]. A wrong-number-as-success the canary
                 # must intercept (BUG2/BUG3).
                 return _ac.error_envelope(
-                    "get_mtf", "analysis_malformed",
-                    f"series {i}: frequency length {len(freq)} != modulation row "
-                    f"count {len(tangential)} (X/Y arrays misaligned)",
-                    series_index=i,
+                    "get_mtf", "analysis_malformed", mismatch, series_index=i,
                 )
             if at_frequencies is not None:
                 # SUMMARY MODE: interpolate T/S at each requested frequency and OMIT
@@ -385,12 +437,18 @@ def _get_mtf_at(session, params):
     result = {
         "ok": True,
         "number_of_data_series": n,
+        # series 0 is ALWAYS the diffraction limit, whichever ``series`` was asked for
+        "diffraction_limit_series": 0,
         "x_label": "Spatial Frequency",
         # the FFT MTF abscissa is cycles/mm for EVERY lens unit, measured mm/cm/in/m
         "x_units": "cycles/mm",
         "y_units": "modulation (dimensionless 0..1)",
         "series": series_out,
+        # the engine's own words (e.g. 'Sampling too low, data inaccurate!'), always present
+        "messages": messages,
     }
+    if messages_unread:
+        result["engine_messages_unread"] = True
     if grid_max is not None:
         result["grid_max"] = grid_max
     # Active disclosure: when a max_frequency was requested, say
@@ -403,6 +461,17 @@ def _get_mtf_at(session, params):
     # false is the honest "tried to extend, engine didn't accept it" disclosure.
     if max_frequency_auto_extended:
         result["max_frequency_auto_extended"] = True
+    # A collimated (afocal) output: flag it and redirect to the angular tools. The detector
+    # traces rays through the tool slot, so it is skipped (and said so) while that slot is
+    # latched; the MTF answer itself is never refused or nulled for this. Adds keys ONLY when
+    # it fires, so a normal imager's key set is unchanged.
+    if _wedge_recorded(session):
+        result["flags"] = [_COLLIMATED_CHECK_SKIPPED_MSG]
+    else:
+        collimated_flags = _col.collimated_flags(system)
+        if collimated_flags:
+            result["collimated_output"] = True
+            result["flags"] = collimated_flags
     return result
 
 
@@ -432,7 +501,8 @@ GET_MTF_SPEC = ToolSpec(
         "with set_surface_aperture FIRST, so this number is computed on the TRUE "
         "obscured pupil, not the full circle (a central CircularObscuration "
         "min_radius=0, max_radius=R plus an outer CircularAperture forms the "
-        "annulus)."
+        "annulus). On a collimated (afocal) output the result carries collimated_output + a flag. "
+        "messages holds the engine's own messages verbatim (e.g. 'Sampling too low, data inaccurate!')."
     ),
 )
 

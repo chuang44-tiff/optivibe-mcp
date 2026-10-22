@@ -27,8 +27,8 @@ import csv
 import glob
 import math
 import os
-import tempfile
 
+from .._io import exclusive_temp
 from ..tools._image_gate import _is_png
 
 # --------------------------------------------------------------------------- #
@@ -455,12 +455,11 @@ def _build_montage_figure(rows, layout_map, warnings):
 # =========================================================================== #
 def _save_figure(fig, plt, out_dir, name, warnings, paths):
     """Save ``fig`` to ``out_dir/name`` through the temp -> ``_is_png`` gate -> ``os.replace``
-    atomic path. Reaps the mkstemp temp in a finally on EVERY exit. NEVER raises."""
+    atomic path. Reaps the exclusive_temp temp in a finally on EVERY exit. NEVER raises."""
     tmp = None
     try:
         os.makedirs(out_dir, exist_ok=True)   # a missing dir is otherwise a silent no-op.
-        fd, tmp = tempfile.mkstemp(suffix=".png", dir=out_dir)
-        os.close(fd)
+        tmp = exclusive_temp(out_dir, prefix="", suffix=".png")  # bounded O_EXCL; mkstemp would loop on an ACL-denied dir
         fig.savefig(tmp, dpi=120, format="png", bbox_inches="tight")  # tight bounding box.
         _close_figure(plt, fig)               # close BEFORE the gate (leak-safe).
         if _is_png(tmp):

@@ -8,10 +8,9 @@ import hashlib
 import json
 import math
 import os
-import secrets
 import unicodedata
 
-from .._io import safe_exc, safe_repr
+from .._io import exclusive_temp, safe_exc, safe_repr  # noqa: F401 -- exclusive_temp's ONE home is _io; re-exported here
 from ._image_gate import _is_png
 
 REFERENCE_KINDS = ("published", "synthetic", "other")
@@ -284,48 +283,12 @@ def plot_model(points, fields, frequencies, reference, x_units, header):
             "synthetic_banner": SYNTHETIC_BANNER if synthetic else None}
 
 
-def exclusive_temp(d, mkdir=False):
-    """[round 5, HIGH] A private temp FILE (or, ``mkdir=True``, DIRECTORY) in ``d``, created by ONE
-    exclusive call per attempt, at most 3 attempts; returns its path. ``tempfile.mkstemp``/``mkdtemp``
-    RETRY ``PermissionError`` while ``os.access(d, W_OK)`` is True — on Windows W_OK reads only the
-    read-only ATTRIBUTE, not the ACL — up to ``os.TMP_MAX`` (2**31-1) times: a listable-but-ACL-denied
-    folder (``C:\Windows``) hung the call with the engine seat held. Here ``FileExistsError`` (a
-    foreign name, never opened for write, never unlinked) moves to the next attempt; ANY other
-    ``OSError`` stops at once, re-raised naming ``d``; exhaustion raises ``FileExistsError``. The name
-    ``.mtf_vs_field_tmp_<12 hex>`` has NO ``.png`` suffix: no ``.png`` name appears in a user folder
-    before its bytes are gated (``savefig(format="png")`` is explicit). The fd is closed at once;
-    the caller's ``finally`` owns the created path on every exit. A close that fails unlinks the
-    name here first; if that unlink fails too, the raised error NAMES the file left behind, so no exit
-    leaves a file the caller was never told about."""
-    for _ in range(3):
-        name = os.path.join(d, ".mtf_vs_field_tmp_" + secrets.token_hex(6))
-        try:  # the name is created in ONE atomic call (O_EXCL / mkdir) — never re-derived
-            if mkdir:
-                os.mkdir(name)
-            else:
-                fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0))
-                try:
-                    os.close(fd)  # closed at once; the caller's `finally` owns the created path
-                except BaseException as close_exc:  # (0.1.13 E5)
-                    try:  # the name never reaches the caller: reap it HERE
-                        os.unlink(name)
-                    except FileNotFoundError:  # the name is GONE: reaped, never reported as left
-                        pass
-                    except (OSError, ValueError) as reap_exc:  # a reap that fails is DISCLOSED, naming the file left behind
-                        if isinstance(close_exc, Exception):
-                            left = OSError(f"the private temp {name!r} could not be closed or removed and "
-                                           f"was LEFT in place: {safe_exc(reap_exc)}")
-                            left.left_in_place = name  # the caller records it in its cleanup list
-                            raise left from None
-                    raise
-            return name
-        except FileExistsError:
-            continue
-        except OSError as exc:  # PermissionError (the ACL) included: stop NOW, no retry loop
-            err = OSError(f"the directory {d!r} refused a private temp: {safe_exc(exc)}")
-            err.left_in_place = getattr(exc, "left_in_place", None)  # a temp it could not reap
-            raise err from None
-    raise FileExistsError(f"3 random temp names in {d!r} already existed; nothing was created")
+def line_disclosure(model):
+    """The drawn lines of ``model`` for the opt-in envelope block: frequency, orientation, role and x/y,
+    read from the SAME model ``_build_figure`` draws (a missing value is ``None``, never 0)."""
+    return [{"role": ln["role"], "frequency": ln["frequency"], "orientation": ln["orientation"],
+             "x": [v if _finite(v) else None for v in ln["xs"]],
+             "y": [v if _finite(v) else None for v in ln["ys"]]} for ln in model["lines"]]
 
 
 def _close(plt, fig):

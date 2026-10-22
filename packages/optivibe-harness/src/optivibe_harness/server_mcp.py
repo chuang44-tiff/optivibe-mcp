@@ -211,6 +211,7 @@ _CONFIG_REFUSES = frozenset({
     # heavy single-figure analysis (resolve_single_config_selector)
     "analyze_axial_color", "get_mtf", "get_spot", "render_layout",
     "describe_surfaces", "render_ray_fan", "render_field_curvature_distortion",
+    "render_mtf_vs_field",
     # authoring / index (config = a 1-based int)
     "set_config_value", "set_config_variable", "set_current_configuration",
     "add_operand", "add_math_constraint", "remove_configuration",
@@ -347,7 +348,7 @@ HARNESS_INSTRUCTIONS = (
     "- Single seat (N=1): ONE OpticStudio engine, one design at a time. Calls are\n"
     "  serialized; do not assume concurrency.\n"
     "- Lazy engine-open: the seat is taken on the FIRST design-touching call, not at\n"
-    "  startup. Reaping is automatic — you never manage process lifecycle.\n"
+    "  startup. Reaping is automatic; release the seat when done.\n"
     "\n"
     "Trust model (proof, not absence-of-error):\n"
     "- Tools return a uniform envelope and NEVER raise — inspect result.ok and the\n"
@@ -450,7 +451,7 @@ REFERENCE_ADDENDUM = (
 #: MEASURED: Claude Code, live -- the string is cut at exactly this many
 #: characters, mid-word, with no notice to either side. This is a property of the
 #: CLIENT, not of this repo, and it cannot be read from any API: there is no field in
-#: the MCP initialize handshake that reports it. See PROBE-FINDINGS-CONTEXT.md.
+#: the MCP initialize handshake that reports it.
 #:
 #: THE CLIENT VERSION WAS NOT RECORDED AT MEASUREMENT TIME, and is not reconstructed
 #: here -- inventing provenance for a measurement is worse than admitting the gap. So

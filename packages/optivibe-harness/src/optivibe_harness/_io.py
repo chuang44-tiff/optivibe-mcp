@@ -15,7 +15,7 @@ import errno
 import math
 import os
 import re
-import tempfile
+import secrets
 import time
 from datetime import datetime, timezone
 
@@ -179,11 +179,61 @@ def safe_float(value):
     return value
 
 
+def exclusive_temp(d, mkdir=False, prefix=".mtf_vs_field_tmp_", suffix="", keep_fd=False):
+    """[round 5, HIGH] A private temp FILE (or, ``mkdir=True``, DIRECTORY) in ``d``, created by ONE
+    exclusive call per attempt, at most 3 attempts; returns its path. ``tempfile.mkstemp``/``mkdtemp``
+    RETRY ``PermissionError`` while ``os.access(d, W_OK)`` is True -- on Windows W_OK reads only the
+    read-only ATTRIBUTE, not the ACL -- up to ``os.TMP_MAX`` (2**31-1) times: a listable-but-ACL-denied
+    folder (``C:\Windows``) hung the call with the engine seat held. Here ``FileExistsError`` (a
+    foreign name, never opened for write, never unlinked) moves to the next attempt; ANY other
+    ``OSError`` stops at once, re-raised naming ``d``; exhaustion raises ``FileExistsError``. The
+    default name ``.mtf_vs_field_tmp_<12 hex>`` has NO ``.png`` suffix: no ``.png`` name appears in a
+    user folder before its bytes are gated (``savefig(format="png")`` is explicit). A caller that
+    needs a suffix (an engine export keyed on the extension) or its own prefix passes ``prefix=`` /
+    ``suffix=``; the name is ``<prefix><12 hex><suffix>``, still created ``O_EXCL``. The fd is closed
+    at once and the PATH returned; ``keep_fd=True`` (files only) skips the close and returns
+    ``(fd, path)`` for a caller that writes through the descriptor. The caller's ``finally`` owns the
+    created path on every exit. A close that fails unlinks the name here first; if that unlink fails
+    too, the raised error NAMES the file left behind, so no exit leaves a file the caller was never
+    told about."""
+    for _ in range(3):
+        name = os.path.join(d, prefix + secrets.token_hex(6) + suffix)
+        try:  # the name is created in ONE atomic call (O_EXCL / mkdir) -- never re-derived
+            if mkdir:
+                os.mkdir(name)
+            else:
+                fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0))
+                if keep_fd:
+                    return fd, name
+                try:
+                    os.close(fd)  # closed at once; the caller's `finally` owns the created path
+                except BaseException as close_exc:  # (0.1.13 E5)
+                    try:  # the name never reaches the caller: reap it HERE
+                        os.unlink(name)
+                    except FileNotFoundError:  # the name is GONE: reaped, never reported as left
+                        pass
+                    except (OSError, ValueError) as reap_exc:  # a reap that fails is DISCLOSED, naming the file left behind
+                        if isinstance(close_exc, Exception):
+                            left = OSError(f"the private temp {name!r} could not be closed or removed and "
+                                           f"was LEFT in place: {safe_exc(reap_exc)}")
+                            left.left_in_place = name  # the caller records it in its cleanup list
+                            raise left from None
+                    raise
+            return name
+        except FileExistsError:
+            continue
+        except OSError as exc:  # PermissionError (the ACL) included: stop NOW, no retry loop
+            err = OSError(f"the directory {d!r} refused a private temp: {safe_exc(exc)}")
+            err.left_in_place = getattr(exc, "left_in_place", None)  # a temp it could not reap
+            raise err from None
+    raise FileExistsError(f"3 random temp names in {d!r} already existed; nothing was created")
+
+
 def atomic_write_bytes(path, data: bytes) -> None:
     """Atomically write ``data`` to ``path``.
 
     Creates a UNIQUE temp file in the SAME directory via
-    ``tempfile.NamedTemporaryFile`` (so ``os.replace`` is atomic on the same
+    ``exclusive_temp`` (so ``os.replace`` is atomic on the same
     filesystem AND two concurrent writers — even same-process threads — never
     collide on the temp name), flushes, fsyncs (if enabled), then ``os.replace``s
     into place. After the rename the parent directory is best-effort fsynced on
@@ -194,9 +244,11 @@ def atomic_write_bytes(path, data: bytes) -> None:
     path = os.fspath(path)
     directory = os.path.dirname(path) or "."
     # Unique temp name in the SAME dir -> no cross-writer collision, and the
-    # error-path cleanup can only ever touch THIS writer's temp.
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=os.path.basename(path) + ".", suffix=".tmp")
-    # Ownership of the raw mkstemp fd only transfers to os.fdopen's file object
+    # error-path cleanup can only ever touch THIS writer's temp. ``exclusive_temp`` (O_EXCL,
+    # at most 3 attempts, stops at once on a non-collision OSError) replaces ``mkstemp``,
+    # which retries PermissionError on a listable-but-ACL-denied directory ~forever.
+    fd, tmp = exclusive_temp(directory, prefix=os.path.basename(path) + ".", suffix=".tmp", keep_fd=True)
+    # Ownership of the raw exclusive_temp fd only transfers to os.fdopen's file object
     # AFTER os.fdopen succeeds. If os.fdopen itself raises (fd exhaustion), the
     # bare fd would leak — and on Windows a still-open fd blocks os.remove(tmp),
     # leaking the temp file too. So track whether the fd is still ours and close
