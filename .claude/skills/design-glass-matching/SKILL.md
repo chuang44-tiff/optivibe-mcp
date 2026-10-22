@@ -37,8 +37,10 @@ performance, polychromatic RWCE at every field against a control given the same 
    colour step vd at held anomaly. For a monochromatic reason move nd at held vd and anomaly in the direction the
    residual asks (a positive element flattens Petzval with a higher index), and let the trial decide.
 4. **Trial and judge at rest.** `trial_glass_swaps`, up to four sets a call, (sets + 1) × `time_budget_s` ≤ 1800 s. An
-   arm in `open_arms` (dropped, `time_budget`, failed the first-order gate, or a control that hit `time_budget`, when no
-   arm is measured) is unfinished: report it so, never as rejected, and take its `action` if it matters. An arm that stopped by itself had one 50-cycle
+   arm in `open_arms` (dropped, `time_budget`, a first-order value it could not read, or a control that hit
+   `time_budget`, when no arm is measured) is unfinished: report it so, never as rejected, and take its `action` if it
+   matters. A row's `first_order_warning` names a focal length, f-number or NA more than 1 % off the control: the arm is
+   measured and judged as usual, and its report carries the warning beside the decision. An arm that stopped by itself had one 50-cycle
    call and can sit 1–6 % above rest, so judge only re-rested arms: `load_design` the arm's `candidate_path` and the
    control's and run each to rest by the test above, the arms that lead or sit within ~6 % of their control first; an
    arm never re-rested is unconfirmed, not rejected. A decision is one of four words: kept; rejected (re-rested and

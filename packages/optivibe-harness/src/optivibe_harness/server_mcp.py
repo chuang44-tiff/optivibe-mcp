@@ -348,7 +348,7 @@ HARNESS_INSTRUCTIONS = (
     "- Single seat (N=1): ONE OpticStudio engine, one design at a time. Calls are\n"
     "  serialized; do not assume concurrency.\n"
     "- Lazy engine-open: the seat is taken on the FIRST design-touching call, not at\n"
-    "  startup. Reaping is automatic — you never manage process lifecycle.\n"
+    "  startup. Reaping is automatic; release the seat when done.\n"
     "\n"
     "Trust model (proof, not absence-of-error):\n"
     "- Tools return a uniform envelope and NEVER raise — inspect result.ok and the\n"

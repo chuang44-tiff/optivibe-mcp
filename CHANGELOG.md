@@ -34,8 +34,16 @@ glass step, and a new glass-picking demo.
   control; every result lists the swaps not yet measured (`open_arms`, each with the action that
   closes it) and how many glass slots of the lens have been tried (`coverage`).
 
+- **`release_engine` frees the single engine seat.** It closes this server's OpticStudio engine
+  and confirms the process exited; the next harness call reopens one. Save first: the lens in
+  memory is lost. With `kill_others=true` it also kills every other OpticStudio server engine on
+  the machine, busy or not, so the agent asks you before using it; an interactive OpticStudio is
+  never touched. A process that will not exit fails with `engine_release_failed`.
+
 ### Changed
 
+- **The server instructions say to release the seat when done**, instead of "you never manage
+  process lifecycle".
 - **The `design-glass-matching` skill is reworked.** It names the reason first (primary colour,
   secondary colour, or a monochromatic term) and the glass property that moves it, screens every
   glass slot once before going deep, picks candidates by the anomaly, and judges a swap only after
@@ -44,6 +52,10 @@ glass step, and a new glass-picking demo.
 - **The glass-picking demo is replaced.** [demos/glass-picking](demos/glass-picking/README.md)
   now compares the current glass step with OpticStudio's Hammer optimizer on the 10× and 20×
   objectives.
+- **`trial_glass_swaps` no longer refuses a trial whose focal length, F-number or image-space NA
+  ends more than 1 % off the control's.** The trial is measured and compared as usual and its row
+  carries `first_order_warning`, saying which value moved. `first_order_off_control` now means
+  only that a first-order value could not be read.
 - **A derived helper row in a math constraint defaults to weight 0** when another row references
   it, so it no longer pulls on the merit by itself. A weight you state is kept.
 - `verify_beam_path` leaves out `n_surfaces` when a figure is attached.

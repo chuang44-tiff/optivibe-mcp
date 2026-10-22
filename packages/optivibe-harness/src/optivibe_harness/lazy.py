@@ -93,6 +93,11 @@ from .server import Dispatcher, _safe_error_text
 # published file cannot run it — the guarantee is disclosed here, not demonstrated.
 _FORWARDED_OPEN_FAMILIES = ("engine_connect_timeout", "engine_channel_dead")
 
+# Tools that must NEVER trigger the lazy engine-open. ``release_engine`` has no required
+# params, so without this it would count as dispatchable and open an engine just to close
+# it. It is delegated straight to the inner Dispatcher, whose handler reports "not open".
+_NEVER_OPENS_ENGINE = frozenset({"release_engine"})
+
 
 class LazyHarnessDispatcher:
     """Dispatcher-shaped wrapper that opens the ZOS engine on the FIRST harness call.
@@ -300,7 +305,7 @@ class LazyHarnessDispatcher:
         # Mirror server.py:160 — coerce non-dict params before the presence test.
         probe_params = params if isinstance(params, dict) else {}
 
-        # VALIDATE: is this call dispatchable? The ENTIRE
+        # VALIDATE: is this call dispatchable? Dispatchable here means
         # "every required param KEY is present" -- NOT that the values are valid (a
         # ``None`` value still counts; value validation is left to the handler, because
         # the inner dispatch is presence-only too, so a stricter gate here would send a
@@ -319,6 +324,9 @@ class LazyHarnessDispatcher:
                 p in probe_params for p in required
             )
         except Exception:  # noqa: BLE001 — hostile name/params -> NOT dispatchable; KI/SystemExit propagate
+            dispatchable = False
+
+        if dispatchable and tool_name in _NEVER_OPENS_ENGINE:
             dispatchable = False
 
         if dispatchable and not self._session.is_open:

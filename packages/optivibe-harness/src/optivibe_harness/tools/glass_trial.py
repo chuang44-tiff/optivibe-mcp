@@ -116,8 +116,9 @@ _MSG = {
     "geometry": "the geometry audit did not certify the lens (%s)",
     "new_violation": "new clearance violation at surface %s (%s) the control does not have: the "
                      "merit function does not hold it; add the floor and run the trial again",
-    "off_control": "%s is %.2f%% off the control (limit 1%%): the merit function does not hold "
-                   "it; add the constraint and run the trial again",
+    "off_control": "%s is %.2f%% off the control (over 1%%): the merit function does not hold "
+                   "it; the arm is still measured, so judge the comparison with that in mind, or add "
+                   "the constraint and run the trial again",
     "unreadable": "%s could not be read on the %s",
     "first_load": "the checkpoint does not hold the lens as found; first differences: %s",
     "restore_unproven": "the lens could not be proven back at the lens as found (%s)",
@@ -627,9 +628,10 @@ def _control_merit(control):
 
 
 def _gate_first_order(run, vec, control, detail, arm):
-    """The 1% gate. Returns ``(reason, message)`` or None."""
+    """The first-order check. Returns ``(reason, message)`` only when a value cannot be read; a
+    trial more than 1% off the control is still measured and carries ``first_order_warning``."""
     who = "control" if control is None else "trial"
-    table = {}
+    table, warn = {}, []
     for code, key in _GATE_QUANTITIES:
         value = vec.get(key)
         ref = control["vec"][key] if control is not None else None
@@ -642,9 +644,10 @@ def _gate_first_order(run, vec, control, detail, arm):
             reason = "control_not_usable" if control is None else "first_order_off_control"
             return reason, _MSG["unreadable"] % (code, who)
         if pct is not None and pct > _GATE_PCT:
-            detail["first_order"] = table
-            return "first_order_off_control", _MSG["off_control"] % (code, pct)
+            warn.append(_MSG["off_control"] % (code, pct))
     detail["first_order"] = table
+    if warn:
+        arm["first_order_warning"] = "; ".join(warn)
     return None
 
 
@@ -920,6 +923,7 @@ def _trial_row(run, i, entries, res, cvec, cvalue, prediction):
             "offsets_um": {"control": _offsets(cvec) if colour else None,
                            "trial": _offsets(tvec) if colour and status != "not_measured" else None},
             "better": better, "worse": worse, "layout": layout,
+            "first_order_warning": a.get("first_order_warning") if a else None,
             "candidate_path": a["candidate_path"] if a else None,
             "prediction_source": "none" if colour else "explanatory",
             "predicted": None if colour else ((prediction or {}).get("prediction") or {}).get("petzval_sum")}
@@ -1042,7 +1046,10 @@ TRIAL_GLASS_SWAPS_SPEC = ToolSpec(
         "not help. detail last_block_gain_rel is the merit gain over the whole last optimise block, "
         "not one pass. dropped: from the second block on, the trial's merit was over 10% above the "
         "control's and, at its last block's pace, could not reach it within its budget; it is not "
-        "measured. Both early verdicts judge merit, your objective, not the term. In the "
+        "measured. Both early verdicts judge merit, your objective, not the term. "
+        "first_order_warning: the trial's focal length, F-number or image-space NA ended more than "
+        "1% off the control's; the arm is still measured and compared, and the warning says which "
+        "moved. In the "
         "vector isna is the image-space NA, glass_thickness the largest centre "
         "thickness of any glass element. layout gives total track and largest glass thickness for "
         "control and trial, with no better or worse: compare them with the design's own targets. "

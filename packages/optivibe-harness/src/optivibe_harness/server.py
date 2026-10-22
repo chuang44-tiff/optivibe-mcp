@@ -386,6 +386,8 @@ _TOOLS_SLOT_IMPORT_ONLY = {
          "MakeSolveFixed); no opener",
          ("clear_all_variables",)),
         ("opens NOTHING: _preflight is a read", ("dry_run",)),
+        ("closes the session's own engine; it opens nothing and touches no tools slot",
+         ("release_engine",)),
         ("optimize_variable imports _optimize_common for _count_variables only",
          ("clear_variable", "set_variable")),
         ("merit authoring touches the MFE only; _optimize_common._render (:3080) is a "
@@ -558,6 +560,8 @@ _SINGLE_SPEC_MODULES = (
     "optivibe_harness.tools.glass_explain",
     # glass-matching A1: the swap-optimise-measure-restore trial (trial_glass_swaps).
     "optivibe_harness.tools.glass_trial",
+    # Hand the single OpticStudio seat back (release_engine).
+    "optivibe_harness.tools.engine_release",
 )
 # Tool modules exposing a ``TOOL_SPECS`` tuple of several ToolSpecs (lens tier
 # + analysis tier).

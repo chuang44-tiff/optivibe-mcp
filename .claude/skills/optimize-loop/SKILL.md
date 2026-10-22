@@ -317,6 +317,9 @@ Then:
 - **Trust the verdict, not the absence of an error.** A `diverged` run can leave a
   worse design — reload your snapshot; an uncomputable merit needs vignetting + a
   merit rebuild.
+- **Free the seat when the engine work is done.** Save first, then call `release_engine` before the
+  seat passes to another session or run. Its `kill_others: true` kills other sessions' engines, so ask
+  the user first.
 - **Disclose any change of design class** — conics freed, glass substituted, element
   count changed — in the `Design class:` line of the report. Always, even when the
   user did not ask.
