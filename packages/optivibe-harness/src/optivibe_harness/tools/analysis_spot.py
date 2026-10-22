@@ -76,6 +76,7 @@ from .._io import safe_float
 from ..errors import SessionClosedError, ToolParamError, map_dotnet_exception
 from ..server import ToolSpec
 from . import _analysis_common as _ac
+from . import _collimation as _col
 from . import _config_common as _cfg
 from . import _measurement_common as _mc
 from . import _spot_validity as _sv
@@ -394,6 +395,12 @@ def _get_spot_at(session, params):
         out["validity_warning"] = validity["warning"]
     if wave_arg_polychromatic:
         out["wave_arg_polychromatic"] = True
+    # A collimated (afocal) output: flag it and redirect to the angular tools. Adds keys
+    # ONLY when the shared detector fires, so a normal imager's key set is unchanged.
+    collimated_flags = _col.collimated_flags(system)
+    if collimated_flags:
+        out["collimated_output"] = True
+        out["flags"] = collimated_flags
     return out
 
 
@@ -700,7 +707,8 @@ GET_SPOT_SPEC = ToolSpec(
         "unaffected by the sampling; a lens unit it cannot convert is refused as "
         "analysis_units_unconvertible). A field index (or, with per_wave, a wave index) "
         "outside the system's range is refused. Units: um for a mm lens. For chromatic detail "
-        "also see analyze_axial_color / analyze_wavefront. "
+        "also see analyze_axial_color / analyze_wavefront. On a collimated (afocal) output the "
+        "result carries collimated_output + a flag. "
         "OBSCURED PUPILS: on a system with a central obscuration (a Cassegrain "
         "secondary shadow) author a CircularObscuration on the obstructing surface "
         "with set_surface_aperture FIRST, so this number is computed on the TRUE "

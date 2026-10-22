@@ -38,9 +38,10 @@ _SLOTS = {   # operand -> {header: GetOperandValue position}  (headers read from
 class _Refuse(Exception):
     """An expected refusal: an ``error_envelope`` with this family / reason / message."""
 
-    def __init__(self, family, message, reason=None):
+    def __init__(self, family, message, reason=None, extra=None):
         super().__init__(message)
         self.family, self.message, self.reason = family, message, reason
+        self.extra = dict(extra or {})          # further envelope fields, e.g. trial_glass_swaps' rebind
 
 
 def _read(system, code, **named):

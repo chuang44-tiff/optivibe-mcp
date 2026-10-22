@@ -468,7 +468,11 @@ def main():
         # resolver's tier-4 ``cwd/projects`` fallback (which has its own deleted-cwd
         # guard) takes over rather than crashing boot.
         try:
-            session.workspace_root = os.environ.get("OPTIVIBE_WORKSPACE_ROOT") or os.getcwd()
+            # Anchor ONCE here (a relative env value would otherwise name a different
+            # directory after any later chdir, while every cache still hit): the cache
+            # currency predicate stays pure and every consumer sees an absolute path.
+            session.workspace_root = os.path.abspath(
+                os.environ.get("OPTIVIBE_WORKSPACE_ROOT") or os.getcwd())
         except OSError:
             pass  # deleted cwd + no env override -> leave unset (tier-4 fallback)
 

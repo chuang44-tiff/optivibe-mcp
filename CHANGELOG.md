@@ -2,12 +2,77 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.1.17`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.1.18`). Each tag points at the merge
 commit that published that version, and every tag was verified against the four version
 literals in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.18] — 2026-10-22
+
+Clearer reports and stricter refusals across the analysis, edit, solve and glass tools, a reworked
+glass step, and a new glass-picking demo.
+
+### Added
+
+- **`render_mtf_vs_field` takes a `config` parameter** (switch to that configuration, render,
+  restore) and `include_plot_model=true` returns the drawn line data.
+- **`get_mtf` returns the engine's messages** (`messages`, and `engine_messages_unread` when they
+  could not be read) and a `diffraction_limit_series` field. When the analysis slot it needs is
+  held, it skips the diffraction-limit check and says so.
+- **`get_spot` and `get_mtf` flag a collimated output** with `collimated_output: true` and a
+  message.
+- **Edits report what else they removed.** `set_field` (replacing all fields) and `remove_surface`
+  report deleted and renumbered multi-configuration rows (`mce_rows_deleted`); `remove_surface`
+  also lists merit and tolerance rows that name surfaces by number (`by_number_refs`).
+  `serialize_merit` marks a range that ends at the last-surface ceiling (`range_at_ceiling`).
+- **`find_glasses` ranks on the partial-dispersion anomaly**, Pg,F − (0.6438 − 0.001682·vd),
+  as a column, a sort (`sort=pg_f_anomaly`) and a window (`pg_f_anomaly_min` / `_max`), and says
+  when a list was cut (`truncated_note`).
+- **`trial_glass_swaps` has a screen mode.** With `drop=false` no swap is cut behind its
+  control; every result lists the swaps not yet measured (`open_arms`, each with the action that
+  closes it) and how many glass slots of the lens have been tried (`coverage`).
+
+### Changed
+
+- **The `design-glass-matching` skill is reworked.** It names the reason first (primary colour,
+  secondary colour, or a monochromatic term) and the glass property that moves it, screens every
+  glass slot once before going deep, picks candidates by the anomaly, and judges a swap only after
+  the swap and its control are both re-optimized to rest. `optimize-loop` now calls a lens at rest
+  only when a call of 50 or more cycles gains under about 0.5 % of the merit, twice in a row.
+- **The glass-picking demo is replaced.** [demos/glass-picking](demos/glass-picking/README.md)
+  now compares the current glass step with OpticStudio's Hammer optimizer on the 10× and 20×
+  objectives.
+- **A derived helper row in a math constraint defaults to weight 0** when another row references
+  it, so it no longer pulls on the merit by itself. A weight you state is kept.
+- `verify_beam_path` leaves out `n_surfaces` when a figure is attached.
+- A relative workspace root is made absolute against the launch folder at startup, and
+  `save_candidate` audit rows carry `figure_scoreable`.
+- `analyze_strehl` and `analyze_wavefront` now say the best-focus restore holds to a relative
+  tolerance of 1e-9, not exactly.
+
+### Fixed
+
+- **Operand slots out of range are refused.** `get_operand` and the operand reader used to
+  return the engine's silently clamped value for a surface, wavelength or field number past the
+  end; they now refuse (`operand_param`) and name the legal range.
+- **`analyze_axial_color` keeps its result when the focal-shift curve is bad.** A non-finite
+  value in the curve used to fail the call (`analysis_empty`) or return `"nan"` strings; now the
+  scalar result is kept, the curve is dropped, and `axial_color_curve_degraded` says why.
+- **A folder that refuses writes no longer hangs a figure or a save.** Every temporary file the
+  tools create in a caller's folder is bounded; an unwritable folder now gets a refusal naming it.
+- **`surface_solve` / `set_solve` fail closed** when a fault after the write leaves the
+  relation unreadable (`relation_semantics_unavailable`), and the restore message says "not
+  verified" when equality could not be decided.
+- **`record_findings` refuses a finding on a figure that cannot be scored**
+  (`finding_figure_unscoreable`), instead of accepting a judgement nothing could later check.
+- **`freeze_semidiameters`** reports `active_configuration_restored` as null when the
+  configuration could not be read back, instead of claiming it was restored.
+- **`trial_glass_swaps` names every catalog clash in one refusal**, with a `rebind` list, instead
+  of stopping at the first and needing one resubmit per clash.
+- **`lookup_glass` and `find_glass_pair` refuse a catalog made only of dots** (`.`, `..`, `.AGF`)
+  as a parameter error, instead of reporting that no glass matched.
 
 ## [0.1.17] — 2026-10-20
 
@@ -261,6 +326,7 @@ A housekeeping release: no new tools.
 
 - Initial public release of optivibe-mcp.
 
+[0.1.18]: ../../compare/v0.1.17...v0.1.18
 [0.1.17]: ../../compare/v0.1.16...v0.1.17
 [0.1.16]: ../../compare/v0.1.15...v0.1.16
 [0.1.15]: ../../compare/v0.1.14...v0.1.15

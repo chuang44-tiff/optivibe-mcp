@@ -756,12 +756,105 @@ def evaluate_over_configs(session, config, grader_fn):
     return result
 
 
+# --------------------------------------------------------------------------- #
+# MCE rows the ENGINE deletes as a side effect of another edit (one shape, two tools).
+# --------------------------------------------------------------------------- #
+# Measured: deleting a field deletes every MCE row that names it and renumbers the later
+# rows; removing a surface deletes the MCE rows whose surface parameter is that surface.
+# The edit tools snapshot the MCE before and call ``mce_rows_deleted`` after, so the
+# caller sees which rows went and where the survivors moved.
+
+def mce_snapshot(system):
+    """The MCE rows as plain dicts (row, operand, param1-3, per-config values), or ``None``.
+
+    Fail-open: any fault reading the MCE (or one unreadable row) answers ``None``, never
+    a raise and never a partial list, so a caller reports "not read" rather than a guess.
+    """
+    try:
+        from .mce_config import _describe_row   # local: mce_config imports this module
+        n_rows = int(system.MCE.NumberOfOperands)
+        n_configs = _mc.number_of_configurations(system)
+        rows = [_describe_row(system, r, n_configs) for r in range(1, n_rows + 1)]
+    except Exception:  # noqa: BLE001 - an unreadable MCE is reported, not raised
+        return None
+    if any("error" in r for r in rows):
+        return None
+    return [{"row": r["row"], "operand": r["operand"], "param1": r["surface"],
+             "param2": r["param"], "param3": r["param3"], "values": r["values"]}
+            for r in rows]
+
+
+def _mce_alignment(before, after, moved=None):
+    """Pair surviving rows of ``before`` with ``after`` in order -> ``{old_index: new_index}``.
+
+    A row survives as the same operand with the same per-config values; its parameters may
+    have been renumbered. Maximum-weight in-order matching, so two identical-looking rows
+    are told apart by their parameters: a pair whose parameters are the ones the edit is
+    known to leave the row with outweighs any other. ``moved(row)`` is that expectation (a
+    ``(param1, param2, param3)`` tuple, or ``None`` for a row the edit is known to delete);
+    without it a pair with unchanged parameters is preferred.
+    """
+    nb, na = len(before), len(after)
+    score = [[0] * (na + 1) for _ in range(nb + 1)]
+
+    def weight(b, a):
+        if b["operand"] != a["operand"] or b["values"] != a["values"]:
+            return 0
+        want = (b["param1"], b["param2"], b["param3"]) if moved is None else moved(b)
+        got = (a["param1"], a["param2"], a["param3"])
+        return 3 if want == got else 1
+
+    for i in range(nb - 1, -1, -1):
+        for j in range(na - 1, -1, -1):
+            w = weight(before[i], after[j])
+            best = max(score[i + 1][j], score[i][j + 1])
+            score[i][j] = max(best, w + score[i + 1][j + 1]) if w else best
+    pairs, i, j = {}, 0, 0
+    while i < nb and j < na:
+        w = weight(before[i], after[j])
+        if w and score[i][j] == w + score[i + 1][j + 1]:
+            pairs[i] = j
+            i, j = i + 1, j + 1
+        elif score[i][j] == score[i + 1][j]:
+            i += 1
+        else:
+            j += 1
+    return pairs
+
+
+def mce_rows_deleted(system, before, moved=None):
+    """Compare the MCE now against ``before`` (a ``mce_snapshot``) -> the report block.
+
+    Keys: ``state`` (``unchanged`` / ``rows_deleted`` / ``unverified`` / ``not_read``),
+    ``rows_before``, ``rows_after``, ``deleted`` (each: row, operand, param1, param2,
+    param3, values, as read before the edit) and ``renumbered`` (``{from, to}`` for each
+    surviving row whose row number moved). ``unverified`` means a row now present could
+    not be matched to one read before. ``not_read`` carries only ``state``. ``moved`` is the
+    optional per-row expectation ``_mce_alignment`` takes.
+    """
+    after = mce_snapshot(system)
+    if before is None or after is None:
+        return {"state": "not_read"}
+    pairs = _mce_alignment(before, after, moved)
+    deleted = [before[i] for i in range(len(before)) if i not in pairs]
+    moved = [{"from": before[i]["row"], "to": after[j]["row"]}
+             for i, j in sorted(pairs.items()) if before[i]["row"] != after[j]["row"]]
+    if len(pairs) != len(after):
+        state = "unverified"
+    else:
+        state = "rows_deleted" if deleted else "unchanged"
+    return {"state": state, "rows_before": len(before), "rows_after": len(after),
+            "deleted": deleted, "renumbered": moved}
+
+
 __all__ = [
     "resolve_config_selector",
     "resolve_single_config_selector",
     "with_configuration",
     "evaluate_over_configs",
     "reconcile_visited",
+    "mce_snapshot",
+    "mce_rows_deleted",
     "safe_number_of_configurations",
     "safe_current_configuration",
     "strict_number_of_configurations",

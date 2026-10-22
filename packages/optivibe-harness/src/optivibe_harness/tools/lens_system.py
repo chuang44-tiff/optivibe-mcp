@@ -95,6 +95,7 @@ def set_field(session, params):
     verified, so a silently-dropped or distorted field write raises
     ``SurfaceWriteError`` instead of returning ``ok``.
     """
+    from . import _config_common as _cc
     from . import _lens_common as _c
 
     system = session.system
@@ -151,6 +152,9 @@ def set_field(session, params):
             _coerce_triple(f, length=3, label="fields entry") for f in new_fields
         ]
         original_count = int(fields.NumberOfFields)
+        # The engine deletes every MCE row that names a deleted field, so read the MCE
+        # first and report what is gone afterwards (the other paths keep every row).
+        mce_before = _cc.mce_snapshot(system)
         for x, y, w in triples:
             fields.AddField(x, y, w)
         # Remove the pre-existing fields (indices 1..original_count) from the top
@@ -264,6 +268,7 @@ def set_field(session, params):
     # to re-author vignetting (set_vignetting) AFTER a field-set replace.
     if new_fields is not None:
         result["vignetting_reset"] = True
+        result["mce_rows_deleted"] = _cc.mce_rows_deleted(system, mce_before)
     # Gap 9: a single-field PARTIAL in-place edit (``index`` given) PRESERVES every
     # field's vignetting BY CONSTRUCTION (no AddField/DeleteFieldAt). Stamp the inverse
     # disclosure so the agent SEES a weight-only edit kept the vignetting, plus which

@@ -5,37 +5,61 @@ description: Use as the finishing step on a lens whose form is built and whose p
 
 # Glass matching: the finishing step
 
-Build the form and correct the third-order aberrations with optimize-loop first. Glass matching comes last: it
-uses the secondary colour or Petzval term that is left to find a wavefront gain. It does not rescue an unfinished
-design, and an early swap pulls attention from the form. Start only when the lens sits at a steady local minimum:
-a full `optimize` stops by itself with no real gain. A swap measured on a lens that is still moving tells you nothing.
+Build the form and correct the third-order aberrations with optimize-loop first. Glass comes last, on a lens at rest
+by optimize-loop's test (two calls of 50+ cycles each gain under ~0.5 % of the merit; a short call that reads `stable`
+is not rest): a swap measured on a lens still moving tells you nothing. Glass is judged on the merit the form was
+finished on: add, remove or re-weight no row here, since a changed merit starts a new form step. The goal is
+performance, polychromatic RWCE at every field against a control given the same optimization; colour terms only point.
 
-1. **Read what is left.** Call `explain_glass_swaps` with the colour term and no pair: the refusal lists every
-   wavelength's offset from the primary. Then call it with the pair that carries what is left, or with `petzval`, to
-   see which elements carry it. Element values are signed first-order shares that often cancel: use them to locate carriers, never to rank glasses. Start with the largest carrier.
-2. **Pick a few candidates for one carrier** with a different dispersion, not a similar glass; the index is free, since
-   the trial re-optimizes. With `find_glasses`, pass no `nd_min` or `nd_max`: shorten the list with the partial
-   dispersion and `limit` instead. If `matched` is more than the rows returned, narrow the window, raise `limit`, or
-   sort by `delta_pg_f` (ascending for a flint, descending for a crown) so the unusual-dispersion glasses come first,
-   before you pick. A null ΔPg,F means the stored value was implausible (beyond ±0.1) and sorts last; treat it as
-   unknown, not as normal dispersion.
-   Move the Abbe number a step from the carrier's own, not a leap; for secondary colour look at the partial
-   dispersion (`find_glass_pair`, `lookup_glass` with name and catalog). If single swaps keep being re-balanced away,
-   trial a pair or triple on different elements as one set: a pair whose members are each worse alone is never found
-   one swap at a time (slower, so not the first try).
-3. **Trial them** with `trial_glass_swaps`, at most four sets per call (`require_free_stop=false` if the stop sits on
-   a glass vertex). A trial that stopped by itself or settled is a measurement; a dropped one trailed its control
-   and is out. A time-budget stop: rerun it with more time if it leads its control, or if it is on the largest
-   carrier. The goal is performance: judge a swap on the polychromatic wavefront error at every field, against its
-   control. The colour term points to the carrier; it is not the goal. Keep a swap that improves the fields failing
-   the target while every field that passes still passes, and that costs no other target: check track and
-   thickness. The trial does not read working distance: read it yourself.
+1. **Find the reason, then the lever.** At every stated field read the polychromatic RWCE (`get_operand`, ring 6,
+   wave 0) and each single wave at the image plane (`analyze_wavefront` at that field, its `at_image_plane` rows).
+   Name what the pattern shows: poly well above every single wave is primary colour, the lever is Abbe number; one
+   band end far worse than the other is secondary colour, the lever is partial dispersion; every wave about as poor
+   as poly is monochromatic, the lever is index at similar dispersion (Petzval when it is field sag with no colour
+   spread). Several can hold at once (the 10x seed shows both colour patterns): say which fields show which. This
+   names a property, not an element; the element comes from the screen. `explain_glass_swaps` shares locate carriers
+   and never rank them (on 10x the largest share, S15, was never the lever).
+2. **Screen every slot once, then go deep.** On the rested lens, one set per slot (each member of every cemented
+   group, every single), four sets a call at the default budget, with `drop=false` so no arm is cut behind its control.
+   Each call returns `coverage` (slots at rest k of N, open, untried) and `open_arms` (every arm not measured, with the
+   action that closes it): report that count, and every open or untried slot as still open. `coverage` resets on any
+   non-glass change to the lens and does not see vignetting; it informs, it does not judge. The one-swap screen is what found the 10x lever: S1 −26.9 %, S2 −13.4 % with
+   Hammer's glasses, the other measured singles −2.3 % or worse. Then go deep where a slot moved.
+3. **Pick candidates by the lever.** `find_glasses` with `sort=pg_f_anomaly` ranks on the anomaly
+   pg_f − (0.6438 − 0.001682·vd) (column `pg_f_anomaly`; window `pg_f_anomaly_min`/`_max`); a pg_f sort orders by vd.
+   Rank only on a list with no `truncated_note`: narrow the vd and anomaly window rather than raise `limit` (15 rows of
+   612 hid S-NBH59, the best S1 single; vd 60–100 matches 822); if you rank from a cut list anyway, say so and name
+   the cut. One glass can appear once per catalog: count it once
+   by name. For secondary colour push the anomaly the corrective way, down for the flint
+   (the lower-vd member) and up for the crown, whatever sign each has today: near the incumbent's vd on the screen,
+   wider toward the anomalous families when deep (N-PK51, +14 in vd, was the best 10x S2 single); let nd follow (both
+   S2 winners sat lower in nd), and at equal anomaly prefer the higher index (26.9 % against 14.7 % on S1). For primary
+   colour step vd at held anomaly. For a monochromatic reason move nd at held vd and anomaly in the direction the
+   residual asks (a positive element flattens Petzval with a higher index), and let the trial decide.
+4. **Trial and judge at rest.** `trial_glass_swaps`, up to four sets a call, (sets + 1) × `time_budget_s` ≤ 1800 s. An
+   arm in `open_arms` (dropped, `time_budget`, failed the first-order gate, or a control that hit `time_budget`, when no
+   arm is measured) is unfinished: report it so, never as rejected, and take its `action` if it matters. An arm that stopped by itself had one 50-cycle
+   call and can sit 1–6 % above rest, so judge only re-rested arms: `load_design` the arm's `candidate_path` and the
+   control's and run each to rest by the test above, the arms that lead or sit within ~6 % of their control first; an
+   arm never re-rested is unconfirmed, not rejected. A decision is one of four words: kept; rejected (re-rested and
+   behind its control, or a target lost); screened (measured once, never re-rested); not measured (in `open_arms`).
+   Reload the screening lens before the next trial call. Keep a swap
+   that improves the failing fields (when all pass: the worst field, and the merit) while every passing field still
+   passes and no other target is lost: track, thickness, and working distance, which the trial does not read.
    `trial_glass_swaps` (which edits the lens while it runs, then restores it) and `substitute_glass` may be held behind a
    permission rule that asks the user first. If a call is denied, do not work around it: report the sets you would trial,
    or the swap you would keep, and stop.
-4. **Go round again.** A round tries the carriers in order on one lens and ends when a swap is kept or every carrier
-   from step 1 has been tried; after a keep, start the next round on the kept lens. Stop when a round keeps nothing,
-   or when the best swap so far moved the wavefront only a small part of what the target needs: then the limit is
-   the form, so say so. Then a final `optimize`, and check every target.
-5. **Report** the carriers, the candidates, the wavefront of each trial beside its control at every field, and the
-   decision. For a kept swap, also give the on-axis wavefront and the field sag before and after.
+5. **After a keep**, re-try the kept slot's cemented partner on the new lens first, then the kept slot, then pairs
+   from the screen's leading slots. A deep round of one or two sets is not a search: keep going while the brief's
+   time allows (runs that stopped at two combinations used a third of the hour). Stop when every slot has a measured
+   arm and a deep round keeps nothing. A form-limit or exhausted verdict quotes the last `coverage` summary line and
+   needs it to read open none, untried none on the final lens; otherwise the verdict is "stopped with N open: S…"
+   (both 20x runs so far claimed a form limit with the open slots printed in front of them). If, with the screen measured, the best rested swap moved the worst field only a
+   small part of what the target needs, hand the form back to optimize-loop for one attempt within what the brief
+   allows, run to rest, re-screen the slots that moved, and judge again: a target met, a search exhausted within the
+   brief, and a form limit are three different reports; say which, and why. Run the final lens to rest.
+6. **Clock and report.** No tool tells the time: sum the optimizer's `wall_time_s` (each `optimize` envelope; a
+   trial's blocks under `detail`) and report it as the measured subtotal, total elapsed time as unavailable, never a
+   guess. Report per slot the reason, lever, candidates, and each trial beside its control at every field where
+   measured, else "not measured"; every unfinished arm by name; the decision; and for a keep the on-axis wavefront
+   and field sag before and after.

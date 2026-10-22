@@ -80,11 +80,10 @@ seed: four STRH field rows took 14-30+ min a call and crashed the PC; per-field 
 The plan is yours to revise along the way: after each stage re-read every spec item and re-rank what is left --
 a spec that came free, one that got harder, a better order. Say what changed and why.
 
-**Do not wait on a run that is not promising.** If one call (about 20 cycles) has not moved the measured targets,
-whether it ended at rest (`gain_below_threshold`) or on `pass_limit` / `time_budget` with a small
-`last_pass_improvement_pct`, do not call `optimize` again: change the merit or the start. Run on to rest only the
-runs that are winning. A right form moves fast and settles fast; a run left to grind tends to sink into a poor local
-minimum.
+**Rest takes budget.** A short call can stop by itself (`gain_below_threshold`) while the lens is still moving.
+Measured: a 10-cycle call read `stable` after one pass with 7-21 % of the merit still to gain, and a single 50-cycle
+call stopped up to 6 % short. Call a lens at rest only when a call of at least 50 cycles gains under about 0.5 % of
+the merit, confirmed by a second such call. Compare, keep or reject a form, a stage or a glass swap only at rest.
 
 **The craft is the weights.** Normally one merit for the walk-in; progress is chiefly re-weighting it.
 - Image terms: per-field polychromatic RWCE (ring 6, wave 0, one hy per stated field, target 0), or a `build_merit`
@@ -99,16 +98,15 @@ minimum.
   barely moves the failing reading, the weights are done: diagnose.
 
 **Diagnose before a glass move or a new constraint.** At the failing field compare polychromatic RWCE (wave 0)
-with each single-wave RWCE. Poly well above every single wave is colour: lateral if it grows with field
-(`analyze_lateral_color`; the lever is glass where the chief ray is high relative to the marginal ray -- in an
-objective, the elements nearest the specimen), axial if the band-edge waves are poor on axis too (anomalous-dispersion
-glass in the strong positives). Otherwise read field curvature and astigmatism; the levers are air spacings and power
-balance. A forced flat field made a colour-limited edge worse. Before you name a limiting aberration or launch an
-operand-targeted `optimize`, run `design-aberration-review`: it shows how the aberrations are balanced, so you do not
-chase one operand. Glass comes last: build the form and correct the third-order aberrations first. When the lens
-sits at a steady local minimum and secondary colour or field curvature is what remains, run `design-glass-matching`
-as the finishing step. Steady means a full `optimize` stopped by itself, and Strehl and wavefront were read at every
-field after it.
+with each single-wave RWCE. Poly well above every single wave, or one band-end wave far worse than the others, is
+colour: lateral if it grows with field (`analyze_lateral_color`), axial if the band-edge waves are poor on axis too;
+which element carries it is found by `design-glass-matching`'s screen, not by its position. Otherwise read field
+curvature and astigmatism; the levers are air spacings and power balance. A forced flat field made a colour-limited
+edge worse. Before you name a limiting aberration or launch an operand-targeted `optimize`, run
+`design-aberration-review`: it shows how the aberrations are balanced, so you do not chase one operand. Glass comes
+last: build the form and correct the third-order aberrations first. When the lens is at rest ("Rest takes budget")
+and secondary colour or field curvature is what remains, run `design-glass-matching` on the unchanged merit. When it
+hands the form back, take it up here for one attempt within the brief, then return to glass and judge again.
 
 **Hard rules.**
 1. STRH never sits in the merit at an `optimize`; RWCE drives. Read Strehl at a stage end with
@@ -118,8 +116,9 @@ field after it.
    at weight 0 (a measured operand a bound reads, such as TOTR under OPLT, stays at weight 0).
 2. Bound every call: the first at `cycles=10`, later ones sized from the envelope's `wall_time_s`. A DLS/OD call
    stops at its time budget (`time_budget_s`, default 120 s) and keeps the partial result: when `budget_reached` is
-   true the lens is NOT converged, whatever the verdict reads, so call `optimize` again to continue. If repeated
-   stops gain little, change the merit or the variables rather than raise the budget.
+   true the lens is NOT converged, whatever the verdict reads, so call `optimize` again to continue. Give the run
+   enough budget to reach rest ("Rest takes budget") before changing the merit or the variables; if that budget is
+   not available, report the lens as unfinished.
 3. Every stage ends with `check_clearance`, a `save_candidate` under one `design_name`, and a stage review
    (`design-vision-review` with that candidate's seq). The review is advice; the readings decide.
 4. A stage you cannot reach after weights, a diagnosis and trial moves is the REPORTED LIMIT: reload the last good
@@ -310,6 +309,8 @@ Then:
   Re-authoring the merit (or freeing different variables) and running again is normal
   iterative design and is expected; re-running the *same* setup to squeeze out cycles
   is not.
+- **Give a run the budget to reach rest** ("Rest takes budget", under "Walk in a hard target"); a stop
+  after a short call is not convergence, and the second call that confirms rest is not squeezing out cycles.
 - **An `improved` verdict is not proof the lens is sane.** It means the merit fell.
   Confirm the geometry with `check_clearance` / `get_first_order` before you build on
   the result — a mis-authored operand can score a destroyed design well.

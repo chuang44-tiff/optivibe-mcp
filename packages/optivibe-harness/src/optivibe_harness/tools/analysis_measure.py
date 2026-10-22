@@ -378,6 +378,13 @@ _BEST_FOCUS_LIMITS = (
     "refocus first), or "
     "best_focus_thickness_write_not_taken. "
 )
+# What restore_verified:true establishes. Served in both tool descriptions.
+_BEST_FOCUS_RESTORE = (
+    "restore_verified:true means the back-airgap thickness was restored to within a "
+    "relative tolerance of 1e-9 (absolute 1e-9), not bit-exactly, so a residue of a few "
+    "floating-point steps can remain; a restore worse than that gives "
+    "restore_verified:false and a mutation_warning. "
+)
 # AXCL<->curve agreement tolerance (mm) for the full-curve consistency assert (D7).
 _AXCL_CURVE_TOL_MM = 1e-3
 # What the sign of ``f_minus_c_shift_mm`` means. Served in the envelope.
@@ -1089,7 +1096,9 @@ def analyze_strehl(session, params):
     (default True) may be False for a pure read-only current-plane call (no
     mutation). The best-focus block runs a per-wave back-airgap scan maximizing
     STRH (= minimizing RWCE) and ALWAYS restores; a restore that does not verify
-    raises a loud ``mutation_warning``. Never raises past the handler.
+    raises a loud ``mutation_warning``. "Verify" means restored to within
+    ``rel_tol=1e-9`` (``abs_tol=1e-9``), NOT bit-exact: ``restore_verified:True`` can
+    coexist with a few-ULP residue in the lens data. Never raises past the handler.
 
     ``field`` (default 1) is the field NUMBER to read (measured: STRH Field=0 == Field=1,
     whatever field 1's coordinates are); every success result carries ``field_evaluated``
@@ -1316,7 +1325,9 @@ def analyze_wavefront(session, params):
     -> ``measurement_param``, NEVER clamped. RWCE = RMS-to-centroid ("the RMS",
     piston+tilt removed), RWRE = RMS-to-chief (piston only); both reported + labeled
     in waves. PV is unavailable (no PVCE/PVRE operand) — reported as such, never
-    fabricated from RMS. Never raises past the handler.
+    fabricated from RMS. The best-focus restore is verified to ``rel_tol=1e-9``
+    (``abs_tol=1e-9``), NOT bit-exact: ``restore_verified:True`` can coexist with a
+    few-ULP residue. Never raises past the handler.
 
     ``hx``/``hy`` (default 0, 0 = on-axis) are the NORMALIZED field coordinates to read,
     each in [-1, 1] (outside is refused, never clamped); the headline is that field's
@@ -1697,34 +1708,49 @@ def _color_wave_refusal(tool_name, problem):
 
 
 def _focal_shift_curve(system):
+    """Two-value view of ``_read_focal_shift_curve``: ``(points, shift_at)``."""
+    points, shift_at, _malformed = _read_focal_shift_curve(system)
+    return points, shift_at
+
+
+def _curve_degraded_flag(what):
+    """The ONE ``axial_color_curve_degraded`` disclosure: the scalar<->curve check was not run."""
+    return (
+        f"axial_color_curve_degraded: the FocalShiftDiagram {what}; the scalar<->curve "
+        "agreement check was NOT run (the scalar itself is unaffected)")
+
+
+def _read_focal_shift_curve(system):
     """Read the FocalShiftDiagram curve (X=µm, Y=mm) via GetDataSeries(0) (locked D7).
 
     Opens ``AnalysisIDM.FocalShiftDiagram`` through ``New_Analysis`` + the L22
     ``_run_analysis`` reaper, reads series 0's X (1-D µm) / Y (2-D [n,1] mm) arrays,
-    and returns ``(points, shift_at)`` where ``points`` is ``[[um, mm], ...]`` and
+    and returns ``(points, shift_at, malformed)`` where ``points`` is ``[[um, mm], ...]`` and
     ``shift_at(um)`` linearly interpolates the shift (mm) at a wavelength. Returns
-    ``(None, None)`` on any empty/odd result (the caller degrades — the scalar AXCL
-    is still returned). NEVER raises past here.
+    ``(None, None, False)`` on any empty/odd result (the caller degrades — the scalar AXCL
+    is still returned). ``(None, None, True)`` when the curve CAME BACK but a grid X or a
+    shift Y is not a finite number: the caller drops the curve and discloses that the
+    scalar<->curve agreement check was not run. NEVER raises past here.
     """
     try:
         idm = _amtf._analysis_idm(system, "FocalShiftDiagram")
         analysis = system.Analyses.New_Analysis(idm)
     except Exception:  # noqa: BLE001 — unavailable analysis -> degrade (no curve)
-        return None, None
+        return None, None, False
     try:
         with _ac._run_analysis(analysis) as results:
             if results is None:
-                return None, None
+                return None, None, False
             n_series = int(getattr(results, "NumberOfDataSeries", 0) or 0)
             if n_series <= 0:
-                return None, None
+                return None, None, False
             ds = results.GetDataSeries(0)
             x_arr = ds.XData.Data
             y_arr = ds.YData.Data
             xs = _ac._marshal_array(x_arr)        # 1-D [n] µm
             ys = _ac._marshal_array(y_arr)        # 2-D [n, 1] mm
     except Exception:  # noqa: BLE001 — empty/odd curve -> degrade (no curve)
-        return None, None
+        return None, None, False
     # Flatten the [n, 1] Y into a shift list; pair with X.
     # ROUND-13 -- A LENGTH MISMATCH IS AN "ODD RESULT", NOT SOMETHING TO TRUNCATE.
     # ``range(min(len(xs), len(ys)))`` silently DISCARDED the surplus: 3 X against 2 Y
@@ -1733,7 +1759,7 @@ def _focal_shift_curve(system):
     # number derived from a curve the engine never returned. This function's own
     # contract promises ``(None, None)`` on ANY empty/odd result — so refuse.
     if len(xs) != len(ys):
-        return None, None
+        return None, None, False
     points = []
     for i in range(len(xs)):
         yi = ys[i]
@@ -1745,7 +1771,13 @@ def _focal_shift_curve(system):
     # Kept as a belt — it costs one branch and the invariant it protects is
     # load-bearing (``shift_at`` indexes ``pts[0]`` / ``pts[-1]`` unguarded).
     if not points:
-        return None, None
+        return None, None, False
+    # A non-finite X or Y (safe_float renders it as the string "nan"/"inf") makes the range
+    # comparison below raise -- which the never-raise wrapper used to net into
+    # ``analysis_empty`` ("no data") when the truth is "the curve came back malformed".
+    # Validate the WHOLE curve before it is used: drop it, keep the scalar, and say so.
+    if not all(_finite_num(v) for p in points for v in p):
+        return None, None, True
     # A grid that is not STRICTLY ascending is an ODD RESULT under
     # this function's contract -- refuse it. shift_at clamps at the ENDPOINTS while the
     # range guard takes the EXTENT (those agree only on an ascending grid), a duplicate X
@@ -1755,7 +1787,7 @@ def _focal_shift_curve(system):
     # descending and duplicate entry. Not established for other designs, settings or
     # engine versions -- this refusal is what covers them.
     if any(points[i][0] >= points[i + 1][0] for i in range(len(points) - 1)):
-        return None, None
+        return None, None, False
 
     def shift_at(um):
         # Linear interpolation on the (strictly ascending — enforced above) X grid.
@@ -1772,7 +1804,7 @@ def _focal_shift_curve(system):
                 return y0 + frac * (y1 - y0)
         return pts[-1][1]
 
-    return points, shift_at
+    return points, shift_at, False
 
 
 def _single_config_selector(session, params, tool_name):
@@ -1880,8 +1912,10 @@ def _analyze_axial_color_at(session, params):
     }
 
     if full:
-        points, shift_at = _focal_shift_curve(system)
-        if points is None:
+        points, shift_at, malformed = _read_focal_shift_curve(system)
+        if malformed:
+            flags.append(_curve_degraded_flag("curve holds non-finite wavelength or shift values"))
+        elif points is None:
             flags.append("FocalShiftDiagram curve unavailable (returning the scalar only)")
         else:
             result["curve"] = {
@@ -1925,10 +1959,8 @@ def _analyze_axial_color_at(session, params):
                 # silent skip is indistinguishable from a check that passed.
                 if not _finite_num(curve_fc):
                     curve_fc = None
-                    flags.append(
-                        "axial_color_curve_degraded: the FocalShiftDiagram values at the "
-                        "resolved wavelengths are not finite numbers; the scalar<->curve "
-                        "agreement check was NOT run (the scalar itself is unaffected)")
+                    flags.append(_curve_degraded_flag(
+                        "values at the resolved wavelengths are not finite numbers"))
             if curve_fc is not None and isinstance(raw, (int, float)):
                 if not math.isclose(
                     abs(curve_fc), abs(float(raw)), rel_tol=1e-2,
@@ -2826,7 +2858,7 @@ ANALYZE_STREHL_SPEC = ToolSpec(
         "image plane only; it includes lateral colour, so it is not a weighted mean of the "
         "per-wavelength values. "
         "Gotcha: the loaded-plane Strehl is lower than the best-focus Strehl — do not "
-        "conflate them. " + _BEST_FOCUS_LIMITS +
+        "conflate them. " + _BEST_FOCUS_LIMITS + _BEST_FOCUS_RESTORE +
         "OBSCURED PUPILS: on a system with a central obscuration (a Cassegrain "
         "secondary shadow) author a CircularObscuration on the obstructing surface "
         "with set_surface_aperture FIRST, so this number is computed on the TRUE "
@@ -2850,7 +2882,7 @@ ANALYZE_WAVEFRONT_SPEC = ToolSpec(
         "hx/hy are normalized field coordinates (default 0,0 = on-axis; hy=1 = full field "
         "along y), each in [-1, 1]; field_evaluated in the result says which field was "
         "read, and the best-focus plane is the on-axis RWCE minimum whatever the field "
-        "(focus_basis). " + _BEST_FOCUS_LIMITS +
+        "(focus_basis). " + _BEST_FOCUS_LIMITS + _BEST_FOCUS_RESTORE +
         "PV is unavailable (no PV operand) — read it from a Wavefront-Map/Zernike "
         "analysis instead."
     ),

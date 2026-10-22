@@ -287,7 +287,8 @@ _RECIPE_VERSION = 1
 # OPTIONAL ``value_at_capture`` sibling ``serialize_merit`` may emit is tolerated on
 # apply (it is NEVER replayed); it is included so a round-tripped recipe re-applies.
 _OPERAND_KEYS = frozenset(
-    {"type", "params", "refs", "target", "weight", "value_at_capture"}
+    {"type", "params", "refs", "target", "weight", "value_at_capture",
+     "range_at_ceiling"}
 )
 
 # A structural-noise floor / wizard-spacer row: its ``TypeName`` is the
@@ -378,6 +379,12 @@ def _serialize_with_rowmap(session, params):
     # serialize is byte-identical to before (the skip never fires).
     n_configs = _ccfg.safe_number_of_configurations(system)
 
+    # A surface-range operand whose upper end sits on the engine's ceiling (N-2) cannot
+    # be told apart, once read back, from one the engine clamped down to it (it rewrites
+    # an out-of-range upper end at the first evaluation and keeps no record). The
+    # ceiling is resolved ONCE; ``None`` (an unreadable surface count) flags nothing.
+    range_ceiling = _oc.last_constrainable_surface(_oc._resolve_last_surface(system))
+
     operands = []
     # the recipe index of an operand IS its append position; a structural/skipped
     # row gets NO entry, so ``live_to_index.get(skipped_row) -> None`` (the "skipped"
@@ -463,6 +470,13 @@ def _serialize_with_rowmap(session, params):
             entry["target"] = target
             entry["weight"] = weight
             entry["value_at_capture"] = value  # human diffing only; NEVER replayed.
+            if range_ceiling is not None and _oc.range_shape_from_map(param_map) is True:
+                upper = recipe_params.get(_oc._RANGE_SURF2_HEADER)
+                if (isinstance(upper, int) and not isinstance(upper, bool)
+                        and upper == range_ceiling):
+                    # Disclosure only (NEVER replayed): the pair may have been clamped
+                    # to the ceiling or authored there.
+                    entry["range_at_ceiling"] = "clamped_or_authored"
         operands.append(entry)
 
     # ---- Second pass: translate raw live rows -> 0-based recipe indices (§3.2). ----

@@ -32,6 +32,7 @@ from .._io import safe_float
 from .analysis_operand import _merit_operand_enum, _SUSPICIOUS_MAGNITUDE
 from ._solve_cells import is_driving
 from ..enums import _resolve_enum
+from ..errors import ToolParamError
 
 # A 9-arg GetOperandValue takes (type, a2, a3, a4, a5, a6, a7, a8, a9). The
 # trailing args are MANDATORY (analysis_operand). Unused slots are
@@ -53,6 +54,61 @@ def suspicious_sentinel(raw):
     return (not math.isfinite(raw)) or abs(raw) >= _SUSPICIOUS_MAGNITUDE
 
 
+def slot_range_problem(system, named):
+    """A plain-words refusal when a Surf / Wave / Field slot value is out of range, else ``None``.
+
+    ``named`` is an iterable of ``(Header, value)`` pairs. The engine does not refuse an
+    out-of-range index: it silently CLAMPS it (a Surf above the last surface reads the last
+    surface, Surf 0 / -1 read another one, a Wave above the count reads the primary or the last
+    wave, a Field above the count reads the last field, a negative one reads field 1), so a
+    wrong index reads back a plausible number. Legal: Surf ``0..NumberOfSurfaces-1``; Wave
+    ``0..NumberOfWavelengths`` and Field ``0..NumberOfFields`` (0 stays legal: the engine's
+    primary / all-field convention on the operands that take it). The count of each kind is
+    read ONCE, only when a slot of that kind is present; a count that cannot be read leaves that
+    kind unchecked (the previous behaviour) rather than refusing a read that may be fine. A
+    non-numeric value is left to the engine. Headers: ``Surf``; ``Wave`` / ``Wave1`` / ``Wave2``;
+    ``Field``. NEVER raises.
+    """
+    counts = {}
+
+    def _count(kind):
+        if kind not in counts:
+            try:
+                if kind == "surf":
+                    counts[kind] = int(system.LDE.NumberOfSurfaces) - 1
+                elif kind == "wave":
+                    counts[kind] = int(system.SystemData.Wavelengths.NumberOfWavelengths)
+                else:
+                    counts[kind] = int(system.SystemData.Fields.NumberOfFields)
+            except Exception:  # noqa: BLE001 — an unreadable count -> that kind unchecked
+                counts[kind] = None
+        return counts[kind]
+
+    from ._merit_cells import _base_token  # function-local, as _merit_cells does it
+
+    for header, value in named:
+        token = _base_token(header).strip()
+        h = token.lower()
+        if h == "surf":
+            kind, label, noun = "surf", "Surf", "surface"
+        elif h in ("wave", "wave1", "wave2"):
+            kind, label, noun = "wave", token, "wavelength"
+        elif h == "field":
+            kind, label, noun = "field", "Field", "field"
+        else:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            continue
+        top = _count(kind)
+        if top is None:
+            continue
+        if value < 0 or value > top:
+            return (f"{label} {value:g} is outside the system's {noun} range 0..{top}; the engine "
+                    f"clamps an out-of-range index and reads a different {noun}, so it is refused "
+                    f"rather than read")
+    return None
+
+
 def read_operand_slots(system, code, slots_by_name):
     """Read one operand scalar via the 9-arg ``GetOperandValue`` with NAMED slots.
 
@@ -67,9 +123,15 @@ def read_operand_slots(system, code, slots_by_name):
     type by the engine; we pass them through verbatim. Returns ``(raw, suspicious)``
     — ``raw`` is the RAW reading (the caller passes it through ``safe_float`` for
     the wire); ``suspicious`` is the sentinel predicate on the raw value.
+
+    An out-of-range Surf / Wave / Field value is refused BEFORE the read with a
+    ``ToolParamError`` (see ``slot_range_problem``): the engine would clamp it silently.
     """
     enum_type = _merit_operand_enum(system)
     member = _resolve_enum(enum_type, code)
+    problem = slot_range_problem(system, slots_by_name.values())
+    if problem is not None:
+        raise ToolParamError(f"operand {code}: {problem}")
     # Build the 8 positional args (a2..a9); each defaults to 0 unless named.
     args = []
     for pos in range(2, 2 + (_GETOPERAND_ARITY - 1)):  # positions 2..9 (8 slots)
@@ -449,6 +511,12 @@ def with_best_focus(system, *, wave=None, code="RWCE", slots_by_name=None,
     a post-restore mismatch -> ``restore_verified:False`` + a loud
     ``mutation_warning`` (the system MAY be left mutated; the grader must not trust
     downstream numbers silently).
+
+    "Mismatch" means WORSE than ``rel_tol=1e-9`` (``abs_tol=1e-9``), NOT bit-exact:
+    ``restore_verified:True`` says the thickness was restored to within that tolerance,
+    so a few-ULP residue can remain in the lens data. The tolerance is deliberate (an
+    exact-equality check would fire on ordinary float round-trips); it is stated here and
+    in the analyze_strehl / analyze_wavefront descriptions rather than tightened.
     """
     focus = {
         "available": False,

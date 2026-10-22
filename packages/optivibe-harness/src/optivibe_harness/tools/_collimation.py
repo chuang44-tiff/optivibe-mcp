@@ -726,7 +726,37 @@ def detect_collimated_output(system, *, wave=1, to_surface=-1):
     return _result(True, "collimated_output", signals, afocal)
 
 
+# The runtime flag get_mtf / get_spot carry on a collimated (afocal) output. It FLAGS and
+# redirects: the headline is NOT nulled, because an MTF / spot size is a defined number there
+# (a parallel beam focused by the lens), just not the angular quantity an afocal output is
+# judged on. (analyze_strehl / analyze_wavefront carry their own sentence, which does say
+# their headline is nulled.)
+COLLIMATED_INPUT_FLAG_MSG = (
+    "collimated_output: this system's beam is collimated (afocal), so the image-plane "
+    "values here describe a parallel beam focused by the lens, not the angular quantity an "
+    "afocal output is judged on; for angular quantities use verify_collimation (residual "
+    "in mrad) or trace_rays (direction cosines)."
+)
+
+
+def collimated_flags(system):
+    """``[COLLIMATED_INPUT_FLAG_MSG]`` when the SHARED detector fires, else ``[]``. NEVER raises.
+
+    One call to ``detect_collimated_output`` (the detector ``verify_collimation`` and the
+    Strehl / wavefront doors consume), so the doors cannot drift. FAIL-OPEN to ``[]``: a
+    detector fault must never block a valid analysis.
+    """
+    try:
+        if detect_collimated_output(system)["collimated"]:
+            return [COLLIMATED_INPUT_FLAG_MSG]
+    except Exception:  # noqa: BLE001 -- a detector fault adds no flag
+        pass
+    return []
+
+
 __all__ = [
+    "COLLIMATED_INPUT_FLAG_MSG",
+    "collimated_flags",
     "compute_collimation_residual",
     "detect_collimated_output",
     "system_session_shim",

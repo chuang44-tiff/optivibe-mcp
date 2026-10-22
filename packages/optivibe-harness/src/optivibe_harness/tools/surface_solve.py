@@ -939,16 +939,17 @@ def attach_partial_state(exc, err):
     reach, and here is one: a ``BaseException`` whose ``__setattr__`` raises for
     ``PARTIAL_STATE_ATTR`` and SUCCEEDS for ``__context__``. Discriminating BY
     ATTRIBUTE NAME is one way to build such an object; a ``__setattr__`` that fails
-    only on its FIRST call is another. The guard here is one ``try`` for both writes,
-    so on such an object it drops both breadcrumbs together and the abort still
-    travels unchanged; an independent retry at a call site would land the second one.
-    Such objects are contrived — constructed for this paragraph, not taken from any
-    measurement.
+    only on its FIRST call is another. Each write has its OWN ``try``, so on such an
+    object the one that is rejected is lost and the other still lands, and the abort
+    travels unchanged either way.
     """
     try:
         setattr(exc, PARTIAL_STATE_ATTR, err)
-        exc.__context__ = err
     except BaseException:  # noqa: BLE001 — a breadcrumb NEVER displaces the abort
+        pass
+    try:
+        exc.__context__ = err
+    except BaseException:  # noqa: BLE001 — each breadcrumb is guarded on its own
         pass
 
 
@@ -1017,6 +1018,9 @@ def _restore(session, system, lde, surface, token, prior, entered=None):
     the abort. Both hold at once only by
     splitting the SIGNAL from the RETURN VALUE: build the partial-state error, emit it
     durably, chain it as the abort's ``__context__``, then let the abort travel.
+
+    RETURNS ``True`` when the proof passed but at least one captured field's ``==`` was
+    indeterminate (no drift detected, equality not verified), else ``False``.
     """
     step = "type"
     try:
@@ -1049,11 +1053,15 @@ def _restore(session, system, lde, surface, token, prior, entered=None):
         # merely happened inside a ``HarnessError`` handler was being renamed by it.
         attach_partial_state(exc, err)
         raise
-    _prove_restore(session, system, lde, surface, token, prior, entered)
+    return _prove_restore(session, system, lde, surface, token, prior, entered)
 
 
-def _field_drift(before, after):
+def _field_drift(before, after, unsure=None):
     """Captured fields that no longer read the same. ``""`` when the replay was faithful.
+
+    ``unsure``, when given, is a list that receives the name of every field whose ``==``
+    was INDETERMINATE (it raised, or answered something that is not a ``bool``): such a
+    field is NOT drift, but it is not an equality that was verified either.
 
     ``read_solve_fields`` tags every field it reads: ``matched`` (read, representable),
     ``not_representable`` (read, non-finite — ``Offset`` reads NaN on 9 of 13 CORRECT
@@ -1089,6 +1097,7 @@ def _field_drift(before, after):
     proxy, and the module's wire rule for it is already ``str`` in both other producers.
     """
     out = []
+    unsure = [] if unsure is None else unsure
     for name in sorted(before):
         want, state = before[name]
         got, got_state = after.get(name, (None, "mismatched"))
@@ -1103,14 +1112,17 @@ def _field_drift(before, after):
             out.append("%s is now %s (it read %s before)"
                        % (name, got_state, _render_field(name, want)))
         elif _render_field(name, got) != _render_field(name, want) \
-                or _definitely_unequal(want, got):
+                or _definitely_unequal(want, got, name, unsure):
             out.append("%s reads %s, not %s"
                        % (name, _render_field(name, got), _render_field(name, want)))
     return ", ".join(out)
 
 
-def _definitely_unequal(want, got):
+def _definitely_unequal(want, got, name, unsure):
     """``True`` only when ``==`` answered exactly ``False``. Indeterminate is NOT drift.
+
+    An indeterminate answer is still RECORDED: ``name`` is appended to ``unsure`` so the
+    caller can say "no drift was detected" instead of "verified" (see ``_prove_restore``).
 
     The second witness beside the rendered compare: ``repr``/``str`` can
     collide across distinct objects, and a .NET proxy is free to render identically to a
@@ -1128,7 +1140,8 @@ def _definitely_unequal(want, got):
     try:
         verdict = want == got
     except Exception:  # noqa: BLE001 — an uncomparable pair proves nothing either way
-        return False
+        verdict = None
+    isinstance(verdict, bool) or unsure.append(name)
     return verdict is False
 
 
@@ -1232,11 +1245,13 @@ def _prove_restore(session, system, lde, surface, token, prior, entered=None):
         raise _partial(prior, "proof",
                        "the value reads back %r, not %r" % (value, prior["value"]),
                        surface, token, (actual, value), entered)
-    drift = _field_drift(prior["fields"], fields)
+    unsure = []
+    drift = _field_drift(prior["fields"], fields, unsure)
     if drift:
         raise _partial(prior, "proof",
                        "the type and the value came back but the RELATIONSHIP did not: "
                        "%s" % (drift,), surface, token, (actual, value), entered)
+    return bool(unsure)
 
 
 # --------------------------------------------------------------------------- #
@@ -1796,12 +1811,15 @@ def _transact(session, system, lde, surface, token, cell, member, canonical, res
     except BaseException as exc:
         if not restore_needed:
             raise
-        _restore(session, system, lde, surface, token, prior, set_entered)
+        indeterminate = _restore(session, system, lde, surface, token, prior, set_entered)
         if not isinstance(exc, Exception):
             raise
         raise SurfaceWriteError(
-            "%s The prior %s solve was restored and verified."
-            % (exc, prior["type"]),
+            "%s The prior %s solve was %s."
+            % (exc, prior["type"],
+               "replayed and no drift was detected, but at least one captured field "
+               "could not be compared for equality, so the restore is not verified"
+               if indeterminate else "restored and verified"),
             field=token, intended=canonical, actual=None, surface=surface) from exc
 
 
@@ -1929,9 +1947,20 @@ def set_solve(session, params):
     # exactly one module: a fact asserted at an emit site is a second authority, and the
     # difference between "this check would have rolled back" and "this check did roll
     # back" is precisely the kind of claim that drifts when it is written twice.
-    relation.update(zip(_st.DERIVED_KEYS,
-                        _st.relation_semantics(relation["state"],
-                                               _st.gates_for(token, canonical))))
+    #
+    # THE CALL IS GUARDED BECAUSE IT RUNS AFTER THE COMMIT. ``relation_semantics`` raises on
+    # a state with no semantics row, which is right at its own level, but here the solve is
+    # already on the cell: letting it escape would report a mutated design as a failed call.
+    # So the three keys stay ABSENT (never a fabricated triple) and the envelope names the
+    # state it could not describe.
+    try:
+        relation.update(zip(_st.DERIVED_KEYS,
+                            _st.relation_semantics(relation["state"],
+                                                   _st.gates_for(token, canonical))))
+    except Exception:  # noqa: BLE001 — post-commit: degrade with a named reason
+        relation["relation_semantics_unavailable"] = (
+            "the solve was authored, but the harness has no semantics for the relation "
+            "state %r, so the derived relation facts are omitted." % (relation["state"],))
     if relation["state"] == "traced_mismatch":
         # Reachable ONLY on a NON-gating row: a gating traced_mismatch raised inside
         # ``_verify`` and never returns here. ``ok`` stays true and nothing was rolled

@@ -40,11 +40,13 @@ def normalize_catalog(catalog, param_name="catalog"):
     # works on POSIX hosts too (os.path.basename keeps "\\" on POSIX).
     cat = cat.replace("\\", "/").rstrip("/")
     cat = os.path.basename(cat)
-    if not cat:
-        # A non-blank value with no basename ("/", "\\", "//") names no catalog.
-        # Reading it as "no catalog given" would silently drop the restriction.
+    stem = cat[:-4] if cat.lower().endswith(".agf") else cat
+    if not stem.strip("."):
+        # A non-blank value with no basename ("/", "\\", "//"), or whose stem is empty
+        # or only dots (".", "..", ".AGF"), names no catalog. Reading it as "no catalog
+        # given" would silently drop the restriction.
         raise ToolParamError(
-            f"'{param_name}' item {catalog.strip()!r} names no catalog (only a path or "
+            f"'{param_name}' item {catalog.strip()!r} names no catalog (only a path, dots or "
             "separator); give a catalog name such as 'SCHOTT', or leave it out"
         )
     # Append .AGF when the user passed a bare basename (the stored form carries it).

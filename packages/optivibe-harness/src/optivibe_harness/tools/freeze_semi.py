@@ -100,6 +100,27 @@ def _read_semi(row):
     return v if math.isfinite(v) else None
 
 
+def _strict_config(system):
+    """The active configuration as an int >= 1, or ``None``: UNREADABLE.
+
+    The restore claim is a PROOF, so it consumes the strict reader
+    ``clearance.resolve_evaluated_config`` (the one derivation of "what is active, or
+    unreadable") instead of the throw-guarded one that degrades to ``1``. NEVER raises.
+    """
+    from .clearance import resolve_evaluated_config
+    return resolve_evaluated_config(system)
+
+
+def _restored_claim(before, system):
+    """``active_configuration_restored``: the active config now, or ``None`` if unproven.
+
+    ``None`` when EITHER read (before the work, after the restore) failed: a restore
+    that was never observed at both ends is not reported as restored.
+    """
+    after = _strict_config(system)
+    return after if (before is not None and after is not None) else None
+
+
 def _switch_config(system, cfg):
     """Switch the active config + freshen; RETURN whether the active config IS now ``cfg``.
 
@@ -268,7 +289,10 @@ def _freeze_impl(system, params):
     n_surfaces = int(system.LDE.NumberOfSurfaces)
     targets = _resolve_surfaces(params, n_surfaces)
     n_configs = _ccfg.safe_number_of_configurations(system)
-    active_before = _ccfg.safe_current_configuration(system)
+    active_before_read = _strict_config(system)
+    # Where to switch back to is a guess when the read failed; the OLD degrade (1) is
+    # kept for the switch itself, but the claim below is None in that case.
+    active_before = active_before_read if active_before_read is not None else 1
 
     frozen = []
     skipped = []
@@ -313,7 +337,7 @@ def _freeze_impl(system, params):
         "n_configs": n_configs,
         "frozen": frozen,
         "skipped": skipped,
-        "active_configuration_restored": _ccfg.safe_current_configuration(system),
+        "active_configuration_restored": _restored_claim(active_before_read, system),
     }
 
 
@@ -337,7 +361,10 @@ def _unfreeze_impl(system, params):
     n_surfaces = int(system.LDE.NumberOfSurfaces)
     targets = _resolve_surfaces(params, n_surfaces)
     n_configs = _ccfg.safe_number_of_configurations(system)
-    active_before = _ccfg.safe_current_configuration(system)
+    active_before_read = _strict_config(system)
+    # Where to switch back to is a guess when the read failed; the OLD degrade (1) is
+    # kept for the switch itself, but the claim below is None in that case.
+    active_before = active_before_read if active_before_read is not None else 1
 
     unfrozen = []
     skipped = []
@@ -407,7 +434,7 @@ def _unfreeze_impl(system, params):
         "n_configs": n_configs,
         "unfrozen": unfrozen,        # mirrors the freeze ``frozen`` list shape
         "skipped": skipped,
-        "active_configuration_restored": _ccfg.safe_current_configuration(system),
+        "active_configuration_restored": _restored_claim(active_before_read, system),
     }
 
 
@@ -511,6 +538,8 @@ FREEZE_SEMIDIAMETERS_SPEC = ToolSpec(
         "envelope defaults to max_over_configs; surfaces defaults to all interior surfaces. "
         "Pass mode='auto' to RE-FLOAT (un-freeze) the apertures back to the engine's "
         "per-config automatic solve (the inverse of the default freeze). "
+        "active_configuration_restored is the active configuration read back after the "
+        "work, or null when it could not be read before or after (restore unproven). "
         "See verify_zoom, describe_configurations, render_layout."
     ),
 )
