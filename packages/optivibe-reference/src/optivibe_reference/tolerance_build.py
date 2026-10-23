@@ -35,7 +35,7 @@ import json
 import os
 import sys
 
-from . import catalog_build
+from . import _paths, catalog_build
 
 # Path anchors (package-relative, NOT cwd-relative — agent cwd resets, §5).
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,9 +48,8 @@ TOLERANCE_SYNONYMS_JSON_PATH = os.path.join(
 )
 
 # Capture anchors (the live probe truth — assert against the FILE, never a literal).
-_CAPTURES_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(_HERE)), "scripts", "captures"
-)
+# (``scripts/captures`` in a source checkout, ``<package>/data/captures`` installed.)
+_CAPTURES_DIR = _paths.captures_dir()
 TOLERANCE_INVENTORY_PATH = os.path.join(_CAPTURES_DIR, "tolerance_inventory_62.json")
 TOLERANCE_CAPTURE_PATH = os.path.join(_CAPTURES_DIR, "probe_tolerances_capture.json")
 # The GITIGNORED, user-built VERBATIM tolerance raw extract (the manual oracle),

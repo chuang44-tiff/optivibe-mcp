@@ -335,3 +335,18 @@ def _require_remove_at(at, n):
             f"(cannot remove OBJECT 0 or IMAGE {n - 1}; N={n})"
         )
     return at
+
+
+def call_noting(fn, arg, note):
+    """``fn(arg)``; a raise is re-raised in the same family with ``note()`` appended.
+
+    For a call that may already have mutated the design when it throws: the caller supplies
+    ``note`` (a zero-argument callable, evaluated only on a failure) saying so. See
+    ``_error_note``; the note must never replace the real error.
+    """
+    try:
+        return fn(arg)
+    except Exception as exc:  # noqa: BLE001 -- re-raised with the note; the real error still travels
+        from . import _error_note as _en
+
+        _en.raise_with_note(exc, note())

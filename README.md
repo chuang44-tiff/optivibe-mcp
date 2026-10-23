@@ -72,6 +72,25 @@ has the lowest merit but fails on axis; both agent runs kept the on-axis target.
 
 ## Install
 
+### From PyPI
+
+In a Python 3.11+ virtual environment:
+
+```bash
+pip install optivibe-mcp "optivibe-reference[manual]"
+optivibe-build-data --probe
+optivibe-doctor
+```
+
+`optivibe-mcp` is the server; it brings the reference layer (`optivibe-reference`) with it. The
+`[manual]` extra (PyMuPDF) is optional and reads your OpticStudio manual PDF (see
+[Manual install](#manual-install)). `optivibe-build-data` builds the reference data from your own
+OpticStudio install, and `--probe` also runs the two operand probes, which open OpticStudio and
+need the ZOS-API licence. `optivibe-doctor` checks the install. Then
+[register the server with Claude Code](#register-with-claude-code).
+
+### From a clone
+
 Clone the repository, then run one command from its root:
 
 ```powershell
@@ -147,6 +166,13 @@ The equivalent JSON configuration:
 { "command": "/path/to/python", "args": ["-m", "optivibe_harness"] }
 ```
 
+After a PyPI install you can register the `optivibe-mcp` command instead. Give its full path
+(`where optivibe-mcp` prints it while the environment is active):
+
+```bash
+claude mcp add optivibe -- C:/path/to/venv/Scripts/optivibe-mcp.exe
+```
+
 ## Glass tools
 
 Once the optimizer has settled a lens, two tools help with the glass step. `explain_glass_swaps`
@@ -174,7 +200,9 @@ denied.
 ## Build the reference data
 
 The reference layer's data is built locally from your own licensed install; nothing
-vendor-derived is committed. Run it from the repository root:
+vendor-derived is committed. After a PyPI install, run `optivibe-build-data` (add `--probe`
+to run the two probes below first); it needs no clone. From a clone, run it from the
+repository root:
 
 ```bash
 python packages/optivibe-reference/scripts/build_vendor_data.py

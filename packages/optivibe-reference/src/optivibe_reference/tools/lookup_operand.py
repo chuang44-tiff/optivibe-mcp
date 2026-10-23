@@ -199,8 +199,33 @@ def intent_has_no_single_operand(query, hits):
     return True
 
 
+# A provenance caution for the two PARAXIAL image-space aperture operands. It lives here, not
+# in the catalog: the catalog description is the gitignored verbatim-local field (null on a
+# fresh install), so a caution kept there would not reach every user. Added as one extra
+# key on an exact hit for these codes only; every other operand's payload is unchanged.
+_PARAXIAL_CAUTION = {
+    "ISNA": (
+        "paraxial: reads below the real image-space NA on a fast lens; read WFNO "
+        "(NA = 1 / (2 x WFNO)) or a real marginal ray"
+    ),
+    "ISFN": (
+        "paraxial: reads above the working F/# on a fast lens; read WFNO or a real "
+        "marginal ray"
+    ),
+}
+
+
 def _exact_payload(row):
     """Build the success payload for an exact keyed-table hit."""
+    payload = _exact_payload_base(row)
+    caution = _PARAXIAL_CAUTION.get(payload["code"])
+    if caution is not None:
+        payload["caution"] = caution
+    return payload
+
+
+def _exact_payload_base(row):
+    """The exact-hit payload before any per-code caution."""
     d = _row_to_dict(row)
     param_cells, param_cells_known = _param_cells_and_known(d["cell_layout"])
     if d["description"] is None:

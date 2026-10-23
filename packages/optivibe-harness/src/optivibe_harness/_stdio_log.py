@@ -17,17 +17,44 @@ import os
 
 _LOG_FILENAME = "optivibe_stdio.log"
 
+# The absolute workspace root ``__main__`` anchored once at boot (None until pinned). The
+# log is opened lazily at the first engine-open, possibly after a chdir, so a relative
+# ``OPTIVIBE_WORKSPACE_ROOT`` must not be re-resolved against the cwd of that later moment.
+_ANCHORED_ROOT = None
+
+
+def pin_workspace_root(root) -> None:
+    """Record the boot-anchored absolute workspace root (a non-empty ``str``; else ignored)."""
+    global _ANCHORED_ROOT
+    if isinstance(root, str) and root:
+        _ANCHORED_ROOT = root
+
+
+def _workspace_base():
+    """The boot-anchored root, else the env value made absolute now; ``None`` if neither
+    is usable (unset, or a relative value with a deleted cwd). NEVER raises. With the env
+    var unset the pin (boot's cwd) is not used, so ``OPTIVIBE_LOG_DIR`` keeps its precedence."""
+    raw = os.environ.get("OPTIVIBE_WORKSPACE_ROOT")
+    if not raw:
+        return None
+    if _ANCHORED_ROOT:
+        return _ANCHORED_ROOT
+    try:
+        return os.path.abspath(raw)
+    except (OSError, ValueError):  # a deleted cwd makes a relative abspath raise
+        return None
+
 
 def _open_log_fd() -> int:
     """Open a log file fd for the redirected stdio.  devnull on failure.
 
-    Precedence: ``OPTIVIBE_WORKSPACE_ROOT`` -> ``OPTIVIBE_LOG_DIR`` -> cwd.
+    Precedence: the boot-anchored ``OPTIVIBE_WORKSPACE_ROOT`` -> ``OPTIVIBE_LOG_DIR`` -> cwd.
     ``O_APPEND`` so a re-open never truncates a prior session's log. When every
     named path fails, the devnull fallback (never blocks, accepts data loss) keeps
     the never-fatal contract — a swap to devnull = no file, degraded-safe.
     """
     for base in (
-        os.environ.get("OPTIVIBE_WORKSPACE_ROOT"),
+        _workspace_base(),
         os.environ.get("OPTIVIBE_LOG_DIR"),
     ):
         if base:

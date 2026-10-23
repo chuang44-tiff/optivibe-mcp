@@ -16,7 +16,7 @@ THE DECISION RULE, and it is the whole design
     merely unmeasured, it is UNMEASURABLE from the data in hand.
 
     | oracle              | agreement    | disagreement        | separation | verdict  |
-    | ChiefRayAngle       | n=20, 2.8e-9 | n=5,  best 2.545e-1 | 9.09e+07   | **GATE** |
+    | ChiefRayAngle       | worst 1.54e-8| n=5,  best 2.545e-1 | 1.65e+07   | **GATE** |
     | MarginalRayHeight   | n=15, 4.0e-13| n=0 — never observed| undefined  | disclose |
     | ChiefRayHeight      | n=15, 8.9e-16| n=0 — never observed| undefined  | disclose |
 
@@ -77,6 +77,7 @@ re-drives the cell and nothing re-checks it.
 """
 import math
 
+from ..errors import ToolParamError
 from . import _measurement_common as _mc
 from . import _solve_cells as _sc
 from . import _structural_common as _struct
@@ -262,9 +263,16 @@ ORACLES = {
         "law": law_chief_ray_angle,
         "law_text": "PARB == Angle / hypot(1, Angle)",
         # rel 1e-6: worst CORRECT relative residual 8.535e-08, ~12x margin.
-        # abs 1e-7: it SEPARATES the two measured populations — 35.73x above the worst
-        # correct (2.799e-09) and 2.545e+06x below the best wrong (2.545e-01). It is NOT a
-        # detection floor: an error inside 3e-09..1e-07 is certified traced_match.
+        # abs 1e-7: it SEPARATES the two measured populations. The agreement figure is re-derived
+        # from a live engine sweep (OpticStudio 25.1.0, 31 correct authorings, targets
+        # -20..+20, Cooke triplet surface 6): worst correct residual 1.54e-8 (target -2), which
+        # is ABOVE the earlier 2.799e-09 figure -- the residual grows with the requested change
+        # and depends on the glass. So the abs threshold is ~6.5x above the worst correct
+        # (1e-7 / 1.54e-8) and ~2.5e+06x below the best wrong (2.545e-01); the populations are
+        # 1.65e+07 apart. The certified band is the isclose band: max(1e-6 * max(|PARB|, |law|),
+        # 1e-7), i.e. relative 1e-6 once |PARB| exceeds 0.1. Measured on the inert stop dummy
+        # (PARB 0.43), an error up to ~4e-7 was certified traced_match and 5e-7 was gated.
+        # It is NOT a detection floor: an error inside the band is certified traced_match.
         "rel_tol": 1e-6,
         "abs_tol": 1e-7,
         "gates": True,
@@ -297,8 +305,11 @@ ORACLES = {
         "gates": False,
         # INCLUDES zero: Height = 0.0 is the canonical focus solve and the residual is a
         # constant ~3.3e-13 ABSOLUTE floor across five orders of magnitude of target.
+        # SYMMETRIC (``domain_abs``): negative targets -0.1, -0.8, -2, -4, -10, -1e3, -1e6 were
+        # measured on surfaces 5/6/7 of two designs (OpticStudio 25.1.0) and AGREED
+        # (worst 7.36e-8 at -1e6, <= 1.1e-12 for |t| <= 10), the same order as the positives.
         "domain": (0.0, 1e6),
-        "domain_abs": False,
+        "domain_abs": True,
     },
     "ThicknessCell.ChiefRayHeight": {
         "operand": "PARY",
@@ -311,8 +322,11 @@ ORACLES = {
         "rel_tol": _ss._T2_REL_TOL,
         "abs_tol": _ss._T2_ABS_TOL,
         "gates": False,
+        # SYMMETRIC (``domain_abs``): negatives -0.1 .. -10 were measured on surfaces 5/6/7 of two
+        # designs (OpticStudio 25.1.0) and AGREED (worst residual 1.8e-15); the chief
+        # height was swept only down to -10, which is this bound.
         "domain": (0.0, 10.0),
-        "domain_abs": False,
+        "domain_abs": True,
     },
 }
 
@@ -753,6 +767,89 @@ def relation_for(system, lde, surface, cell_token, canonical, resolved, prior_ty
             "surface (offset 0), which that bound already placed inside the system. A "
             "count that READS and no longer covers the surface still declines."
             % (unbounded,))}))
+
+
+#: The floor on ``|chief-ray height x index step|`` below which a ``ChiefRayAngle`` solve cannot act.
+#: MEASURED (OpticStudio 25.1.0, Cooke triplet): every inert surface read 0 to float
+#: noise (plane stop dummy and normalize_stop dummy: height ~1e-15 with step 1.0 -> 1.0; air-air
+#: curves and an n0 = 1.0 GRIN: step exactly 0), and every surface that realised its targets
+#: read >= 1.3 (powered glass 2.19 x 0.706 = 1.55; GRIN n0 1.6: 2.19 x 0.6 = 1.31). The floor sits
+#: ~6 orders above the largest inert reading (<= 1e-15) and ~9 below the smallest working one (>= 1.3);
+#: the interval between them was not swept, so the value inside it is a judgement, not a measured
+#: edge. The floor is in ABSOLUTE lens units (height x a dimensionless index step), so it is kept
+#: tiny enough that a Meters design with a millimetre-scale chief height is not refused.
+INERT_POWER_FLOOR = 1e-9
+
+
+def _read_scalar(system, code, slots):
+    """One finite operand reading, or ``None`` when it cannot be trusted. NEVER raises."""
+    try:
+        raw, suspicious = _mc.read_operand_slots(system, code, slots)
+    except Exception:  # noqa: BLE001 - an unreadable probe read must not block an authoring
+        return None
+    return float(raw) if not suspicious and _ss._is_finite_number(raw) else None
+
+
+def _unchecked(surface, what, fault):
+    """Refuse because the surface's ability to bend the chief ray could not be checked."""
+    raise ToolParamError(
+        "a ChiefRayAngle solve on the radius of surface %s is refused: %s could not be read%s, so "
+        "whether this surface can bend the chief ray could not be checked, and an unchecked "
+        "inert surface would certify a coincident target as met. Nothing was written. Retry once "
+        "the engine reads are available." % (surface, what, "" if not fault else " (%s)" % (fault,)))
+
+
+def refuse_inert_chief_angle(system, lde, surface, token, canonical, resolved):
+    """Refuse a ``ChiefRayAngle`` radius solve BEFORE any change when the surface cannot act.
+
+    Returns ``resolved`` unchanged (so the caller can wrap its own expression) or raises
+    ``ToolParamError`` with nothing written. Inert means chief-ray height x index step ~ 0: a plane
+    stop dummy, an air-air curve, a GRIN surface whose n0 equals the incoming index. A MIRROR is
+    refused by material (its index reads 1.0 on both sides, and the law never realised there).
+    Glass exactly AT the stop is refused by the same reading (height ~ 0) although it is
+    ill-conditioned rather than inert, and the message says so. An unreadable reading or an
+    unresolvable primary wavelength REFUSES too (fail closed): an unchecked inert surface would
+    certify a coincident target, and the refusal names which read failed.
+    """
+    if canonical != "ChiefRayAngle" or token != "radius":
+        return resolved
+    try:
+        material = str(getattr(lde.GetSurfaceAt(surface), "Material", "") or "")
+    except Exception:  # noqa: BLE001 - unreadable material: fall through to the readings
+        material = ""
+    if material.strip().upper() == "MIRROR":
+        raise ToolParamError(
+            "a ChiefRayAngle solve on the radius of surface %s is refused: that surface is a MIRROR, "
+            "and the solve was measured never to realise its target on a mirror (the index reads 1.0 "
+            "on both sides, and the angle it lands on is path-dependent). Nothing was written."
+            % (surface,))
+    wave, fault = _primary_wave(system)
+    if wave is None or surface < 1:
+        _unchecked(surface, "the primary wavelength" if wave is None else "the incoming surface",
+                   fault)
+    ray = ORACLES["RadiusCell.ChiefRayAngle"]["ray"]
+    height = _read_scalar(system, "PARY", _slots({"ray": ray}, surface, wave))
+    n_in = _read_scalar(system, "INDX", {2: ("Surf", surface - 1), 3: ("Wave", wave)})
+    n_out = _read_scalar(system, "INDX", {2: ("Surf", surface), 3: ("Wave", wave)})
+    for name, value in (("the chief-ray height (PARY)", height),
+                        ("the index before the surface (INDX)", n_in),
+                        ("the index at the surface (INDX)", n_out)):
+        if value is None:
+            _unchecked(surface, name, None)
+    power = abs(height * (n_out - n_in))
+    if power < INERT_POWER_FLOOR:
+        raise ToolParamError(
+            "a ChiefRayAngle solve on the radius of surface %s is refused: the chief ray there has "
+            "height %.6g and the index changes %.6g -> %.6g, so |height x index step| = %.3g is below "
+            "the floor %g and this surface cannot bend the chief ray. Where the surface is inert "
+            "(no index step, e.g. a plane or air-air surface) the engine accepts the solve and does "
+            "nothing, and a target equal to what the surface already reads would be certified as "
+            "met. Glass exactly at the stop is refused too (chief-ray height ~ 0): it is not inert "
+            "but ill-conditioned, the engine drives the radius to a meaningless value and a "
+            "rollback there can fail to restore the prior solve. Nothing was written. Author the "
+            "solve on a refracting surface away from the stop instead."
+            % (surface, height, n_in, n_out, power, INERT_POWER_FLOOR))
+    return resolved
 
 
 def stop_rule_hint(lde, canonical, surface):

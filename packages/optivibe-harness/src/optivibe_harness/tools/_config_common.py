@@ -44,6 +44,7 @@ from ..errors import (
     ToolParamError,
     map_dotnet_exception,
 )
+from . import _error_note as _en
 from . import _mce_cells as _mc
 
 
@@ -468,6 +469,50 @@ def _switch_configuration(system, cfg):
     return current == cfg
 
 
+
+def _carry_restore_warning(error, warning):
+    """The error to raise for ``error`` with a failed-restore ``warning`` on it. Never raises.
+
+    The dispatcher serves ``str(error)``, so a restore fault that only reached ``ctx`` was lost
+    whenever the block raised (a ``ToolParamError`` for a bad path or range). An error that
+    already carries envelope disclosures (a dict ``extra``, e.g. ``_Refuse``) gets the warning
+    there, where its caller already puts it. Any other goes through the one shared
+    ``_error_note.annotate`` (same type and family where it can, else a family-identical
+    replacement chained from the original)."""
+    try:
+        extra = getattr(error, "extra", None)
+        if isinstance(extra, dict):
+            extra.setdefault("mutation_warning", warning)
+            return error
+        return _en.annotate(error, f"; {warning}")
+    except Exception:  # noqa: BLE001 -- a failed annotation must never replace the real error
+        return error
+
+
+def _restore_and_verify(system, saved, state):
+    """RESTORE (always): switch back to ``saved`` + post-restore verify. NEVER raises (the
+    ``with_best_focus`` precedent: a raise here would mask the body's result or error)."""
+    try:
+        system.MCE.SetCurrentConfiguration(saved)
+    except Exception:  # noqa: BLE001 — a restore throw is surfaced as a mutation warning
+        pass
+    try:
+        restored = _mc.current_configuration(system)
+    except Exception:  # noqa: BLE001 — an unreadable read-back -> treat as unverified
+        restored = None
+    if restored != saved:
+        state["restore_verified"] = False
+        existing = state.get("mutation_warning")
+        note = (
+            f"config restore did NOT verify (intended active config {saved}, re-read "
+            f"{restored!r}); the active configuration may be left at the wrong index "
+            "— downstream numbers must not be trusted silently"
+        )
+        state["mutation_warning"] = (
+            f"{existing}; {note}" if existing else note
+        )
+
+
 @contextmanager
 def with_configuration(system, cfg):
     """Save -> switch -> yield -> restore -> VERIFY the active config (the with_best_focus shape, Q11).
@@ -546,29 +591,18 @@ def with_configuration(system, cfg):
 
     try:
         yield state
-    finally:
-        # RESTORE (always): switch back to the saved active config + post-restore verify.
-        # NEVER raises past finally (the with_best_focus precedent — a finally-raise masks
-        # the body result the grader already computed).
-        try:
-            system.MCE.SetCurrentConfiguration(saved)
-        except Exception:  # noqa: BLE001 — a restore throw is surfaced as a mutation warning
-            pass
-        try:
-            restored = _mc.current_configuration(system)
-        except Exception:  # noqa: BLE001 — an unreadable read-back -> treat as unverified
-            restored = None
-        if restored != saved:
-            state["restore_verified"] = False
-            existing = state.get("mutation_warning")
-            note = (
-                f"config restore did NOT verify (intended active config {saved}, re-read "
-                f"{restored!r}); the active configuration may be left at the wrong index "
-                "— downstream numbers must not be trusted silently"
-            )
-            state["mutation_warning"] = (
-                f"{existing}; {note}" if existing else note
-            )
+    except BaseException as exc:
+        # The restore + verify runs exactly once, BEFORE the error leaves, so its warning can
+        # ride on it. A replacement (when the error cannot take the note in place) is raised
+        # ``from`` the original; the original is never masked.
+        _restore_and_verify(system, saved, state)
+        if isinstance(exc, Exception) and not state["restore_verified"]:
+            replacement = _carry_restore_warning(exc, state["mutation_warning"])
+            if replacement is not exc:
+                raise replacement from exc
+        raise
+    else:
+        _restore_and_verify(system, saved, state)
 
 
 # --------------------------------------------------------------------------- #

@@ -399,6 +399,14 @@ def _validate_array(system, params, plan, n_configs, n_surfaces):
     plan["wants_dy"] = wants_dy
     plan["wants_z"] = wants_z
 
+    # The decenter is an after-surface decenter authored on first-1; for first=1 that is the OBJECT.
+    if first == 1 and (wants_dx or wants_dy):
+        raise ToolParamError(
+            "array first=1 with a decenter_x/decenter_y is refused: the decenter is an "
+            "after-surface decenter authored on surface first-1, which would be the OBJECT "
+            "(surface 0). Use first >= 2, or insert a dummy surface before the span"
+        )
+
     # D5 firewall: a Z-on-glass (first-1 NOT an airgap) is refused PRE-mutation.
     if wants_z:
         z_gap = first - 1
@@ -958,9 +966,45 @@ def _independent_label(mode):
 # The ARRAY orchestration (§5).
 # --------------------------------------------------------------------------- #
 def _compose_array(session, plan):
+    """array: the reach gate runs against the CONFIG-1 (pre-placement) semi-diameters.
+
+    An Automatic semi-diameter grows to enclose a beam the decenter walked off the optic, so
+    the reach and vignetting checks pass at any decenter. Config 1 is made active, the span's
+    Automatic semi-diameters are held at their current values, the composer runs, and the
+    semi-diameters are re-floated in a ``finally`` on EVERY path (success, refusal,
+    exception). A restore that does not read back as Automatic after a successful compose
+    rolls the call back. The IMAGE surface is not pinned (the after-surface decenter moves every later
+    surface including the image while the beam stays, so a normal placement lands at -dx in the image
+    frame, off the config-1 image aperture): the image landing is NOT bounded by
+    an aperture and a beam leaving the detector is not caught here. See ``_compose_array_body``.
+    """
+    system = session.system
+    _switch_config(session, 1)
+    pins = {"pinned": [], "skipped": []}
+    try:
+        _za.pin_span_apertures(system, plan["first"], pins)
+        result = _compose_array_body(session, plan)
+    finally:
+        failed = _za.restore_span_apertures(system, pins)
+    if failed:
+        raise _ZoomUnverified(
+            f"the pinned semi-diameters of surfaces {failed} did not read back as Automatic "
+            "after the array compose; rolling back rather than leaving a frozen aperture",
+            family=_ZOOM_WRITE,
+        )
+    result["reach_apertures"] = {
+        "basis": "config_1_semi_diameters_except_image",
+        "pinned_surfaces": [k for k, _v in pins["pinned"]],
+        "not_pinned": [{"surface": k, "reason": r} for k, r in pins["skipped"]],
+    }
+    return result
+
+
+def _compose_array_body(session, plan):
     """array: author the element-coord rows + DIRECT placement + REAL-RAY falsify (§5).
 
-    Authors the requested ``CADX``/``CADY`` rows on ``first`` and the ``THIC``-Z row on
+    Authors the requested ``CADX``/``CADY`` rows on ``first-1`` (they are AFTER-surface decenters,
+    so this moves surface ``first`` onward and the whole span moves) and the ``THIC``-Z row on
     ``first-1`` (only the operands a position requests, §5.1), writes each per-config value
     (S1 ``set_config_value``, INVARIANT-1), then per config FALSIFIES: ``beam_reaches_span``
     (reach commit gate) + the RAGX/REAX-DIFFERS bite (the real-ray oracle, NEVER
@@ -976,10 +1020,10 @@ def _compose_array(session, plan):
     authored = []
     row_dx = row_dy = row_z = None
     if plan["wants_dx"]:
-        row_dx = _author_element_row(session, "CADX", first)
+        row_dx = _author_element_row(session, "CADX", first - 1)
         authored.append("CADX")
     if plan["wants_dy"]:
-        row_dy = _author_element_row(session, "CADY", first)
+        row_dy = _author_element_row(session, "CADY", first - 1)
         authored.append("CADY")
     if plan["wants_z"]:
         row_z = _author_element_row(session, "THIC", plan["z_gap"])
@@ -1619,7 +1663,13 @@ SET_ZOOM_SPEC = ToolSpec(
         "solves the object gap so each config hits its targets PMAG; mode='focus' solves "
         "the back gap to a per-config back_distances OR (absent) minimizes per-config "
         "defocus; mode='array' relocates an element span (first..last) to a per-config "
-        "positions list of {decenter_x, decenter_y, z}. Proves zoom/focus/conjugate by "
+        "positions list of {decenter_x, decenter_y, z}: the decenter is an after-surface "
+        "decenter authored on surface first-1, so surface first and every later surface of "
+        "the span move and the surface before the span does not. The reach check holds the semi-diameters of the "
+        "reach span (surface first-1 through N-2, every optic downstream of the span; not the image) at their config-1 values (reach_apertures); the image surface is "
+        "NOT pinned, so the image landing is not bounded by an aperture and a beam leaving the "
+        "detector is not caught by this gate. first=1 with a decenter is refused (the decenter "
+        "row would be the object). Proves zoom/focus/conjugate by "
         "re-reading the grading operand per config AND an independent cross-config "
         "ordering/PMAG-differs gate; proves array by tracing the real chief ray to the "
         "IMAGE plane (its landing moves per config tracking the decenters AND the rays "

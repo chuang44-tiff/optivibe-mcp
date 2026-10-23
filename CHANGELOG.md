@@ -2,12 +2,115 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.1.18`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.2.0`). Each tag points at the merge
 commit that published that version, and every tag was verified against the four version
 literals in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.0] — 2026-10-23
+
+OptiVibe installs with one command. The server and the reference layer are published on PyPI,
+and the server is listed in the MCP Registry.
+
+### Added
+
+- **`pip install optivibe-mcp`** installs the MCP server and the reference layer it composes
+  (`optivibe-reference` comes as a dependency). Three console commands come with it:
+  `optivibe-mcp` (the stdio server), `optivibe-doctor` (the install check) and
+  `optivibe-build-data` (builds the reference data from your own licensed OpticStudio install,
+  with no clone; `--probe` needs the `optivibe-reference[probe]` extra, which the server install
+  already carries).
+- **`get_operand` adds a `paraxial_caution` to `ISNA` and `ISFN`.** On a fast lens the paraxial
+  image-space NA reads below the real one (and `ISFN` above the working F-number); the caution
+  points at `WFNO` and at `lookup_operand`. The value is unchanged. `lookup_operand` carries the
+  same caution on its `ISNA` and `ISFN` entries.
+- **`get_mtf` proves which series is the diffraction limit.** It turns the diffraction-limit
+  curve on for its own run (the saved setting is not changed) and names series 0 the limit only
+  when the engine's description of it says so. New fields: `diffraction_limit_shown` and
+  `diffraction_limit_note`; `diffraction_limit_series` is null when the curve could not be
+  proven, and `validity_warning` then carries the note.
+- **`trial_glass_swaps` sizes its own budget and reruns an unfinished set once.** Without
+  `time_budget_s`, the control runs first and each swap set gets a budget sized from the
+  control's time to rest. A set that stops on its time budget is rerun once from its checkpoint
+  after all sets have run, and the rerun gives the verdict. The new `budget` field says how each
+  budget was sized, cut or rerun. An explicit `time_budget_s` still wins.
+
+### Changed
+
+- **The harness distribution is renamed `optivibe-harness` → `optivibe-mcp`.** The import
+  packages (`optivibe_harness`, `optivibe_doctor`) are unchanged. In a clone, install the
+  reference package first (`pip install -e packages/optivibe-reference`), then
+  `pip install -e packages/optivibe-harness`; uninstall an old `optivibe-harness` first.
+- **The data build moves into the reference package.** The glass, manual and probe scripts under
+  `packages/optivibe-reference/scripts/` keep their command lines and now call the package
+  modules. In an installed package the live-probe captures go
+  under the package's `data/captures` folder.
+- **The doctor names the `optivibe-mcp` distribution**, and its missing-data remedy tells an
+  install without a clone to run `optivibe-build-data`.
+- **`optivibe-mcp` pins `optivibe-reference` to the same version**, so the server and its
+  reference layer always install as a matched pair.
+- **`set_zoom` (array mode) moves the whole span.** The decenter is written on the surface before
+  `first`, so surface `first` moves with the rest of the span (the same arguments give different
+  geometry than before). `first=1` with a lateral decenter is refused up front. The reach check
+  holds the Automatic semi-diameters of the span at their configuration-1 values, so a beam that
+  walks off is refused as `array_unreached` and rolled back; the new `reach_apertures` field says
+  which surfaces were held. The image surface is not held, so check the image landing yourself.
+- **`add_return_cb` on a surface that is already a coordinate break no longer overwrites a solve
+  silently.** A Par cell holding a non-Fixed solve, or one that cannot be read, is refused as
+  `cb_solve_loss` with nothing written, unless `replace_solve=true`; the result then lists
+  `replaced_par_solves`, `preserved_par_solves` and `unreadable_par_cells`. A cell that already
+  holds the same pickup is not a loss. `par_solve_not_checked` and `par_solve_reason` are removed;
+  `par_solve_loss_audited` is true instead.
+- **`remove_surface` reports `repointed_to_successor`** when a cocentric, center-of-curvature,
+  compensator or position solve that referenced the removed surface now points at the surface that
+  slid into its place. A PickupChiefRay Par cell is no longer reported as unscanned.
+- **`save_candidate` deletes the `.ZDA` companion its own save produced.** `zda_present` is false
+  after a normal save (null when it cannot be read). A companion that existed before the save is
+  kept and flagged `zda_preexisting`; a failed delete adds `zda_removal_error`.
+- **`promote_best` names a scope mismatch.** When the picture's record was written at different
+  floors than the promote, `best_png_reason` reads `png_record_scope_mismatch`;
+  `png_production_record_not_written` now means only that no record was written.
+- **`render_layout` proves `out_of_plane` from geometry too**: a surface vertex or a traced ray
+  point off the drawing plane makes it true, so tilted mirrors and X decenters now read true. It is
+  null, with a disclosure line, when a surface frame could not be read. `out_of_plane_scope` says
+  what was read. A far-object view whose end gap is negative reports `virtual_conjugate_no_cut`,
+  and on an unfolded design the fill ignores coordinate breaks and undrawn dummy rows.
+- **`tolerance` and `load_design` no longer warn about a real design saved under the temp
+  folder**; the harness's own checkpoint files still warn. The warning for a last glass element
+  that touches the image now says it is a standing limit and how to cover it (a zero-thickness air
+  surface after the last glass).
+
+### Fixed
+
+- **The reference tools' "not built" errors name `optivibe-build-data`** (and the clone script
+  second), so an install without a clone is told a command it has.
+- **`optivibe-build-data` says when your OpticStudio's operand list differs from the curated
+  one.** The merit and tolerance catalogs build only for the operand set their curated data
+  covers; on another set the step now says so instead of asking you to run `--probe` again. The
+  manual step no longer fails when only one of the two operand captures is present. The clone
+  script `scripts/build_vendor_data.py` behaves the same.
+- **`set_field` (replacing all fields) reports a partial rebuild.** An engine error mid-rebuild
+  now says how many new fields were added and how many old ones were deleted before it stopped.
+- **A failed configuration restore is no longer lost.** When a tool that switches configuration
+  fails and the switch back does not verify, the error carries the restore warning.
+- **The stdio log follows the workspace root the server anchored at start**, not a later change
+  to `OPTIVIBE_WORKSPACE_ROOT`.
+- **`release_engine` with `kill_others=true` no longer calls an engine whose command line it
+  cannot read "interactive".** It is listed in `cmdline_unreadable`, never killed, and counted
+  as still running.
+- **`set_solve` refuses a ChiefRayAngle solve that cannot act**: on a mirror, or on a radius with
+  no refractive power for the chief ray (a stop dummy, a plane or air-air surface), it is refused
+  before anything is written. It was accepted, changed nothing, and could be reported as a match.
+- **`set_solve` verifies negative MarginalRayHeight and ChiefRayHeight targets** like positive
+  ones, instead of declining to check them.
+- **`tolerance` works on a design saved by `save_candidate` or `save_snapshot`.** The save hands
+  the engine a forward-slash path; before, the next `tolerance` could return an empty report.
+- **A tilted object surface no longer makes a save or promote clearance verdict indeterminate**;
+  only a sag-unfaithful surface that bounds a measured gap does.
+- **Folded layouts draw the image plane and the stop ticks in the surface's own tilted frame**,
+  not as vertical lines.
 
 ## [0.1.18] — 2026-10-22
 
@@ -338,6 +441,7 @@ A housekeeping release: no new tools.
 
 - Initial public release of optivibe-mcp.
 
+[0.2.0]: ../../compare/v0.1.18...v0.2.0
 [0.1.18]: ../../compare/v0.1.17...v0.1.18
 [0.1.17]: ../../compare/v0.1.16...v0.1.17
 [0.1.16]: ../../compare/v0.1.15...v0.1.16

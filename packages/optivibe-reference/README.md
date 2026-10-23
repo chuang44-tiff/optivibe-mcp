@@ -5,7 +5,7 @@ The grounding layer for optivibe-mcp: deterministic lookup tables, a SQLite
 grounding index. It lets the agent consult operand meanings, glass properties,
 and manual passages so its choices are grounded rather than guessed.
 
-It is composed **in-process** by `optivibe-harness` (not a standalone server) and
+It is composed **in-process** by `optivibe-mcp` (not a standalone server) and
 exposes five tools: `lookup_operand`, `search_reference`, `lookup_glass`,
 `find_glasses`, and `find_glass_pair`.
 
@@ -16,8 +16,9 @@ No vendor data is committed. The glass catalog (recomputed from your install's
 description-bearing operand/tolerance catalogs are all **built on your machine
 from your own licensed OpticStudio install** and are gitignored. Only the
 author's own sources ship — the `*_synonyms.json` intent vocabularies and
-`operand_semantics.json`. See the repo-root `README.md` for the build steps and
-`PROVENANCE.md` for the data-source ledger.
+`operand_semantics.json`. Build the data with the `optivibe-build-data` command that
+comes with the package; the [repository README](https://github.com/chuang44-tiff/optivibe-mcp#readme) has the
+steps and `PROVENANCE.md` the data-source ledger.
 
 Any tool whose data has not been built degrades to a typed "unavailable" result
 instead of failing — the rest of the server keeps working.

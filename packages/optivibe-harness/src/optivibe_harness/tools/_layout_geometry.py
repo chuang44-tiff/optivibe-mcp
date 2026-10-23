@@ -1303,6 +1303,10 @@ class ProjectionState:
     out_of_plane: "bool | None"
     out_of_plane_surfaces: "tuple[int, ...]"
     unreadable_surfaces: "tuple[int, ...]"
+    # The surfaces whose GLOBAL FRAME could not be read for the vertex check (also
+    # listed in ``unreadable_surfaces`` when they leave the verdict unknown). Empty
+    # means every frame the vertex check needed was read.
+    frame_unreadable: "tuple[int, ...]" = ()
 
 
 # The three coordinate-break terms that PROVE out-of-plane geometry. ``decenter_y``
@@ -1369,6 +1373,95 @@ def read_projection_state(lde, n, rows):
         out_of_plane_surfaces=tuple(proven),
         unreadable_surfaces=tuple(unreadable),
     )
+
+
+# The geometric out-of-plane threshold: |global x| above this (mm) is "off the drawn
+# plane". Measured (live): both in-plane controls (the unfolded Cooke and
+# a 60-degree in-plane fold) read max |x| of EXACTLY 0.0 for vertices and rays, so no
+# noise floor exists to calibrate against; 1e-9 mm (one picometre) is "non-zero beyond
+# float noise" -- far above rotation-matrix round-off at lens scale (about 1e-13 mm for
+# a 1e3 mm coordinate), far below any decentre or tilt anyone authors.
+OOP_X_TOL_MM = 1e-9
+
+
+def vertices_off_plane(frames):
+    """The surfaces whose GLOBAL vertex x lies beyond ``OOP_X_TOL_MM`` (mm).
+
+    ``frames`` is ``read_global_frames`` output; a frame that is not ``ok`` (or a
+    non-finite x) proves nothing and is skipped -- this only ever ADDS a proof, it
+    never produces an in-plane verdict.
+    """
+    out = []
+    for i, frame in enumerate(frames or ()):
+        try:
+            if not frame.get("ok"):
+                continue
+            x = float(frame["vertex"][0])
+        except Exception:  # noqa: BLE001 -- an unreadable frame proves nothing
+            continue
+        if math.isfinite(x) and abs(x) > OOP_X_TOL_MM:
+            out.append(i)
+    return out
+
+
+def frames_unreadable(frames, skip=()):
+    """The surfaces whose GLOBAL frame did not read (``ok`` false, or malformed),
+    excluding ``skip`` (a surface that has no vertex to read, such as an object at
+    infinity). ``frames`` is ``read_global_frames`` output."""
+    skip = {int(s) for s in skip}
+    out = []
+    for i, frame in enumerate(frames or ()):
+        if i in skip:
+            continue
+        try:
+            ok = bool(frame.get("ok"))
+            float(frame["vertex"][0]) if ok else None
+        except Exception:  # noqa: BLE001 -- a malformed frame is an unread frame
+            ok = False
+        if not ok:
+            out.append(i)
+    return out
+
+
+def widen_projection(projection, *surface_groups, frame_unreadable=()):
+    """Fold the geometric (vertex / ray) evidence into a ``ProjectionState``.
+
+    ``surface_groups`` are iterables of surface indices whose measured global x (a
+    vertex, or a traced ray point) lies off the plane. ``frame_unreadable`` names the
+    surfaces whose frame the vertex check needed and could not read.
+
+    - Any proof: ``out_of_plane`` becomes ``True``; the surfaces are the sorted union.
+    - No proof, and the prescription already said True: stays True.
+    - No proof, unread frames, and the state was False: it becomes ``None`` (the
+      vertex check did not run to completion, so planarity is NOT established), with
+      those surfaces added to ``unreadable_surfaces``. A state that was already
+      ``None`` stays ``None`` and gains them.
+    - Otherwise ``projection`` is returned UNCHANGED (never narrowed).
+    ``frame_unreadable`` is recorded on the result in every case.
+    """
+    proven = set()
+    for group in surface_groups:
+        proven.update(int(s) for s in group)
+    unread = tuple(sorted({int(s) for s in frame_unreadable}))
+    if not proven and not unread and projection.out_of_plane is True:
+        return projection
+    if proven or projection.out_of_plane is True:
+        proven.update(projection.out_of_plane_surfaces)
+        return ProjectionState(
+            out_of_plane=True,
+            out_of_plane_surfaces=tuple(sorted(proven)),
+            unreadable_surfaces=projection.unreadable_surfaces,
+            frame_unreadable=unread,
+        )
+    if unread:
+        return ProjectionState(
+            out_of_plane=None,
+            out_of_plane_surfaces=projection.out_of_plane_surfaces,
+            unreadable_surfaces=tuple(sorted(
+                set(projection.unreadable_surfaces) | set(unread))),
+            frame_unreadable=unread,
+        )
+    return projection
 
 
 def _classify_cb_row(lde, i, proven, unreadable):

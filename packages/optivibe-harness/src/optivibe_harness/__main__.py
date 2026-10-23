@@ -72,7 +72,7 @@ import math
 import os
 import sys
 
-from ._stdio_log import _LOG_FILENAME, _open_log_fd
+from ._stdio_log import _LOG_FILENAME, _open_log_fd, pin_workspace_root as _pin_workspace_root
 from .composite import compose_dispatchers
 from .lazy import LazyHarnessDispatcher
 from .server import _safe_error_text
@@ -473,6 +473,7 @@ def main():
             # currency predicate stays pure and every consumer sees an absolute path.
             session.workspace_root = os.path.abspath(
                 os.environ.get("OPTIVIBE_WORKSPACE_ROOT") or os.getcwd())
+            _pin_workspace_root(session.workspace_root)
         except OSError:
             pass  # deleted cwd + no env override -> leave unset (tier-4 fallback)
 

@@ -62,6 +62,8 @@ packages/optivibe-reference/src/optivibe_reference/data/tolerance_operand_descri
 
 # Verbatim manual-prose extracts (the paraphrase oracle) — never committed
 packages/optivibe-reference/scripts/captures/
+# The same live-probe captures when the package is installed (optivibe-build-data)
+packages/optivibe-reference/src/optivibe_reference/data/captures/
 
 # ------------------------------------------------------------------------------
 # Engine artifacts (regenerable OpticStudio companions / intermediates)

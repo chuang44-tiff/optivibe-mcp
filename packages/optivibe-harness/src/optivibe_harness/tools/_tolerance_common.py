@@ -153,9 +153,22 @@ _NEW_BOUNDARY_CHARS = " _-"
 # (``optivibe_lens_ckpt`` / ``optivibe_tol_``): a system whose backing-file BASENAME
 # STARTS WITH one of OUR temp-checkpoint prefixes is NOT a blessed on-disk original.
 # Matched with ``startswith`` on the BASENAME (the bare ``optivibe_`` prefix is
-# DROPPED so a legit ``optivibe_final.zmx`` is not false-flagged; a %TEMP% path is still
-# caught by the tempdir gate below).
-_CHECKPOINT_PREFIXES = ("optivibe_lens_ckpt", "optivibe_tol_")
+# DROPPED so a legit ``optivibe_final.zmx`` is not false-flagged; the OS temp directory
+# itself is NOT a signal -- see the end of ``classify_system_file``).
+#: The temp-file prefixes the harness creates for SaveAs checkpoints (and its ``.MF``
+#: temps). A checkpoint leaves ``SystemFile`` on a temp file that is reaped afterwards, so
+#: it must never read blessed. ``test_checkpoint_prefixes_census`` parses ``src/`` for every
+#: ``mkstemp`` / ``NamedTemporaryFile`` / ``mkdtemp`` / ``TemporaryDirectory`` /
+#: ``exclusive_temp`` call and proves: each ``optivibe_`` prefix is listed here, and each
+#: design-file (``.zmx``) creation in a module that calls ``SaveAs`` has a prefix that
+#: resolves (literal, module constant or f-string head) and is listed here. It does NOT
+#: cover a prefix passed through a value it cannot resolve (that fails the census), nor a
+#: design saved to a non-temp path (a real design, correctly blessed).
+_CHECKPOINT_PREFIXES = (
+    "optivibe_lens_ckpt", "optivibe_tol_", "optivibe_ramp_ckpt_",
+    "optivibe_place_ckpt_", "optivibe_fold_ckpt_", "optivibe_zoom_ckpt_",
+    "optivibe_hammer_", "optivibe_preserve_", "optivibe_ckpt_",
+)
 
 
 def classify_system_file(system_file):
@@ -164,8 +177,8 @@ def classify_system_file(system_file):
     Pure (no engine touch — takes the ALREADY-read path string / None). Returns
     ``(blessed_hint, warning_or_None)``:
 
-    - empty / ``None`` / a ``New()``-default name / a path under the OS temp dir or a
-      harness checkpoint prefix -> ``(False, <loud warning>)``: this system is not
+    - empty / ``None`` / a ``New()``-default name / a harness checkpoint prefix
+      -> ``(False, <loud warning>)``: this system is not
       backed by a saved design on disk, so the run will LIKELY produce no report.
     - a real on-disk path (anything else) -> ``(True, None)``: a HINT, not a guarantee
       (the post-run empty-report net is definitive — cond F: a byte-identical same-folder
@@ -198,14 +211,11 @@ def classify_system_file(system_file):
                 return False, warn
     if any(base.startswith(p) for p in _CHECKPOINT_PREFIXES):
         return False, warn
-    try:
-        import tempfile
-        tmp = os.path.normcase(os.path.normpath(tempfile.gettempdir()))
-        norm = os.path.normcase(os.path.normpath(system_file))
-        if norm.startswith(tmp + os.sep) or norm == tmp:
-            return False, warn
-    except Exception:  # noqa: BLE001 — a temp-dir resolution failure -> no temp gate
-        pass
+    # NO temp-directory gate. A design saved under the OS temp dir with a forward-slash
+    # path tolerances fine (measured on OpticStudio 25.1.0: ok, same nominal), so the
+    # directory is not evidence of an unsaved design; the real discriminators are the
+    # empty / New()-default / checkpoint-prefix tests above. A temp-dir path used to be
+    # classed non-blessed here, which false-warned on every workspace under %TEMP%.
     return True, None
 
 # The report header line the engine ALWAYS emits headless (PROBE-2, D13/G-COMP-

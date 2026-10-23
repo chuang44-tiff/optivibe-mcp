@@ -1,0 +1,5 @@
+# Provenance grants an installed optivibe-reference ships in place of the repository's
+# provenance ledger. The glass-catalog and manual-corpus builds each require their line
+# below (the ledger-row marker) before they derive anything from the licensed install.
+Glass catalog (Nd/Vd/coeffs
+OpticStudio manual FTS5 index

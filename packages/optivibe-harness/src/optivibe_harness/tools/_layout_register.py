@@ -328,6 +328,46 @@ def optics_fill(points, n, start, end, canvas=FAR_REFERENCE_CANVAS):
     return max(fw, fh)
 
 
+def fill_points(rows, n, points, *, scaffold=None):
+    """``points`` as the FILL calculation reads them: an interior row (``1..n-2``) that is
+    a coordinate break, has no MEASURED aperture, or is NOT DRAWN contributes its VERTEX
+    only.
+
+    Such a row carries the aperture fallback (the largest finite semi on the system,
+    object included) as its draw height, or -- for a measured but suppressed scaffold
+    row (a flat powerless air dummy with a big semi) -- an edge nothing draws, so its
+    predicted edge points are not ink: a ``fold_beam`` coordinate-break row on a lens
+    with an object at 1e5 mm inherited 36401 mm edges and lifted the fill to 0.718.
+    ``surface_points`` itself is NOT changed (the native registration reads it); this is
+    a view for ``optics_fill`` only. ``scaffold`` is the injected renderer predicate
+    (``layout_render._is_suppressed_scaffold``); without it only the CB and unmeasured
+    arms apply. Rows with no ``semi_diameter`` key are not called unmeasured. There is
+    no all-masked escape: an all-vertex fill is a fill, and the extent and ``L`` guards
+    in ``far_object_decision`` handle a degenerate one.
+    """
+    if points is None:
+        return None
+    masked = []
+    try:
+        for i in range(1, n - 1):
+            r = rows[i]
+            if (_geom._is_coordinate_break(str(r.get("type_name", "")))
+                    or ("semi_diameter" in r
+                        and not _geom._semi_is_measured(r["semi_diameter"]))
+                    or (scaffold is not None
+                        and not is_drawn_optical(rows, i, n, scaffold=scaffold))):
+                masked.append(i)
+    except Exception:  # noqa: BLE001 -- an unreadable row restricts nothing
+        return points
+    if not masked:
+        return points
+    out = list(points)
+    for i in masked:
+        p = out[i]
+        out[i] = SurfacePoint(p.surface, p.z, p.y, p.z, p.y, p.z, p.y)
+    return out
+
+
 @dataclass(frozen=True)
 class FarDecision:
     """The shared far-object decision. ``excluded`` entries are the envelope's
@@ -348,13 +388,25 @@ class FarDecision:
     reason: "str | None" = None
 
 
-def far_object_decision(rows, n, points):
+def far_object_decision(rows, n, points, *, restrict_fill=True, scaffold=None):
     """The AXIAL far-object rule (fill trigger + gap ratio), used by EVERY renderer.
 
     ``fill < FILL_TRIGGER`` is the trigger; the ratio only picks the end (the ratio
     alone mis-orders Relay vs MIL — measured). An infinite object is never cut.
     ``reason``: ``None`` | ``"speck_no_cut"`` (triggered, nothing qualifies) |
+    ``"virtual_conjugate_no_cut"`` (triggered, nothing cut, and an end gap is NEGATIVE:
+    a virtual object or image -- the sign is kept, so it is never counted as a far gap
+    here, and the reason says so instead of the generic no-cut) |
     ``"extent_unreadable"`` (no points, or a non-positive optics length).
+
+    ``restrict_fill=False`` is the pre-restriction arithmetic (placeholder edges of
+    unmeasured rows included); the renderer keeps it for every path that CUTS on a folded
+    system, so the restricted fill only ever changes what a folded self render discloses.
+
+    The constants are unchanged: measured on the 95 vendor samples, one real speck sits
+    below the trigger (a singlet eyepiece, fill 0.022, image gap -1000 mm, ratio
+    -25.97) and the signed rule cannot cut it -- by design: cutting a virtual image
+    would remove the only cue for where the image is.
     """
     start0, end0 = native_default_range(rows, n) if n > 0 else (1, n - 1)
 
@@ -382,7 +434,9 @@ def far_object_decision(rows, n, points):
 
     if points is None or L is None or L <= 0:
         return _none("extent_unreadable")
-    fill = optics_fill(points, n, start0, end0)
+    fill = optics_fill(
+        fill_points(rows, n, points, scaffold=scaffold) if restrict_fill else points,
+        n, start0, end0)
     if fill is None:
         return _none("extent_unreadable")
     lead_ratio = lead / L if lead is not None else None
@@ -399,7 +453,11 @@ def far_object_decision(rows, n, points):
         excluded.append({"surface": n - 1, "role": "image", "gap_mm": trail,
                          "gap_over_length": trail_ratio, "fill": fill,
                          "basis": "fill_and_ratio"})
-    reason = "speck_no_cut" if triggered and not (cut_object or cut_image) else None
+    reason = None
+    if triggered and not (cut_object or cut_image):
+        virtual = ((lead is not None and lead < 0)
+                   or (trail is not None and trail < 0))
+        reason = "virtual_conjugate_no_cut" if virtual else "speck_no_cut"
     return FarDecision(
         fill=fill, L=L, lead_gap=lead, trail_gap=trail, lead_ratio=lead_ratio,
         trail_ratio=trail_ratio, triggered=triggered, cut_object=cut_object,

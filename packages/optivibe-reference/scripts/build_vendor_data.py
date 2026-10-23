@@ -45,7 +45,7 @@ for _p in (_HERE, _SRC):
 
 import build_glass_catalog  # noqa: E402
 import build_manual_corpus  # noqa: E402
-from optivibe_reference import catalog_build, tolerance_build  # noqa: E402
+from optivibe_reference import build_data, catalog_build, tolerance_build  # noqa: E402
 
 _CAPTURES = os.path.join(_HERE, "captures")
 # The live-probe captures each operand-catalog build REQUIRES (regenerated from
@@ -65,6 +65,11 @@ def _run_catalog_step(label, captures, build_main):
     (that domain's operand tools answer operand_catalog_unavailable until built).
     Present captures + a raised error OR a nonzero build exit code -> FAILED.
     """
+    blocker = build_data.catalog_step_blocker(captures, _CAPTURES)
+    if blocker is not None:
+        print("[%s] SKIPPED - %s" % (label, blocker))
+        print("[%s] this operand family answers operand_catalog_unavailable." % label)
+        return 0
     if not _captures_present(captures):
         print("[%s] SKIPPED - live-probe captures not present in scripts/captures. "
               "Run the probes against your OpticStudio first: "
@@ -102,19 +107,19 @@ def main():
     print("=== [2/4] manual corpus + verbatim raw oracles (from your install's PDF) ===")
     try:
         # --emit-raw ALSO writes the gitignored operand/tolerance raw oracles that
-        # steps 3-4 merge as verbatim-local descriptions. The TOLERANCE oracle opens
-        # the tolerance INVENTORY capture (tolerance_inventory_62.json) unconditionally
-        # — absent, --emit-raw raises FileNotFoundError mid-run and the whole manual
-        # step (corpus + merit oracle already written) is mis-reported FAILED. Preflight
-        # that capture: emit the oracles only when it is present, else build the corpus
-        # WITHOUT --emit-raw — the SAME fresh-install degrade steps 3-4 take (operand/
-        # tolerance stay synonyms-only / unavailable), never a FAIL. build_manual_corpus
-        # itself still skips cleanly (exit 0 + message) when no licensed PDF is present.
-        if os.path.isfile(os.path.join(_CAPTURES, "tolerance_inventory_62.json")):
+        # steps 3-4 merge as verbatim-local descriptions. It opens BOTH inventory
+        # captures unconditionally (merit for the glued-code gate, tolerance for the
+        # tolerance oracle) — either absent, --emit-raw raises FileNotFoundError mid-run
+        # and the whole manual step is mis-reported FAILED. Preflight both: emit the
+        # oracles only when both are present, else build the corpus WITHOUT --emit-raw —
+        # the SAME fresh-install degrade steps 3-4 take (operand/tolerance stay
+        # synonyms-only / unavailable), never a FAIL. build_manual_corpus itself still
+        # skips cleanly (exit 0 + message) when no licensed PDF is present.
+        if _captures_present(build_data.EMIT_RAW_CAPTURES):
             emit_args = ["--emit-raw"]
         else:
             emit_args = []
-            print("[manual-build] NOTE: tolerance inventory capture absent -> building "
+            print("[manual-build] NOTE: an operand inventory capture is absent -> building "
                   "corpus WITHOUT --emit-raw; operand/tolerance catalogs stay "
                   "synonyms-only until the live-probe captures are regenerated.")
         build_manual_corpus.main(emit_args)

@@ -20,6 +20,7 @@ from .._io import safe_float
 from ..enums import _resolve_enum
 from ..errors import SurfaceWriteError, ToolParamError
 from ..server import ToolSpec
+from . import _error_note as _en
 
 
 def _zosapi_enum(system, enum_name):
@@ -71,6 +72,41 @@ def _coerce_triple(value, *, length, label):
             )
         out.append(float(item))
     return out
+
+
+
+def _partial_rebuild_note(appended, total, deleted, original):
+    """The note for a replace-all that threw mid-rebuild (counts are the calls that completed)."""
+    return (
+        f"; the field set is PARTIAL: {appended} of {total} new fields were appended and "
+        f"{deleted} of {original} old fields were deleted before the failure (the failing "
+        "call itself is unknown), so the lens may hold old and new fields together"
+        + ("; Multi-Configuration rows that name a deleted field may be gone" if deleted else "")
+        + "; read the field set back before continuing"
+    )
+
+
+def _rebuilt_then_failed_note(system, mce_before):
+    """The note for a replace-all whose rebuild finished but whose read-back then failed."""
+    try:
+        from . import _config_common as _cc  # local: matches set_field's own deferred import
+
+        report = _cc.mce_rows_deleted(system, mce_before)
+        state = report.get("state")
+        gone = len(report.get("deleted") or [])
+    except Exception:  # noqa: BLE001 -- the note must never replace the real error
+        state, gone = "not_read", 0
+    if state == "rows_deleted":
+        mce = f"{gone} Multi-Configuration row(s) naming a deleted field were removed"
+    elif state == "unchanged":
+        mce = "no Multi-Configuration row was removed"
+    else:
+        mce = "whether Multi-Configuration rows were removed could not be read"
+    return (
+        "; the field set WAS already rebuilt (the old fields are deleted and every field's "
+        f"vignetting was reset) before this check failed; {mce}; read the field set back "
+        "before continuing"
+    )
 
 
 def set_field(session, params):
@@ -155,12 +191,19 @@ def set_field(session, params):
         # The engine deletes every MCE row that names a deleted field, so read the MCE
         # first and report what is gone afterwards (the other paths keep every row).
         mce_before = _cc.mce_snapshot(system)
-        for x, y, w in triples:
-            fields.AddField(x, y, w)
-        # Remove the pre-existing fields (indices 1..original_count) from the top
-        # down so indices stay valid; the API is 1-based for field rows.
-        for i in range(original_count, 0, -1):
-            fields.DeleteFieldAt(i)
+        appended = deleted = 0
+        try:
+            for x, y, w in triples:
+                fields.AddField(x, y, w)
+                appended += 1
+            # Remove the pre-existing fields (indices 1..original_count) from the top
+            # down so indices stay valid; the API is 1-based for field rows.
+            for i in range(original_count, 0, -1):
+                fields.DeleteFieldAt(i)
+                deleted += 1
+        except Exception as exc:  # noqa: BLE001 -- re-raised below with the partial state named
+            _en.raise_with_note(exc, _partial_rebuild_note(
+                appended, len(triples), deleted, original_count))
         intended_count = len(triples)
         for idx, (x, y, w) in enumerate(triples, start=1):
             intended[idx] = (x, y, w)
@@ -224,30 +267,37 @@ def set_field(session, params):
     else:
         intended_count = int(fields.NumberOfFields)
 
-    actual_count = int(fields.NumberOfFields)
-    if actual_count != intended_count:
-        raise SurfaceWriteError(
-            f"set_field field count mismatch: intended={intended_count} "
-            f"actual={actual_count}",
-            field="field_count",
-            intended=intended_count,
-            actual=actual_count,
-            surface=None,
-        )
+    try:
+        actual_count = int(fields.NumberOfFields)
+        if actual_count != intended_count:
+            raise SurfaceWriteError(
+                f"set_field field count mismatch: intended={intended_count} "
+                f"actual={actual_count}",
+                field="field_count",
+                intended=intended_count,
+                actual=actual_count,
+                surface=None,
+            )
 
-    # Read-back-verify the written x/y/weight of each affected field.
-    out_fields = []
-    for i in range(1, actual_count + 1):
-        f = fields.GetField(i)
-        ax, ay, aw = float(f.X), float(f.Y), float(f.Weight)
-        if i in intended:
-            ix, iy, iw = intended[i]
-            _c._verify_or_raise(f"field_{i}_x", ix, ax, surface=None)
-            _c._verify_or_raise(f"field_{i}_y", iy, ay, surface=None)
-            _c._verify_or_raise(f"field_{i}_weight", iw, aw, surface=None)
-        out_fields.append(
-            {"x": safe_float(f.X), "y": safe_float(f.Y), "weight": safe_float(f.Weight)}
-        )
+        # Read-back-verify the written x/y/weight of each affected field.
+        out_fields = []
+        for i in range(1, actual_count + 1):
+            f = fields.GetField(i)
+            ax, ay, aw = float(f.X), float(f.Y), float(f.Weight)
+            if i in intended:
+                ix, iy, iw = intended[i]
+                _c._verify_or_raise(f"field_{i}_x", ix, ax, surface=None)
+                _c._verify_or_raise(f"field_{i}_y", iy, ay, surface=None)
+                _c._verify_or_raise(f"field_{i}_weight", iw, aw, surface=None)
+            out_fields.append(
+                {"x": safe_float(f.X), "y": safe_float(f.Y), "weight": safe_float(f.Weight)}
+            )
+    except Exception as exc:  # noqa: BLE001 -- re-raised below; a replace-all disclosed nothing yet
+        if new_fields is None:
+            raise
+        _en.raise_with_note(exc, _rebuilt_then_failed_note(system, mce_before))
+
+
     # Echo the field type. On a partial in-place edit that OMITTED ``field_type``
     # (member is None), report the LIVE type so the agent sees what the field set
     # actually is; if the live read is unavailable, echo None (the omitted value).

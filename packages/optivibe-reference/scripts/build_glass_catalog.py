@@ -12,6 +12,9 @@ factual glass names land in the committed JSON. Prints ASCII status ONLY (glass
 count + path); NEVER relays raw catalog prose (the conda-run cp1252 relay also
 crashes on non-ASCII).
 
+Thin wrapper: the step itself is ``optivibe_reference.build_steps.build_glass_catalog``
+(package code, so an installed package runs it via ``optivibe-build-data``).
+
 Run:
     conda run -n optivibe-reference python scripts/build_glass_catalog.py
 """
@@ -23,30 +26,11 @@ _SRC = os.path.join(os.path.dirname(_HERE), "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from optivibe_reference import glass_build  # noqa: E402
-from optivibe_reference.glass_parse import resolve_glasscat  # noqa: E402
+from optivibe_reference.build_steps import build_glass_catalog  # noqa: E402
 
 
 def main():
-    glasscat = resolve_glasscat()
-    print("[glass-build] Glasscat dir: %s" % glasscat)
-
-    catalog = glass_build.build_glass_catalog_json(
-        glasscat, glass_build.PROVENANCE_PATH
-    )
-    glass_build.write_glass_catalog_json(glass_build.GLASS_CATALOG_JSON, catalog)
-
-    rows = catalog["rows"]
-    nd_valid = sum(1 for r in rows if r["nd_valid"])
-    pg_f_valid = sum(1 for r in rows if r["pg_f_valid"])
-    nd_null = sum(1 for r in rows if r["nd"] is None)
-    print("[glass-build] agf_glass_count: %d" % catalog["agf_glass_count"])
-    print("[glass-build] rows written:    %d" % len(rows))
-    print("[glass-build] nd_valid rows:   %d" % nd_valid)
-    print("[glass-build] pg_f_valid rows: %d" % pg_f_valid)
-    print("[glass-build] nd-null (out-of-band) rows: %d" % nd_null)
-    print("[glass-build] wrote -> %s" % glass_build.GLASS_CATALOG_JSON)
-    return 0
+    return build_glass_catalog()
 
 
 if __name__ == "__main__":

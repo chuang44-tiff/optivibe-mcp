@@ -29,6 +29,7 @@ import sqlite3
 import sys
 from collections import namedtuple
 
+from . import _paths
 from .errors import ProvenanceGateError
 
 # --- constants -------------------------------------------------------------
@@ -105,11 +106,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(_HERE, "data")
 MANUAL_DB_PATH = os.path.join(DATA_DIR, "manual_corpus.db")
 MANUAL_MANIFEST_PATH = os.path.join(DATA_DIR, "manual_manifest.json")
-# repo root = packages/optivibe-reference/.. /.. (DATA_DIR -> src/optivibe_reference/data)
-_PKG_ROOT = os.path.dirname(os.path.dirname(_HERE))
-_REPO_ROOT = os.path.dirname(os.path.dirname(_PKG_ROOT))
-PROVENANCE_PATH = os.path.join(_REPO_ROOT, "PROVENANCE.md")
-# Back-compat alias (callers historically imported the gate path by this name).
+# The ledger the gate reads: the repo-root PROVENANCE.md in a source checkout, the
+# shipped data/provenance_grants.txt marker in an installed package (``_paths``).
+PROVENANCE_PATH = _paths.provenance_ledger_path()
 
 # A built chunk. ``body`` is LOCAL-ONLY (never committed); the manifest emits
 # every field EXCEPT body.

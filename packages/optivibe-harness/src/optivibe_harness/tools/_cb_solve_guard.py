@@ -71,70 +71,133 @@ CB_SOLVE_LOSS = "cb_solve_loss"
 #: literal is what stops them drifting apart again, and it is a SERVED string.
 CHANGETYPE_ATTEMPTED = "changetype(surface=%s) — outcome UNKNOWN if this call threw"
 
-#: F-F (0.1.6 PR #8 review batch) — ``add_return_cb``'s ALREADY-CB arm.
-#:
-#: **THIS IS A DISCLOSURE, NOT A GUARD, AND THE DIFFERENCE IS THE POINT.** Nothing here
-#: inspects anything; it is the honest statement that the incumbent was NOT inspected.
-#: The precedent is ``_optimize_common._stamp_prior_solve_unchecked``, which the
-#: four Par/MCE variable tools use for the same reason — including ``set_cb_variable``,
-#: one door over in ``cb_surface.py``, which stamps at its PUBLIC entry. ``add_return_cb``
-#: was the one CB-Par writer with no stamp at all.
-#:
-#: WHAT IS NOT INSPECTED, precisely. On a return surface that is ALREADY a
-#: CoordinateBreak no retype happens, so ``precheck`` above never runs — three verified
-#: sub-claims: the precheck is guarded by
-#: ``if not _cb.is_coordinate_break(return_row):``; ``author_solve`` never looks at the
-#: incumbent; and unlike ``set_cb_variable`` there was no ``prior_solve_not_checked``
-#: stamp. ``add_return_cb`` then OVERWRITES all five Par cells (Par1..Par5) with scale--1
-#: pickups, so an incumbent Par-cell solve is replaced without a word under ``ok: true``.
-#:
-#: **DO NOT "JUST CALL THE EXISTING PRECHECK ON THE OTHER ARM."** It reads
-#: ``_sc.emit_solves_block``, which iterates the FIVE GEOMETRY CELLS only; every CB row
-#: already sets ``par_cell_solves_not_audited`` and ``precheck`` READS THAT KEY AND
-#: DISCARDS IT. There is no Par-cell solve substrate to call, so the "obvious" fix
-#: inspects the wrong cells and reports clean. The real guard is ~20-35 statements, it
-#: breaches ``cb_surface.py``'s 334 ceiling (the module measured 333 when this was
-#: written and 330 after round 2's deletion -- either way ~20-35 does not fit, and the
-#: three statements freed are NOT a budget for it), it reddens the
-#: the roadmap defers it — so it is DEFERRED by the batch's own criteria with that
-#: measurement, and this stamp is NOT a down-payment on it.
-#:
-#: AND IT NAMES NO PRE-FLIGHT REMEDY, DELIBERATELY. The obvious sentence to write here is
-#: "read the row with ``read_surface`` first" — and that door CANNOT SHOW a CB Par solve:
-#: ``emit_solves_block`` emits Par state as the single bare boolean
-#: ``par_cell_solves_not_audited`` and enumerates nothing
-#: further. Serving a remedy with no working door is the
-#: defect this repo prosecutes, so the text says what is UNKNOWABLE today instead of
-#: pointing at a door that would answer "not audited".
-#:
-#: THE TICKETS. No ticket names THIS arm specifically — that is a gap and this comment is
-#: the disclosure of it. The deferral's two halves are owned by
-#: a ticket for the Par-cell solve substrate that a
-#: real guard requires — the same ticket ``set_cb_variable``'s own stamp names, and
-#: a second one covering why a geometry-cell reader cannot
-#: be reused for this question). Both are named in the SERVED string so an agent that
-#: reads only the envelope reaches the right register entry.
-PAR_SOLVE_UNCHECKED = {
-    "par_solve_not_checked": True,
-    "par_solve_reason": (
-        "the return surface was ALREADY a CoordinateBreak, so no retype happened and the "
-        "solve-loss precheck (which runs only on the retype arm) never ran. Its five Par "
-        "cells (Par1-Par5: decenter_x, decenter_y, tilt_x, tilt_y, tilt_z) were NOT "
-        "inspected before this call OVERWROTE all five with scale -1 SurfacePickups, so "
-        "ANY incumbent Par-cell solve was replaced without being reported (whether there "
-        "WAS one is exactly what nothing here measured). THIS IS A "
-        "DISCLOSURE, NOT A GUARD: nothing was checked. The five geometry-cell audit the "
-        "retype arm uses cannot see Par cells at all, and neither can read_surface — a CB "
-        "row reports only the bare par_cell_solves_not_audited flag, so there is no door "
-        "that would have shown you the incumbent either before or after this call. "
-        "The guard needs the Par-cell solve substrate, "
-        "which is also why the existing census is "
-        "blind here. Nor is there a "
-        "general re-author door for a driving Par solve, so "
-        "this envelope states what is unknown rather than naming a recovery that does "
-        "not exist."
-    ),
-}
+#: The already-CB arm of ``add_return_cb`` writes every Par cell of the return row (the five
+#: Double cells with scale -1 pickups and the Order cell with a literal). ``precheck``
+#: below reads only the five GEOMETRY cells, so it cannot see them; ``par_precheck`` is the
+#: Par-cell reader and the refusal for that arm. It is a NEW helper, not an edit of the
+#: geometry-cell census, and it uses the same refusal family (``CB_SOLVE_LOSS``).
+_PAR_CLEAN = "Fixed"
+
+
+def _par_types(system, row):
+    """``{param: solve type name or None}`` for every Par cell the already-CB arm writes.
+
+    ``None`` is an UNREADABLE cell (fetch or solve read threw) and is treated as at risk by
+    the caller. A READ only: never mutates. NEVER raises.
+    """
+    from . import _cb_cells as _cbc
+    from . import _solve_cells as _sc
+
+    out = {}
+    for param in _cbc._PARAM_NAMES:
+        try:
+            out[param] = _sc.read_solve_type(_cbc._cb_cell(system, row, param))
+        except Exception:  # noqa: BLE001 - an unreadable Par cell is DISCLOSED as None
+            out[param] = None
+    return out
+
+
+def _par_pickup_state(system, row, param, entry_surface):
+    """``"ours"`` / ``"different"`` / ``"unreadable"``: is this Par cell the pickup the call writes?
+
+    ``"ours"``: type SurfacePickup, source surface, source column (the cell's own ParN), scale -1
+    and offset 0, all READ BACK. ``"different"``: every field READ and at least one differs.
+    ``"unreadable"``: the typed view cannot be unwrapped or any field cannot be read (UNKNOWN
+    goes toward alarm). NEVER raises.
+    """
+    import math
+
+    from . import _cb_cells as _cbc
+    from . import _solve_cells as _sc
+    from ._optimize_common import _base_token
+
+    try:
+        data = _cbc._cb_cell(system, row, param).GetSolveData()
+        view = _sc.unwrap_or_none(data)
+        if view is None:
+            return "unreadable"
+        surface = int(view.Surface)
+        scale = float(view.ScaleFactor)
+        offset = float(view.Offset)
+        column = _base_token(view.Column)
+    except Exception:  # noqa: BLE001 - an unreadable field is NOT proof of anything
+        return "unreadable"
+    same = (
+        surface == int(entry_surface)
+        and math.isclose(scale, -1.0, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(offset, 0.0, rel_tol=0.0, abs_tol=1e-12)
+        and column == _cbc._PARAM_TO_COL[param]
+    )
+    return "ours" if same else "different"
+
+
+def _par_pickup_is_unchanged(system, row, param, entry_surface):
+    """Is this Par cell ALREADY exactly the pickup ``add_return_cb`` would write? NEVER raises.
+
+    Only a READ, identical pickup counts; different or unreadable is "not unchanged" (at risk).
+    """
+    return _par_pickup_state(system, row, param, entry_surface) == "ours"
+
+
+def par_precheck(system, row, surface, replace_solve, tool, partial_state_fields,
+                 entry_surface=None, audit=None):
+    """Would the already-CB arm replace a Par-cell solve? ``(refusal or None, disclosure)``.
+
+    Refuses with ZERO mutation when any Par cell this call writes carries a solve that is
+    not ``Fixed`` (a ``Variable`` counts) or cannot be read, unless ``replace_solve`` is
+    true; the refusal family and shape are the retype arm's (``CB_SOLVE_LOSS``). When
+    ``replace_solve`` is true the call proceeds and the disclosure lists the cells it is
+    about to overwrite (``type_before`` measured before the write). ``par_final`` (success) and
+    ``failure_disclosure`` (failure) then re-read each listed cell AFTER the write and report
+    only the ones that actually changed as replaced, with ``type_after`` (a listed pickup is
+    judged by whether it now holds OUR pickup). A cell whose re-read is unreadable, its type or
+    its pickup fields, is listed as replaced with ``type_after: None`` (UNKNOWN toward alarm);
+    only a cell that was READ and unchanged (a different pickup that survived, or a solve on
+    Order, which this call does not replace) is ``preserved_par_solves``.
+    NEVER raises.
+    """
+    types = _par_types(system, row)
+    if entry_surface is not None:
+        # A cell already holding exactly the pickup this call would write is not a loss. Only
+        # the Double Par cells are written as pickups (Order is written as a literal).
+        from . import _cb_cells as _cbc
+        types = {p: (_PAR_CLEAN if t == "SurfacePickup" and p in _cbc._DOUBLE_PARAMS
+                     and _par_pickup_is_unchanged(system, row, p, entry_surface) else t)
+                 for p, t in types.items()}
+    at_risk = [p for p, t in types.items() if t is not None and t != _PAR_CLEAN]
+    unreadable = [p for p, t in types.items() if t is None]
+    if not replace_solve and (at_risk or unreadable):
+        named = ", ".join("%s (%s)" % (p, types[p]) for p in at_risk) or "none readable"
+        return error_envelope(
+            tool, CB_SOLVE_LOSS,
+            "return surface %s is already a coordinate break and carries a Par-cell solve "
+            "that this call would REPLACE with a scale -1 pickup (Order is written as a literal value; a solve on Order is not replaced by this call, and the result reports what the cell reads afterwards), and the loss is not "
+            "recoverable by this tool: %s%s. REFUSING with ZERO mutation. Re-point the "
+            "solve elsewhere, or pass replace_solve=true to proceed deliberately — that "
+            "path reports, re-read AFTER the write, which Par solves it replaced (type_after) and which it left in place (preserved_par_solves, e.g. a solve on Order), and, separately, which cells could not be read before the write (a cell unreadable on the re-read, its type or its pickup fields, is listed as replaced with type_after null; only a pickup that was READ and differs is preserved)."
+            % (surface, named,
+               (" ; UNREADABLE (treated as at risk): " + ", ".join(unreadable))
+               if unreadable else ""),
+            surface=surface,
+            solves_at_risk=at_risk,
+            solves_unreadable=unreadable,
+            **partial_state_fields([], attempted=[]),
+        ), {}
+    out = {"par_solve_loss_audited": True}
+    if at_risk:
+        out["replaced_par_solves"] = [{"param": p, "type_before": types[p]} for p in at_risk]
+    if unreadable:
+        out["unreadable_par_cells"] = unreadable
+        out["unreadable_par_cells_note"] = (
+            "these Par cells could not be read before the write; each may have held a solve "
+            "(or the pickup already in place) and is NOT counted as replaced")
+    if audit is not None and len(out) > 1:
+        # Only a disclosure with content (replaced / unreadable cells) rides the failure arms
+        # (see ``failure_disclosure``); the bare audited flag would change every clean failure.
+        audit["par_disclosure"] = out
+        audit["par_surface"] = surface
+        audit["par_entry"] = entry_surface
+    return None, out
 
 
 def precheck(system, lde, surface, replace_solve, tool, partial_state_fields,
@@ -269,6 +332,70 @@ def disclosure(system, lde, surface, before):
     return out
 
 
+def _par_after(system, audit):
+    """The Par disclosure of a FAILED already-CB call, RE-MEASURED after the failure.
+
+    ``par_precheck`` listed the cells it was about to overwrite; a failure part-way means some
+    were never written. Each listed cell's solve type is read again: a cell whose type changed is
+    ``replaced_par_solves`` (with ``type_after``), one that still reads its old type is
+    ``preserved_par_solves``. Mirrors the geometry ``disclosure`` replaced/preserved split.
+    NEVER raises; an unreadable re-read is filed as replaced with ``type_after: None``.
+    """
+    par = audit.get("par_disclosure")
+    if not par:
+        return {}
+    from . import _cb_cells as _cbc
+    from . import _solve_cells as _sc
+
+    out = {k: v for k, v in par.items() if k != "replaced_par_solves"}
+    replaced, preserved = [], []
+    try:
+        row = system.LDE.GetSurfaceAt(audit.get("par_surface"))
+    except Exception:  # noqa: BLE001
+        row = None
+    for entry in par.get("replaced_par_solves") or []:
+        param, was = entry["param"], entry["type_before"]
+        try:
+            now = _sc.read_solve_type(_cbc._cb_cell(system, row, param))
+        except Exception:  # noqa: BLE001
+            now = None
+        # A listed Double cell that was a (different) pickup reads SurfacePickup again whether
+        # or not OUR pickup landed, so the type cannot decide: ask whether the cell now holds
+        # exactly the pickup this call writes (ours = replaced; READ and different = the old
+        # pickup survived, preserved; unreadable = replaced with a null type, UNKNOWN toward alarm).
+        if now == "SurfacePickup" and was == "SurfacePickup" and param in _cbc._DOUBLE_PARAMS:
+            state = ("unreadable" if audit.get("par_entry") is None else
+                     _par_pickup_state(system, row, param, audit["par_entry"]))
+            if state == "different":
+                preserved.append(param)       # READ, and it is not our pickup: the old one survived
+            else:
+                replaced.append({"param": param, "type_before": was,
+                                 "type_after": now if state == "ours" else None})
+        elif now is not None and now == was:
+            preserved.append(param)
+        else:
+            replaced.append({"param": param, "type_before": was, "type_after": now})
+    if replaced:
+        out["replaced_par_solves"] = replaced
+    if preserved:
+        out["preserved_par_solves"] = preserved
+    return out
+
+
+def par_final(system, audit, par_disclosure):
+    """The success-arm Par disclosure, RE-MEASURED after the write (shared with the failure arm).
+
+    ``audit`` carries the pre-write list when there was one; otherwise ``par_disclosure``
+    (the bare audited flag, or ``{}`` on the retype arm) is returned unchanged. NEVER raises.
+    """
+    try:
+        if audit and audit.get("par_disclosure"):
+            return _par_after(system, audit)
+    except Exception:  # noqa: BLE001 - fall back to the pre-write list, never raise
+        pass
+    return par_disclosure
+
+
 def failure_disclosure(session, audit):
     """The SAME measured diff, on a FAILURE path. ``{}`` when nothing was at risk.
 
@@ -287,10 +414,13 @@ def failure_disclosure(session, audit):
     for a failure, and a disclosure must never replace the diagnosis it decorates.
     """
     try:
-        if not audit or not audit.get("before"):
+        if not audit:
             return {}
-        system = session.system
-        return disclosure(system, system.LDE, audit.get("surface"), audit.get("before"))
+        out = _par_after(session.system, audit)
+        if audit.get("before"):
+            system = session.system
+            out.update(disclosure(system, system.LDE, audit.get("surface"), audit.get("before")))
+        return out
     except Exception:  # noqa: BLE001 — a decoration NEVER displaces the failure
         return {}
 

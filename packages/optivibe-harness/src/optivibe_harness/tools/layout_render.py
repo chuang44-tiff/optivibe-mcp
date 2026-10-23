@@ -246,6 +246,10 @@ _S_PROJ_UNK = (
     "PROJECTION STATUS NOT MEASURED — out-of-plane coordinate-break terms could "
     "not be read."
 )
+_S_PROJ_FRAME = (
+    "PROJECTION STATUS NOT MEASURED — S{k} global frame could not be read, so its "
+    "vertex was not checked."
+)
 _S_PROJ_TYPE = (
     "PROJECTION STATUS NOT MEASURED — S{k} surface type is outside the projection "
     "check's domain."
@@ -292,6 +296,10 @@ _S_FAR = "S{k} {ROLE} NOT DRAWN: {gap:g} mm away ({ratio:.0f}x lens length)."
 _S_FAR_UNCAPTIONED = "Far-object exclusion applied; caption unavailable."
 _S_SPECK = ("Lens fills {fill:.0%} of the frame and no end qualifies for exclusion "
             "(speck_no_cut).")
+_S_SPECK_VIRTUAL = (
+    "Lens fills {fill:.0%} of the frame and no end qualifies for exclusion "
+    "(virtual_conjugate_no_cut: an end gap is negative, a virtual conjugate)."
+)
 _S_SAG = (
     "S{k} PROFILE NOT MEASURED — sag inputs unreadable (radius/conic/coefficients)."
 )
@@ -299,9 +307,16 @@ _S_SAG_PARAXIAL = (
     "S{k} PROFILE NOT MEASURED — a paraxial surface: an ideal element with no sag to "
     "draw."
 )
+# `out_of_plane_scope` values: what the out-of-plane proof actually examined.
+# The vertex check claims a scope only when EVERY frame it needed was read; the ray
+# check only when the self renderer read the traced rays.
+_OOP_SCOPE_BASE = "cb_terms_and_surface_types"
+_OOP_SCOPE_VERTICES = "cb_terms_surface_types_and_vertices"
+_OOP_SCOPE_RAYS_ONLY = "cb_terms_surface_types_and_rays"
+_OOP_SCOPE_WITH_RAYS = "cb_terms_surface_types_vertices_and_rays"
 _S_SCOPE = (
-    "projection check: prescription-level only (CB terms + surface types); "
-    "ray-plane departure not checked."
+    "projection check: CB terms, surface types and the vertex x of every surface "
+    "whose frame reads; traced ray points only when rays are traced."
 )
 _S_GRP_PLACEHOLDER = (
     "S{a}-S{b} APERTURES NOT MEASURED — gap_edge_not_measurable; body drawn at "
@@ -2114,6 +2129,23 @@ def _narrow_extension_records(extensions, rows, body):
             if _is_cemented_join(rows, body, e["surface"])]
 
 
+def _oop_scope(rays_read, vertices_read):
+    """The `out_of_plane_scope` token: what the proof actually examined."""
+    if vertices_read:
+        return _OOP_SCOPE_WITH_RAYS if rays_read else _OOP_SCOPE_VERTICES
+    return _OOP_SCOPE_RAYS_ONLY if rays_read else _OOP_SCOPE_BASE
+
+
+def _finite_thickness(rows, i):
+    try:
+        return math.isfinite(float(rows[i]["thickness"]))
+    except Exception:  # noqa: BLE001 -- unreadable: treat as having a vertex to read
+        return True
+
+
+from ._grin_cells import _exact_token_match  # noqa: E402 -- shared full-token resolver
+
+
 def _projection_disclosures(projection, rows):
     """The projection-status strings, reason-specific.
 
@@ -2129,19 +2161,29 @@ def _projection_disclosures(projection, rows):
         return []
     cb_cause = False
     type_cause = []
+    frame_cause = []
     for s in projection.unreadable_surfaces:
+        framed = s in projection.frame_unreadable
+        if framed:
+            frame_cause.append(int(s))
         try:
             type_name = str(rows[s]["type_name"])
         except Exception:  # noqa: BLE001 — an unreadable Type is a type-domain cause
             type_name = ""
         if _geom._is_coordinate_break(type_name):
-            cb_cause = True
-        else:
+            # a CB row whose frame is unread cannot be told apart from a CB-cell fault
+            # in this merged list, so only a non-frame CB row claims the CB cause
+            cb_cause = cb_cause or not framed
+        elif not framed or _exact_token_match(
+                type_name, _geom._PROJECTION_CLASSIFIABLE) is None:
+            # a frame fault on a classifiable type is ONLY a frame fault; one on an
+            # unclassifiable type carries BOTH causes
             type_cause.append(int(s))
     lines = []
     if cb_cause:
         lines.append(_S_PROJ_UNK)
     lines.extend(_S_PROJ_TYPE.format(k=s) for s in type_cause)
+    lines.extend(_S_PROJ_FRAME.format(k=s) for s in frame_cause)
     return lines
 
 
@@ -3347,10 +3389,11 @@ def _draw_folded_global(
     A surface whose global frame is degraded is SUPPRESSED (no outline drawn at a
     bogus axis position), scoped to that surface.
 
-    **Folded-frame caveat:** the stop ticks and the image-plane line below are
-    drawn as unrotated global proxies. That is a PRE-EXISTING limitation this cycle
-    does not fix and does not claim to have fixed; nothing here asserts those two
-    pieces of furniture are coordinate-correct behind the fold.
+    **Furniture frame:** the image plane and the stop ticks go through the SAME
+    ``to_plot`` as the element outlines, so behind a fold the image plane is a finite
+    segment tilted with its surface (half-height: its measured semi-diameter, else the
+    drawn-geometry scale) and each stop tick follows the stop's own rotated frame. They
+    were unrotated global proxies (an ``axvline`` and vertical ticks) before.
 
     Returns ``(fig, surface_labels, stop_label, n_rays_drawn, figure_disclosures)``.
     """
@@ -3444,9 +3487,18 @@ def _draw_folded_global(
     axis_line.set_gid("axis:optical")
     image_frame = _frame(n - 1)
     if image_frame is not None:
-        image_line = ax.axvline(image_frame["vertex"][2], color="black",
-                                linewidth=_NARROW_LINE_PT, zorder=2)
+        image_record = apertures[n - 1] if n - 1 < len(apertures) else None
+        image_half = (float(image_record.height)
+                      if image_record is not None and image_record.measured
+                      else h_geom)
+        image_hi = to_plot(n - 1, image_half, 0.0)
+        image_lo = to_plot(n - 1, -image_half, 0.0)
+        image_line, = ax.plot(
+            [image_hi[0], image_lo[0]], [image_hi[1], image_lo[1]],
+            color="black", linewidth=_NARROW_LINE_PT, zorder=2)
         image_line.set_gid(f"s{n - 1}:image_plane")
+        all_gz.extend((image_hi[0], image_lo[0]))
+        all_gy.extend((image_hi[1], image_lo[1]))
         callouts.append((n - 1, "0.4"))
 
     # --- stop ticks — drawn ONLY from a MEASURED stop aperture -------------- #
@@ -3462,13 +3514,15 @@ def _draw_folded_global(
             and stop_frame is not None):
         stop_label = stop_index
         if stop_measured:
-            zs = stop_frame["vertex"][2]
-            vy_stop = stop_frame["vertex"][1]
             stop_semi = float(stop_record.height)
             tick_half = max(0.06 * h_geom, 0.04 * stop_semi)
-            for y_edge in (vy_stop + stop_semi, vy_stop - stop_semi):
+            for y_edge in (stop_semi, -stop_semi):
+                # Built in the stop's LOCAL frame and mapped like the outlines, so a
+                # stop behind a fold ticks along its own rotated edge.
+                t_lo = to_plot(stop_index, y_edge - tick_half, 0.0)
+                t_hi = to_plot(stop_index, y_edge + tick_half, 0.0)
                 tick, = ax.plot(
-                    [zs, zs], [y_edge - tick_half, y_edge + tick_half],
+                    [t_lo[0], t_hi[0]], [t_lo[1], t_hi[1]],
                     color="#FF8C00", linewidth=_NARROW_LINE_PT,
                     solid_capstyle="butt", zorder=5,
                 )
@@ -4916,9 +4970,13 @@ def _render_layout_at(session, params, *, exact_path=None):
 
         # For a folded system, read the per-surface GLOBAL frames (the honest
         # fold-coordinate channel — GetGlobalMatrix[10:13] + the row-major rotation).
+        # The frames are read on the UNFOLDED path too: only their vertex x is used
+        # there (the out-of-plane proof below). `global_frames` stays None unfolded,
+        # so every consumer keyed on it behaves exactly as before.
         global_frames = None
+        oop_frames = _geom.read_global_frames(lde, n)
         if folded:
-            global_frames = _geom.read_global_frames(lde, n)
+            global_frames = oop_frames
 
         # --- the shared far-object rule (native-layout-retool, owner ruling) ------ #
         # Computed from the prescription alone, BEFORE the ray read. APPLIED on the
@@ -4936,21 +4994,31 @@ def _render_layout_at(session, params, *, exact_path=None):
         # abort (BaseException) is not caught and reaches the outer handler.
         points = None
         raw_decision = None
+        cut_decision = None
         rule_fault = None
         try:
             points = _lr.surface_points(
                 rows, n, draw_heights, frames=global_frames if folded else None,
                 sag_fn=lambda _rows, _i, _h: _edge_sag_checked(np, _rows, _i, _h))
-            raw_decision = _lr.far_object_decision(rows, n, points)
+            raw_decision = _lr.far_object_decision(
+                rows, n, points, scaffold=_is_suppressed_scaffold)
+            # The fill restricted to measured surfaces is a DISCLOSURE on a folded
+            # system; every path that can CUT there (3-D export, native cross-section)
+            # keeps the pre-restriction decision, so no folded design newly cuts on
+            # signed z past a fold.
+            cut_decision = (
+                _lr.far_object_decision(rows, n, points, restrict_fill=False,
+                                        scaffold=_is_suppressed_scaffold)
+                if folded else raw_decision)
         except Exception as exc:  # noqa: BLE001 -- the figure never depends on the rule
-            points, raw_decision, rule_fault = None, None, exc
+            points, raw_decision, cut_decision, rule_fault = None, None, None, exc
 
         # --- the native cross-section: first choice when requested -------
         if renderer_req == "native":
             native = _native_attempt(
                 session, rows=rows, n=n, apertures=apertures, rims=rims,
                 draw_heights=draw_heights, folded=folded, global_frames=global_frames,
-                points=points, decision=raw_decision, draw_rays=draw_rays,
+                points=points, decision=cut_decision, draw_rays=draw_rays,
                 config_identity=config_identity,
                 directory=os.path.dirname(attempted) or ".", stop_index=stop_index,
                 strict=strict, tmp_sink=native_tmps)
@@ -4971,7 +5039,7 @@ def _render_layout_at(session, params, *, exact_path=None):
         rule_flags_3d = []
         if renderer_req in _RENDERERS_3D:
             decision_3d, rule_flags_3d = _decision_3d(
-                session.system, rows, n, raw_decision, rule_fault)
+                session.system, rows, n, cut_decision, rule_fault)
             native = _native_3d_attempt(
                 session, renderer=renderer_req, rows=rows, n=n, decision=decision_3d,
                 draw_rays=draw_rays, config_identity=config_identity,
@@ -5000,7 +5068,7 @@ def _render_layout_at(session, params, *, exact_path=None):
             far_flags.append(
                 f"far-object rule failed ({type(rule_fault).__name__}): nothing was "
                 "excluded")
-        elif raw_decision.reason == "extent_unreadable":
+        elif cut_decision.reason == "extent_unreadable":
             # checked FIRST, on BOTH paths ("no cut + flag")
             decision = None
             far_flags.append(
@@ -5026,7 +5094,7 @@ def _render_layout_at(session, params, *, exact_path=None):
                     "not applied: folded system — "
                     "")
         else:
-            decision = raw_decision
+            decision = cut_decision
         if decision is not None:
             try:
                 for entry in decision.excluded:
@@ -5037,6 +5105,9 @@ def _render_layout_at(session, params, *, exact_path=None):
                 if (decision.reason == "speck_no_cut"
                         and renderer_used not in _RENDERERS_3D):
                     far_strings.append(_S_SPECK.format(fill=decision.fill))
+                elif (decision.reason == "virtual_conjugate_no_cut"
+                        and renderer_used not in _RENDERERS_3D):
+                    far_strings.append(_S_SPECK_VIRTUAL.format(fill=decision.fill))
             except Exception as exc:  # noqa: BLE001 -- a caption fault drops the caption only
                 far_strings = [_S_FAR_UNCAPTIONED] if decision.excluded else []
                 far_flags.append(
@@ -5101,6 +5172,18 @@ def _render_layout_at(session, params, *, exact_path=None):
         # 1000 mm drew every ray 1000 mm upstream of the lens.
         if not folded and ray_data and ray_data.get("fields"):
             ray_data = _register_rays_to_drawing(ray_data, rows, lde)
+
+        # The GEOMETRIC half of the out-of-plane check (the prescription half ran
+        # above): a surface vertex, or a traced ray point, off the drawn plane proves it
+        # whatever the prescription reads -- a tilted mirror sends rays out with modest
+        # vertices, a decentred Standard row puts vertices out with rays in plane.
+        # This only ever upgrades the state to True; it never narrows it.
+        _no_vertex = [0] if not _finite_thickness(rows, 0) else []
+        projection = _geom.widen_projection(
+            projection,
+            _geom.vertices_off_plane(oop_frames),
+            (ray_data or {}).get("gx_surfaces") or (),
+            frame_unreadable=_geom.frames_unreadable(oop_frames, skip=_no_vertex))
 
         # The convention token, read ONCE from the params the caller normalised.
         # `render_layout` has already VALIDATED it and written the effective value
@@ -5518,7 +5601,9 @@ def _render_layout_at(session, params, *, exact_path=None):
             "out_of_plane_surfaces": list(projection.out_of_plane_surfaces),
             "projection_unreadable_surfaces": list(
                 projection.unreadable_surfaces),
-            "out_of_plane_scope": "cb_terms_and_surface_types",
+            "out_of_plane_scope": _oop_scope(
+                ray_data is not None and ray_data.get("max_abs_gx") is not None,
+                not projection.frame_unreadable),
             "configuration_count": config_identity.count,
             "figure_disclosures": list(figure_disclosures),
             "disclosures_truncated": int(

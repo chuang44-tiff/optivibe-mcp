@@ -52,7 +52,8 @@ _CB_VARIABLE_INT = "cb_variable_integer_cell"  # §3 refusal family
 from ._cb_solve_guard import (  # noqa: E402 — after the family constants it sits beside
     CB_SOLVE_LOSS as _CB_SOLVE_LOSS,
     CHANGETYPE_ATTEMPTED as _CHANGETYPE_ATTEMPTED,
-    PAR_SOLVE_UNCHECKED as _PAR_UNCHECKED,
+    par_final as _par_final,
+    par_precheck as _par_precheck,
     abort_finding as _cb_abort_finding,
     disclosure as _solve_loss_disclosure,
     failure_disclosure as _solve_loss_on_failure,
@@ -1120,7 +1121,7 @@ def _add_return_cb_impl(session, params, committed, attempted,
     # on-the-fly ChangeType is THROW-guarded (nit 2: the same never-raise net as the
     # entry path) + read-back-proven (is_coordinate_break after).
     return_row = lde.GetSurfaceAt(return_surface)
-    changed_type = False
+    changed_type, par_disclosure = False, {}
     solves_before = None
     if not _cb.is_coordinate_break(return_row):
         # THE SOLVE-LOSS GUARD — the same guard as the entry door, from the SAME shared
@@ -1185,6 +1186,16 @@ def _add_return_cb_impl(session, params, committed, attempted,
         # preserved exactly while the sole-writer invariant now holds here too.
         _promote(attempted, committed, _CHANGETYPE_ATTEMPTED % return_surface,
                  f"changed_type(surface={return_surface})")
+
+    else:
+        # The ALREADY-CB arm: no retype, so the geometry-cell precheck above never ran and
+        # cannot see Par cells. Refuse BEFORE any write when a Par cell this call
+        # overwrites carries a non-Fixed solve, unless replace_solve=true.
+        par_refusal, par_disclosure = _par_precheck(
+            system, return_row, return_surface, _lc._require_bool_param(params, "replace_solve", intent="override"),
+            "add_return_cb", _partial_state_fields, entry_surface, solve_audit)
+        if par_refusal:
+            return par_refusal
 
     # Author the pickup (-1) on each of Par1-Par5 (decenter + tilt), referencing the
     # entry surface NUMBER. The pickup tracks the entry live (measured).
@@ -1314,29 +1325,9 @@ def _add_return_cb_impl(session, params, committed, attempted,
         # return surface was already a CB or carried nothing non-default (``solves_before``
         # stays ``None`` on both of those paths, so the ordinary envelope is unchanged).
         **_solve_loss_disclosure(system, lde, return_surface, solves_before),
-        # F-F (0.1.6 PR #8 review batch). The ALREADY-CB arm's Par disclosure, and it is
-        # an EXPRESSION rather than an ``if`` on purpose: when this was written
-        # ``cb_surface.py`` sat at 333 against its 334 size ceiling, so a statement here
-        # would have been a design-review event for a disclosure that costs nothing in
-        # this shape.
-        #
-        # THE NUMBER MOVED IN ROUND 2 AND THE SHAPE DOES NOT. The module now measures
-        # 330: deleting the redundant call-site ``__context__`` guard above freed three
-        # statements. THOSE THREE ARE NOT HEADROOM AND MAY NOT BE SPENT — they were freed
-        # by a fix whose reason was the drifting-sibling shape, not by a budget decision,
-        # and rewriting this splat as an ``if`` "because there is room now" is
-        # trim-to-fit reasoning pointed backwards. The expression stands on being the
-        # right shape for a nothing-to-say disclosure; the count is recorded here only so
-        # a reader who checks it does not find a stale 333. The constant lives in
-        # ``_cb_solve_guard`` (no ceiling) beside the retype guard it is the sibling of;
-        # its docstring carries WHY the naive "call the precheck on the other arm" fix is
-        # REFUTED, and this is a DISCLOSURE, never a guard.
-        #
-        # KEYED ON ``changed_type`` BECAUSE THAT IS THE ARM. When the return surface was
-        # retyped, ``precheck`` DID run and the ``solve_loss_audited`` diff one line up is
-        # the real (measured) report; stamping both would claim the row is simultaneously
-        # audited and unaudited. When it was already a CB, no precheck ran at all.
-        **({} if changed_type else _PAR_UNCHECKED),
+        # The ALREADY-CB arm's MEASURED Par-cell solve diff (``par_precheck`` above): empty on
+        # the retype arm, where the geometry-cell diff one line up is the report.
+        **_par_final(system, solve_audit, par_disclosure),
     }
 
 
@@ -1516,7 +1507,10 @@ ADD_RETURN_CB_SPEC = ToolSpec(
         "return Order flipped to 1-entry_order. Retypes return_surface to a CB if "
         "needed (disclosed) — and that retype DISCARDS an authored solve on that "
         "surface irrecoverably, so a non-CB return surface carrying any non-default "
-        "solve is REFUSED with zero mutation until you pass replace_solve=true. "
+        "solve is REFUSED with zero mutation until you pass replace_solve=true; so is an "
+        "already-CB return surface whose Par cells carry a non-Fixed solve (a Variable counts) or cannot be read, "
+        "except a Par cell that already holds exactly the pickup this call writes (same source, "
+        "source column, scale -1, offset 0), which is accepted as unchanged. "
         "Gotcha: the inverse restores the input axis ONLY for "
         "co-located (gap=0) CBs — a propagation gap leaves a correct off-axis residual; "
         "and the Par1-Par5 pickups reference the entry surface by NUMBER, so removing "

@@ -10,18 +10,26 @@
 # The manual-PDF ingest dep (pymupdf) and the test runner (pytest) are OPTIONAL
 # extras so the runtime install stays lean.
 #
-# package-data ships the COMMITTED catalog JSON (resolved via __file__-relative
-# anchors, which an editable install preserves); the binary *.db is deliberately
-# NOT shipped (gitignored, rebuilt locally).
+# package-data is an EXPLICIT list of the committed files that are ours (resolved via
+# __file__-relative anchors, which an editable install preserves). Never a glob: the
+# data folder also holds the files a user builds from their own licensed install, and
+# none of those may enter a wheel. It also ships provenance_grants.txt, the ledger-row
+# markers the two fail-closed build gates read in an installed package.
+#
+# `optivibe-build-data` rebuilds every vendor-derived plane from the user's own
+# licensed install, with no clone. The `probe` extra adds pythonnet for
+# `optivibe-build-data --probe`; the optivibe-mcp install already carries it.
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "optivibe-reference"
-version = "0.1.18"
+version = "0.2.0"
 description = "OptiVibe reference layer: lookup tables + RAG + intent->ZOS-API grounding"
 requires-python = ">=3.11"
+readme = "README.md"
+license = {text = "Apache-2.0"}
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.11",
@@ -30,10 +38,23 @@ dependencies = []
 
 [project.optional-dependencies]
 manual = ["pymupdf"]
+probe = ["pythonnet"]
 dev = ["pytest"]
+
+[project.scripts]
+optivibe-build-data = "optivibe_reference.build_data:main"
+
+[project.urls]
+Homepage = "https://github.com/chuang44-tiff/optivibe-mcp"
+Issues = "https://github.com/chuang44-tiff/optivibe-mcp/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-optivibe_reference = ["data/*.json"]
+optivibe_reference = [
+    "data/operand_semantics.json",
+    "data/operand_synonyms.json",
+    "data/tolerance_operand_synonyms.json",
+    "data/provenance_grants.txt",
+]

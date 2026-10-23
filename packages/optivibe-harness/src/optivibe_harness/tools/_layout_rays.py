@@ -222,6 +222,12 @@ def read_field_rays(system, wave=1, deadline=None):
     carries ``"coverage"`` -- one ``{field_index, label, terminated_by, at_k, err,
     vig}`` per ray, ``terminated_by`` in ``RAY_TERMINATIONS`` -- and a run-level
     ``"termination"`` in ``RUN_TERMINATIONS``.
+
+    Out-of-plane side: the result ALSO carries ``"max_abs_gx"`` (the largest
+    ``|global x|`` over the traced ray points, mm; ``None`` when NO ray point was
+    measured -- every ray faulted before its first point, or the budget hit first) and ``"gx_surfaces"`` (the surfaces
+    at which a traced ray point lay beyond ``_layout_geometry.OOP_X_TOL_MM`` of the
+    drawn plane). Both are absent on a total failure (nothing was measured).
     """
     flags = []
     try:
@@ -270,6 +276,11 @@ def read_field_rays(system, wave=1, deadline=None):
         at_k = [None for _ in ray_specs]
         codes = [(None, None) for _ in ray_specs]
         traced = [False for _ in ray_specs]
+        # The global x of every traced ray point: the meridional (z, y) projection
+        # discards it, so it is measured here (the ray side of the out-of-plane check).
+        max_abs_gx = 0.0
+        n_gx = 0            # ray points whose global x was MEASURED (finite)
+        gx_surfaces = set()
 
         budget_exhausted = False
         # k = 1 .. N-1 (skip object k=0 — its frame is the at-infinity sentinel;
@@ -322,6 +333,11 @@ def read_field_rays(system, wave=1, deadline=None):
                     ray_done[ri] = True
                     why[ri], at_k[ri] = RAY_NONFINITE, k   # healthy codes, no point
                     continue
+                if math.isfinite(gx):
+                    n_gx += 1
+                    max_abs_gx = max(max_abs_gx, abs(gx))
+                    if abs(gx) > _geom.OOP_X_TOL_MM:
+                        gx_surfaces.add(k)
                 # Emit (z, y) so the draw code reads p[0]=z, p[1]=y (UNCHANGED).
                 polylines[ri].append((float(gz), float(gy)))
                 if k == n - 1:
@@ -387,7 +403,9 @@ def read_field_rays(system, wave=1, deadline=None):
                              "err": codes[ri][0], "vig": codes[ri][1]})
         return {"fields": out_fields, "flags": flags, "coverage": coverage,
                 "termination": (RUN_BUDGET_EXHAUSTED if budget_exhausted
-                                else RUN_COMPLETED)}
+                                else RUN_COMPLETED),
+                "max_abs_gx": (max_abs_gx if n_gx else None),
+                "gx_surfaces": sorted(gx_surfaces)}
     except BaseException as exc:  # noqa: BLE001 — total failure -> geometry-only
         return {
             "fields": [],

@@ -9,7 +9,9 @@ Stdlib only — this module imports nothing at all.
 
 SCHEMA = "optivibe.doctor/v1"
 
-DISTRIBUTIONS = ("optivibe-harness", "optivibe-reference")
+# The harness DISTRIBUTION is optivibe-mcp (pip install optivibe-mcp, owner);
+# its import packages are still optivibe_harness + optivibe_doctor.
+DISTRIBUTIONS = ("optivibe-mcp", "optivibe-reference")
 
 CRITICAL_DEPS = ("mcp", "psutil", "pythonnet")   # missing critical -> FAIL; other declared -> WARN
 IMPORT_NAME = {"pythonnet": "clr"}               # dist name -> import name; the only divergence
@@ -154,20 +156,22 @@ REMEDY = {   # pinned strings; asserted verbatim
     # Emitted INSTEAD of "vendor_data" when no source checkout is locatable (manifest is None).
     # packages/optivibe-reference/scripts/ is OUTSIDE src/ and ships in neither wheel (measured),
     # so on a checkout-less install the command above does not exist on disk.  A remedy the user
-    # cannot run is a diagnostic failure, not a formatting detail.  (Test D-16.)
+    # cannot run is a diagnostic failure, not a formatting detail.  (Test D-16.)  The installed
+    # optivibe-reference carries the same build as the ``optivibe-build-data`` console command.
     "vendor_data_no_checkout": (
-        "expected on a fresh install — no vendor data is shipped. The build scripts ship only in "
-        "the source checkout, not in the installed package: clone the repository and run, from "
-        "its root:\n"
-        "  python packages/optivibe-reference/scripts/build_vendor_data.py\n"
-        "It builds every plane it can, and names the live-probe scripts to run first for any "
-        "operand step it reports as SKIPPED. " + VENDOR_DATA_LICENCE_CLAUSE),
+        "expected on a fresh install — no vendor data is shipped. Build it from your own "
+        "licensed install with the command the installed package provides:\n"
+        "  optivibe-build-data --probe\n"
+        "It builds every plane it can (--probe first runs the live operand probes the operand "
+        "steps need) and reports any step it cannot build as SKIPPED. "
+        + VENDOR_DATA_LICENCE_CLAUSE),
     "stale_build": ("the manual corpus was built by another builder version (older or newer "
                     "than this reference); it is not corrupt, it is out of date. Rebuild it "
                     "from the repository root:\n"
                     "  python packages/optivibe-reference/scripts/build_vendor_data.py\n"
                     "(or packages/optivibe-reference/scripts/build_manual_corpus.py, which "
-                    "rebuilds this plane alone, where that script is present)."),
+                    "rebuilds this plane alone, where that script is present). Installed "
+                    "without a checkout: optivibe-build-data"),
     "mcp_range": 'pip install "mcp>=1.28,<2"',
     "runtime_override": ("PYTHONNET_RUNTIME is set to a value other than netfx. The ZOS-API "
                          "assemblies target the .NET Framework and the bootstrap only "
@@ -175,8 +179,10 @@ REMEDY = {   # pinned strings; asserted verbatim
                          "netfx."),
     "nethelper": ("install OpticStudio, or set ZOSAPI_NETHELPER to the path of "
                   "ZOSAPI_NetHelper.dll. The reference tools still work without it."),
-    "reinstall": "pip install -e . in packages/optivibe-harness (metadata is frozen at install time)",
-    "reference_missing": "pip install -e ../optivibe-reference (the README's first install step)",
+    "reinstall": ("pip install -e . in packages/optivibe-harness (metadata is frozen at install "
+                  "time), or pip install --force-reinstall optivibe-mcp for a PyPI install"),
+    "reference_missing": ("pip install -e ../optivibe-reference (the README's first install "
+                          "step), or pip install optivibe-mcp, which brings it from PyPI"),
 }
 
 # The three *.coverage checks share ONE classifier — three copies of one rule is three
@@ -223,7 +229,7 @@ def normalise_dist_name(raw):
 
 BASE_CHECKS = (                    # the SPINE: each appears exactly once, or exit 3
     "env.python", "env.cwd_shadow", "env.pythonnet_runtime",
-    "version.optivibe-harness", "version.optivibe-reference",
+    "version.optivibe-mcp", "version.optivibe-reference",
     "dependency.mcp", "dependency.psutil", "dependency.pythonnet",
     "dependency.mcp_range",
     "dependency.coverage",

@@ -46,6 +46,16 @@ _MAX_SETS = 4
 _MAX_ENTRIES = 3                         # glasses per set, each on its own element
 _DEFAULT_BUDGET_S, _MIN_BUDGET_S, _MAX_BUDGET_S = 120.0, 10.0, 600.0
 _MAX_CALL_S = 1800.0             # one call: (sets + 1) x time_budget_s, at most
+_call_clock = time.monotonic     # the whole call's wall clock; separate from the block clock so a test
+                                 # can fake either (a patch of time.monotonic does not reach this alias)
+# What the call keeps back from the 1800 s for work that is not optimising. _ARM_OVERHEAD_S is only
+# the estimate used until one arm has finished: the save_candidate render, vector reads and checkpoint
+# reload an arm does around its blocks. After that the overhead MEASURED on this call is used (the
+# largest per-arm wall time minus its optimise time seen so far), also for the final restore proof.
+# _CANCEL_S is the optimiser's own 30 s window to stop after a cancel (the "within 30 s of Cancel"
+# refusal), counted once because an overrun halts the call.
+_CANCEL_S, _ARM_OVERHEAD_S = 30.0, 30.0
+_SIZE_FACTOR = 1.5               # a set's default budget is this times the control's time to rest
 _CYCLES, _BLOCK_PASSES, _BLOCK_S, _MIN_BLOCK_S = 50, 10, 60.0, 10.0
 _GATE_PCT = 1.0
 _UNUSABLE_WALL_S = 6.0           # charge for a block whose envelope wall time is unusable
@@ -53,8 +63,8 @@ _AXCL_ZONE = 0.707
 _RING = 6
 _FIT_STEP_FACTOR = 8.0            # h = 8 x primary wavelength x WFNO^2 (um)
 _FIT_MAX_VERTEX_STEPS = 3.0
-_ONLY_NOT_FINISHED = ("did not stop by itself within time_budget_s=%g s; rerun this set with a "
-                      "larger time_budget_s")
+_ONLY_NOT_FINISHED = ("did not stop by itself within %g s; rerun this set alone with a larger "
+                      "time_budget_s")
 # Two early verdicts, both on MERIT against the control.
 # Calibrated on all 174 trial arms of the 20x dogfood runs: no arm more than 7.4% behind its control
 # after the first block ever finished at or below it. On a 14-element
@@ -102,9 +112,16 @@ _MSG = {
                         "cells were not changed, and the session's backing file may now be %s",
     "name_refused": "design_name is not usable: %s",
     "picture_failed": "save_candidate saved the lens file and its picture failed: %s",
-    "control_budget": "the control did not stop by itself within time_budget_s=%g s: rerun one set "
-                      "with a larger time_budget_s, or optimise the lens to rest first and run the "
-                      "trial again",
+    "control_budget": "the control did not stop by itself within %g s: optimise the lens to rest "
+                      "first, or pass a larger time_budget_s (up to 600; fewer sets leave more per "
+                      "arm), then run the trial again",
+    "no_call_time": "the %g s call cap left no time for it",
+    "cut_reason": "the call clock left less than the time_budget_s asked for",
+    "not_rerun_cap": "not rerun: the call cap left %g s for each of %d set(s) still to rerun, not "
+                     "more than the %g s this set first had",
+    "not_rerun_halt": "not rerun: the call stopped before the reruns",
+    "not_rerun_restore": "not rerun: the lens was not back at the lens as found",
+    "not_rerun_failed": "the rerun could not be measured (%s); the first run stands",
     "restore_not_verified": "the lens was not back at the lens as found after %s; not run",
     "call_aborted": "the call stopped at %s: %s; not run",
     "swap_not_landed": "surface %d reads %s from %s; asked %s from %s",
@@ -157,6 +174,7 @@ def _validate(params):
                 raise bad
             norm.append({"surface": surf, "glass": glass.strip(), "catalog": cat.strip()})
         sets.append(norm)
+    explicit = "time_budget_s" in params
     budget = params.get("time_budget_s", _DEFAULT_BUDGET_S)
     try:
         usable = (not isinstance(budget, bool) and isinstance(budget, (int, float))
@@ -165,7 +183,9 @@ def _validate(params):
         usable = False
     if not usable:
         raise _Refuse("tool_param", _MSG["budget"])
-    if (len(sets) + 1) * budget > _MAX_CALL_S:   # the budget is per arm; the call is capped
+    # the budget is per arm; the call is capped. A default call has no per-arm budget to refuse:
+    # its arms are sized from the call time left (see _arm_budget), so it cannot pass the cap.
+    if explicit and (len(sets) + 1) * budget > _MAX_CALL_S:
         raise _Refuse("tool_param", _MSG["budget_call"] % (
             _MAX_CALL_S, len(sets), _MAX_CALL_S / (len(sets) + 1)))
     name = params.get("design_name", "glass_trial")
@@ -180,7 +200,7 @@ def _validate(params):
     drop = dict.get(params, "drop", True)
     if not isinstance(drop, bool):
         raise _Refuse("tool_param", _MSG["drop"])
-    return sets, float(budget), name, free_stop, drop
+    return sets, float(budget), explicit, name, free_stop, drop
 
 
 # --------------------------------------------------------------------------- #
@@ -316,8 +336,16 @@ def _parabola_vertex(xs, ys):
 class _Run:
     """One call's working state: the plan, the found lens and the results so far."""
 
-    def __init__(self, session, term, pair_um, budget, name, free_stop=True, drop=True):
+    def __init__(self, session, term, pair_um, budget, name, free_stop=True, drop=True,
+                 explicit=False, t0=None):
         self.session, self.term, self.budget, self.name = session, term, budget, name
+        self.explicit = explicit
+        self.t0 = _call_clock() if t0 is None else t0
+        self.control_budget = budget
+        self.sized_from = "time_budget_s" if explicit else "default"
+        self.control_time_s = None
+        self.overhead_s = _ARM_OVERHEAD_S       # replaced by the measured overhead after the first arm
+        self.overhead_seen = False
         self.free_stop, self.drop = free_stop, drop
         self.pair_um = pair_um
         self.control_violations = set()
@@ -486,19 +514,21 @@ def _blocks(session, budget, free_stop=True, control_merit=None):
     control within its remaining budget is ``dropped``; the projection is stored on the last block
     as ``drop_projection``. Nothing is dropped after the first block: on a large lens one block
     says how far the swap knocked the lens, not where it settles (10x run 63f1bf16).
-    Returns ``(stop, blocks, last_env, failure)``; ``failure`` is a refused/failed block's
-    envelope (the stop is then None), else None.
+    Returns ``(stop, blocks, last_env, failure, spent, ran)``; ``failure`` is a refused/failed block's
+    envelope (the stop is then None), else None; ``spent`` is the time charged to the arm (s) and ``ran`` the call-clock time
+    spent inside the optimise calls (failed ones included), which overhead measurement subtracts.
     """
-    spent, blocks, last = 0.0, [], None
+    spent, blocks, last, ran = 0.0, [], None, 0.0
     while True:
         request = min(_BLOCK_S, budget - spent)
-        started = time.monotonic()
+        started, call_started = time.monotonic(), _call_clock()
         r = _optimize(session, {"cycles": _CYCLES, "max_passes": _BLOCK_PASSES,
                                 "time_budget_s": request, "require_free_stop": free_stop})
         local = time.monotonic() - started
+        ran += _call_clock() - call_started       # inside optimise calls, failed ones included
         r = r if isinstance(r, dict) else {}
         if not r.get("ok") or r.get("verdict") == "diverged":
-            return None, blocks, last, r
+            return None, blocks, last, r, spent, ran
         last = r
         blocks.append({k: r.get(k) for k in ("passes", "budget_reached", "merit_before",
                                               "merit_after", "run_time_s", "wall_time_s")})
@@ -512,20 +542,20 @@ def _blocks(session, budget, free_stop=True, control_merit=None):
         passes = r.get("passes")
         if (r.get("budget_reached") is False and isinstance(passes, int)
                 and not isinstance(passes, bool) and 1 <= passes < _BLOCK_PASSES):
-            return "stopped_by_itself", blocks, last, None
+            return "stopped_by_itself", blocks, last, None, spent, ran
         before, after = _num(r.get("merit_before")), _num(r.get("merit_after"))
         if (len(blocks) > 1 and before is not None and after is not None and before >= 0
                 and (before == 0 or (before - after) / before * 100.0 < _SETTLED_GAIN_PCT)):
-            return "settled", blocks, last, None    # a block from merit 0 cannot gain: at rest
+            return "settled", blocks, last, None, spent, ran    # a block from merit 0 cannot gain: at rest
         if len(blocks) > 1 and control_merit is not None and after is not None and control_merit >= 0 \
                 and after > control_merit * (1.0 + _DROP_BEHIND_PCT / 100.0):
             needed = _blocks_needed(before, after, control_merit)
             if needed * charge > budget - spent:
                 blocks[-1]["drop_projection"] = {"blocks_needed": needed, "block_s": charge,
                                                  "budget_left_s": budget - spent}
-                return "dropped", blocks, last, None
+                return "dropped", blocks, last, None, spent, ran
         if budget - spent < _MIN_BLOCK_S:
-            return "time_budget", blocks, last, None
+            return "time_budget", blocks, last, None, spent, ran
 
 
 def _violations(env):
@@ -538,11 +568,11 @@ def _violations(env):
     return out
 
 
-def _arm(run, entries, label, control):
+def _arm(run, entries, label, control, budget):
     """Steps 7 to 9 for one arm (``entries`` None = the control). Returns the arm record."""
     system = run.session.system
-    arm = {"status": "not_measured", "reason": None, "message": None, "stop": None, "vec": None,
-           "candidate_path": None, "detail": {}, "violations": set()}
+    arm = {"budget_s": budget, "spent_s": None, "ran_s": 0.0, "status": "not_measured", "reason": None,
+           "message": None, "stop": None, "vec": None, "candidate_path": None, "detail": {}, "violations": set()}
 
     def fail(reason, message):
         arm.update(reason=reason, message=message)
@@ -551,9 +581,9 @@ def _arm(run, entries, label, control):
         landed = _swap(run, entries, arm)
         if landed is not None:
             return fail("swap_not_landed", landed)
-    stop, blocks, last, failed = _blocks(run.session, run.budget, run.free_stop,
-                                         _control_merit(control) if run.drop else None)
-    arm["stop"], d = stop, arm["detail"]
+    stop, blocks, last, failed, spent, ran = _blocks(run.session, budget, run.free_stop,
+                                                _control_merit(control) if run.drop else None)
+    arm["stop"], arm["spent_s"], arm["ran_s"], d = stop, spent, ran, arm["detail"]
     d["blocks"] = blocks
     if stop == "dropped":
         merit, ref = blocks[-1]["merit_after"], _control_merit(control)
@@ -605,7 +635,7 @@ def _arm(run, entries, label, control):
         vec.pop("_note", None)
     arm["status"] = "measured" if stop in _AT_REST else "not_finished"
     if arm["status"] == "not_finished":
-        arm["message"] = _ONLY_NOT_FINISHED % run.budget
+        arm["message"] = _ONLY_NOT_FINISHED % budget
     return arm
 
 
@@ -754,10 +784,11 @@ def _checkpoint_refused(run, found):
 
 
 def _run(session, params, state):
-    sets, budget, name, free_stop, drop = _validate(params)
+    t0 = _call_clock()
+    sets, budget, explicit, name, free_stop, drop = _validate(params)
     term, pair = params.get("term"), params.get("pair")
     x1, predictions = _gate(session, term, pair, sets, free_stop)
-    run = _Run(session, term, x1.get("pair_um"), budget, name, free_stop, drop)
+    run = _Run(session, term, x1.get("pair_um"), budget, name, free_stop, drop, explicit, t0)
     run.plan()
     run.slots = [s for e in x1["elements"] for s in range(e["surfaces"][0], e["surfaces"][1])]
     _binding(session.system, sets, run.prim_um)
@@ -798,8 +829,48 @@ def _diffs(diffs):
     return [[k, repr(a), repr(b)] for k, a, b in diffs[:5]]
 
 
+def _optimise_left(run, arms_left):
+    """Seconds of the call still available to optimise ``arms_left`` more arms, read from the call
+    clock: the cap less the time used, the one cancel window, and the overhead (measured on this
+    call once an arm has finished) for each of those arms and for the final restore."""
+    used = _call_clock() - run.t0
+    return _MAX_CALL_S - used - _CANCEL_S - run.overhead_s * (arms_left + 1)
+
+
+def _note_overhead(run, started, arm):
+    """Record what an arm cost beyond its optimise time (its wall time, the checkpoint reload around
+    it included, less the call-clock time spent inside its optimise calls, so a failed or refused
+    block, an engine warm-up or an early return does not count as overhead). The largest seen is
+    what the plan uses."""
+    extra = max(0.0, _call_clock() - started - arm["ran_s"])
+    run.overhead_s = max(run.overhead_s, extra) if run.overhead_seen else extra
+    run.overhead_seen = True
+
+
+def _arm_budget(run, j, n_sets, control):
+    """The budget of arm ``j`` (0 = the control), or None when the call has no time left for it.
+
+    An explicit ``time_budget_s`` is every arm's budget, cut only if the call clock leaves less
+    (the later arms keep their 10 s minimum). A default call gives the control the most the call
+    allows while keeping the default for each set, then sizes each set as 1.5 x the control's time
+    to rest, at least the default, at most the per-arm maximum, and at most the call time left
+    shared by the sets still to run. No arm is granted less than the minimum.
+    """
+    arms_left = n_sets + 1 - j
+    left = _optimise_left(run, arms_left)
+    if run.explicit:
+        budget = min(run.budget, left - _MIN_BUDGET_S * (arms_left - 1))
+    elif j == 0:
+        budget = min(left, max(_DEFAULT_BUDGET_S, min(_MAX_BUDGET_S, left - _DEFAULT_BUDGET_S * n_sets)))
+    else:
+        sized = min(_MAX_BUDGET_S, max(_DEFAULT_BUDGET_S, _SIZE_FACTOR * control["spent_s"]))
+        budget = min(sized, left / arms_left)
+    return budget if budget >= _MIN_BUDGET_S else None
+
+
 def _execute(run, sets, found, light_found, res):
-    """Steps 5 to 10: prove the checkpoint, run the control, then each set."""
+    """Steps 5 to 10: prove the checkpoint, run the control, then each set, then rerun once every
+    set that spent its budget."""
     _load(run)
     first = _ls.diff(found, _read_state(run.session.system))
     if first:
@@ -811,18 +882,82 @@ def _execute(run, sets, found, light_found, res):
             if j:
                 res["arms"].append(None)
             continue
+        budget = _arm_budget(run, j, len(sets), control)
+        if budget is None:
+            if j == 0:
+                res["fault"] = (0, _MSG["no_call_time"] % _MAX_CALL_S)
+                return
+            res["halt"] = ("abort", j, _MSG["no_call_time"] % _MAX_CALL_S)
+            res["arms"].append(None)
+            continue
         label = "control" if j == 0 else "t%d_%s" % (j, "_".join(
             "S%d_%s" % (e["surface"], e["glass"]) for e in entries))
-        arm = _arm(run, entries, label, control)
+        if j == 0:
+            run.control_budget = budget
+        started = _call_clock()
+        arm = _arm(run, entries, label, control, budget)
+        if run.explicit and budget < run.budget:
+            arm["cut_to_s"] = budget
         if j == 0:
             control = res["control"] = arm
             run.control_violations = arm["violations"]
+            if arm["status"] == "measured" and not run.explicit:
+                run.sized_from, run.control_time_s = "control", arm["spent_s"]
         else:
             res["arms"].append(arm)
         if run.stop_call:
             res["halt"] = ("abort", j, _MSG["budget_cancel"])
         elif control["status"] == "measured" and j < len(sets) and _back(run, light_found):
             res["halt"] = ("restore", j)
+        _note_overhead(run, started, arm)
+    if control is not None and control["status"] == "measured":
+        _rerun_unfinished(run, sets, light_found, res, control)
+
+
+def _rerun_share(run, left):
+    return min(_MAX_BUDGET_S, _optimise_left(run, left) / left)
+
+
+def _rerun_unfinished(run, sets, light_found, res, control):
+    """Rerun once, from the checkpoint, every set that stopped at time_budget; the call time left is
+    shared by the sets still to rerun. A rerun's budget is worked out twice: before the checkpoint
+    reload (to skip the reload when there is no room) and after it (what the reload left). The
+    rerun replaces the first result unless it could not be measured at all."""
+    todo = [i for i, a in enumerate(res["arms"]) if a and a["stop"] == "time_budget"
+            and a["status"] == "not_finished"]
+    for k, i in enumerate(todo):
+        first_arm = res["arms"][i]
+        left = len(todo) - k
+        if res["halt"]:
+            first_arm["not_rerun"] = _MSG["not_rerun_halt"]
+            continue
+        share = _rerun_share(run, left)
+        if share > first_arm["budget_s"]:
+            started = _call_clock()
+            if _back(run, light_found):
+                first_arm["not_rerun"] = _MSG["not_rerun_restore"]
+                res["halt"] = ("restore", len(sets))
+                continue
+            share = _rerun_share(run, left)          # after the reload, on the clock as it now reads
+        if share <= first_arm["budget_s"]:
+            first_arm["not_rerun"] = _MSG["not_rerun_cap"] % (
+                max(share, 0.0), left, first_arm["budget_s"])
+            continue
+        entries = sets[i]
+        label = "t%d_%s_rerun" % (i + 1, "_".join(
+            "S%d_%s" % (e["surface"], e["glass"]) for e in entries))
+        arm = _arm(run, entries, label, control, share)
+        _note_overhead(run, started, arm)
+        if run.stop_call:
+            res["halt"] = ("abort", i + 1, _MSG["budget_cancel"])
+        if arm["status"] == "not_measured":
+            first_arm["not_rerun"] = _MSG["not_rerun_failed"] % (arm["reason"],)
+        else:
+            arm["rerun"] = {"first_stop": first_arm["stop"], "first_budget_s": first_arm["budget_s"],
+                            "rerun_budget_s": share}
+            if first_arm.get("cut_to_s") is not None:      # the first run's disclosure survives
+                arm["cut_to_s"] = first_arm["cut_to_s"]
+            res["arms"][i] = arm
 
 
 def _back(run, light_found):
@@ -897,7 +1032,7 @@ def _trial_row(run, i, entries, res, cvec, cvalue, prediction):
     if control is None or control["status"] != "measured":
         reason = "control_not_usable" if control else "call_aborted"
         aborted = _MSG["call_aborted"] % (_arm_name(res["fault"][0]), res["fault"][1]) if not control else None
-        message = (_MSG["control_budget"] % run.budget if control and control["status"] == "not_finished"
+        message = (_MSG["control_budget"] % run.control_budget if control and control["status"] == "not_finished"
                    else (control["message"] if control else aborted))
     elif a is None:
         halt, fault = res["halt"], res["fault"]
@@ -974,6 +1109,34 @@ def _coverage(run, sets, res):
             "summary": _MSG["coverage"] % (len(at_rest), len(run.slots), names(open_), names(untried))}
 
 
+def _budget_block(run, sets, res):
+    """How each arm's budget was set and which sets were rerun (additive; the effort block is the
+    request as made)."""
+    rows = []
+    for i, arm in enumerate(res["arms"]):
+        row = {"set": i + 1, "budget_s": None, "stop": None}
+        if arm:
+            rerun = arm.get("rerun")
+            row.update(budget_s=rerun["first_budget_s"] if rerun else arm["budget_s"],
+                       stop=rerun["first_stop"] if rerun else arm["stop"])
+            if arm.get("cut_to_s") is not None:
+                row.update(cut_to_s=arm["cut_to_s"], cut_reason=_MSG["cut_reason"])
+            if rerun:
+                row["rerun"] = rerun
+            if arm.get("not_rerun"):
+                row["not_rerun"] = arm["not_rerun"]
+        rows.append(row)
+    rows += [{"set": i + 1, "budget_s": None, "stop": None} for i in range(len(rows), len(sets))]
+    control = res["control"]
+    body = {"budget_sized_from": run.sized_from, "control_time_s": run.control_time_s,
+            "control_budget_s": control["budget_s"] if control else None}
+    if control and control.get("cut_to_s") is not None:
+        body.update(control_cut_to_s=control["cut_to_s"], control_cut_reason=_MSG["cut_reason"])
+    body.update(sets=rows, arm_overhead_s=round(run.overhead_s, 1) if run.overhead_seen else None,
+                call_s=round(_call_clock() - run.t0, 1), call_cap_s=_MAX_CALL_S)
+    return body
+
+
 def _assemble(run, sets, res, proof, predictions):
     control, arms = res["control"], res["arms"]
     cvec = control["vec"] if control else None
@@ -986,7 +1149,7 @@ def _assemble(run, sets, res, proof, predictions):
                else "all_stopped_by_themselves")
     trials = [_trial_row(run, i, e, res, cvec, cvalue, predictions[i] if predictions else None)
               for i, e in enumerate(sets)] if not res["first_load"] else []
-    cmsg = _MSG["control_budget"] % run.budget if control and control["status"] == "not_finished" \
+    cmsg = _MSG["control_budget"] % run.control_budget if control and control["status"] == "not_finished" \
         else (control["message"] if control else None)
     body = {
         "stops": {"control": cstop, "trials": stops, "summary": summary}, "term": run.term,
@@ -1002,6 +1165,7 @@ def _assemble(run, sets, res, proof, predictions):
                    "require_free_stop": run.free_stop,
                    "drop_behind_control_pct": _DROP_BEHIND_PCT,
                    "settled_block_gain_pct": _SETTLED_GAIN_PCT},
+        "budget": _budget_block(run, sets, res),
         "detail": {"control": _arm_detail(control) if control else None,
                    "trials": [_arm_detail(a) if a else None for a in arms],
                    "prediction": None if colour else predictions,
@@ -1033,8 +1197,14 @@ TRIAL_GLASS_SWAPS_SPEC = ToolSpec(
         "dict, or a list of up to three on different elements, in any groups [[{...},{...}]]; one glass "
         "per set is the usual step, a bigger set re-optimises more glass at once and is slower. A "
         "catalog matches "
-        "without \".AGF\" and without case. time_budget_s (default 120, up to 600) is the budget of "
-        "each arm, the control and every set; (sets + 1) x time_budget_s may not pass 1800 s. term "
+        "without \".AGF\" and without case. time_budget_s (up to 600), when passed, is the budget of "
+        "each arm, the control and every set; (sets + 1) x time_budget_s may not pass 1800 s. Without "
+        "it the control runs first with the most the call allows and each set gets 1.5 x the "
+        "control's time to rest (at least 120 s, at most 600 s, and no more than the call time left "
+        "shared by the sets still to run); budget in the reply says how. Budgets are planned so a call stays "
+        "within 1800 s, from the time each arm is measured to take beyond its optimising; an explicit "
+        "budget is cut only when the call clock leaves less (cut_to_s in budget.sets); budget.call_s is "
+        "the measured total. term "
         "and pair as explain_glass_swaps. value is the named term (offset of the pair's "
         "first wavelength minus the second, or the Petzval sum): nearer zero is better, and it is "
         "not in better/worse. An offset in neither list did not move beyond its band or could not be "
@@ -1042,7 +1212,9 @@ TRIAL_GLASS_SWAPS_SPEC = ToolSpec(
         "restored; stops; each status. Only an arm at rest (stopped by itself, or settled: a block "
         "after the first gained under 0.5% merit) is a measurement: better "
         "and worse compare it with a control re-optimised the same way, beyond the bands listed. "
-        "time_budget means not finished: rerun that set with a larger time_budget_s; never did "
+        "time_budget means not finished: the tool reruns such a set once from the start with the call "
+        "time left (budget.sets says rerun, with both budgets, or not_rerun and why); a set still not "
+        "finished after that: rerun it alone with a larger time_budget_s; never did "
         "not help. detail last_block_gain_rel is the merit gain over the whole last optimise block, "
         "not one pass. dropped: from the second block on, the trial's merit was over 10% above the "
         "control's and, at its last block's pace, could not reach it within its budget; it is not "
