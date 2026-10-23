@@ -14,9 +14,13 @@ the agent doesn't have to write raw API code. Alongside the tools is a reference
 layer the agent can query — operand and glass lookups, and full-text search over the
 OpticStudio manual.
 
+Install it with `pip install optivibe-mcp` (on [PyPI](https://pypi.org/project/optivibe-mcp/)); the
+server is also listed in the official [MCP Registry](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.chuang44-tiff/optivibe-mcp)
+as `io.github.chuang44-tiff/optivibe-mcp`. See [Install](#install).
+
 ## What's in it
 
-- **Tools** (`optivibe-harness`) — more than 80 typed tools that drive OpticStudio over
+- **Tools** (`optivibe-mcp`, in `packages/optivibe-harness/`) — more than 80 typed tools that drive OpticStudio over
   the ZOS-API. Each returns a uniform result envelope rather than raising, so the
   agent checks a read-back value instead of assuming a call succeeded. Beyond
   spherical surfaces it authors aspheres, coordinate breaks, fold mirrors,
@@ -82,7 +86,9 @@ optivibe-build-data --probe
 optivibe-doctor
 ```
 
-`optivibe-mcp` is the server; it brings the reference layer (`optivibe-reference`) with it. The
+Both packages are on PyPI: [`optivibe-mcp`](https://pypi.org/project/optivibe-mcp/) and
+[`optivibe-reference`](https://pypi.org/project/optivibe-reference/), released together with
+matching versions. `optivibe-mcp` is the server; it brings the reference layer (`optivibe-reference`) with it. The
 `[manual]` extra (PyMuPDF) is optional and reads your OpticStudio manual PDF (see
 [Manual install](#manual-install)). `optivibe-build-data` builds the reference data from your own
 OpticStudio install, and `--probe` also runs the two operand probes, which open OpticStudio and
