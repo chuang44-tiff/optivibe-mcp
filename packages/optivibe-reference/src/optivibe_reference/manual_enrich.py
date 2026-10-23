@@ -23,15 +23,15 @@ import os
 import re
 import sys
 
+from . import _paths
 from .manual_build import SECTION_HEADING_RE, normalize, strip_header_footer
 
 # The merit operand INVENTORY (the live-probed ``MeritOperandType`` 438-code set), read
 # from the user-built ``scripts/captures/`` the operand probe writes. ONE path +
 # ONE loader: ``scripts/build_manual_corpus.py`` calls ``load_merit_operand_inventory``,
 # so the glued-code gate in ``pair_operands`` sees the inventory the build was probed from.
-_PKG_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MERIT_INVENTORY_PATH = os.path.join(
-    _PKG_ROOT, "scripts", "captures", "operand_inventory_438.json"
+    _paths.captures_dir(), "operand_inventory_438.json"
 )
 
 

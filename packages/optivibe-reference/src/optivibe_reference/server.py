@@ -453,7 +453,8 @@ class Dispatcher:
                     tool_name, "operand_catalog_unavailable",
                     f"{operand_domain} operand catalog absent or unreadable on "
                     "this machine (see stderr WARN); build it with "
-                    "scripts/build_vendor_data.py (see PROVENANCE.md)",
+                    "`optivibe-build-data` (from a clone: "
+                    "scripts/build_vendor_data.py; see PROVENANCE.md)",
                     domain=operand_domain,
                 )
             elif spec.kind == _MANUAL_RAG_KIND and conn is None:
@@ -468,7 +469,8 @@ class Dispatcher:
                     "manual corpus absent, incomplete, unreadable, or built by "
                     "another builder version on this machine (a stale build also "
                     "printed a stderr WARN naming both versions); rebuild with "
-                    "scripts/build_manual_corpus.py",
+                    "`optivibe-build-data` (from a clone: "
+                    "scripts/build_manual_corpus.py)",
                 )
             elif spec.kind == _GLASS_KIND and conn is None:
                 # The user-built glass catalog was never built on this machine —
@@ -478,9 +480,9 @@ class Dispatcher:
                 result = error_envelope(
                     tool_name, "glass_catalog_unavailable",
                     "glass catalog not built or unreadable on this machine (see stderr "
-                    "WARN) - run "
-                    "packages/optivibe-reference/scripts/build_glass_catalog.py "
-                    "(reads your licensed install's Glasscat .agf files; see "
+                    "WARN) - run `optivibe-build-data` (from a clone: "
+                    "packages/optivibe-reference/scripts/build_glass_catalog.py; it "
+                    "reads your licensed install's Glasscat .agf files; see "
                     "PROVENANCE.md)",
                 )
             elif conn is None:
@@ -495,8 +497,8 @@ class Dispatcher:
                 # handler with None. Both auditors cross-flagged this path.
                 result = error_envelope(
                     tool_name, "operand_catalog_unavailable",
-                    "reference catalog not built; run scripts/build_vendor_data.py "
-                    "(see PROVENANCE.md)",
+                    "reference catalog not built; run `optivibe-build-data` (from a "
+                    "clone: scripts/build_vendor_data.py; see PROVENANCE.md)",
                 )
             else:
                 result = spec.handler(conn, params)

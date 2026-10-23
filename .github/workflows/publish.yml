@@ -1,0 +1,79 @@
+name: publish
+on:
+  release:
+    types: [published]
+permissions:
+  contents: read
+
+# Builds both distributions from the tagged commit and uploads them to PyPI by trusted
+# publishing (no stored token), optivibe-reference first because optivibe-mcp depends on it.
+
+# Each PyPI project must name this repository, this workflow and the `pypi` environment as
+# its trusted publisher.
+
+# The check step fails the run if a wheel carries any data file beyond the four the reference
+# package ships: data a user builds from their own OpticStudio install never reaches a wheel.
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: build
+        run: |
+          python -m pip install build
+          python -m build packages/optivibe-reference --outdir dist/reference
+          python -m build packages/optivibe-harness --outdir dist/mcp
+      - name: check the wheels
+        run: |
+          python - <<'EOF'
+          import glob, sys, zipfile
+          allowed = {
+              "optivibe_reference/data/operand_semantics.json",
+              "optivibe_reference/data/operand_synonyms.json",
+              "optivibe_reference/data/tolerance_operand_synonyms.json",
+              "optivibe_reference/data/provenance_grants.txt",
+          }
+          wheels = glob.glob("dist/*/*.whl")
+          if len(wheels) != 2:
+              sys.exit("expected 2 wheels, found %r" % wheels)
+          bad = []
+          for wheel in wheels:
+              for name in zipfile.ZipFile(wheel).namelist():
+                  if "/data/" in name and ".dist-info/" not in name and name not in allowed:
+                      bad.append((wheel, name))
+                  if name.endswith((".db", ".agf", ".pdf")):
+                      bad.append((wheel, name))
+          if bad:
+              sys.exit("data a wheel must not carry: %r" % bad)
+          print("wheels OK:", wheels)
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: upload optivibe-reference
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/reference/
+      - name: upload optivibe-mcp
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/mcp/

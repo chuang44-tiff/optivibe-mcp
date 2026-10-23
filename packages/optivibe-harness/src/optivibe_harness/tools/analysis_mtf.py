@@ -18,6 +18,7 @@ Live ZOS-API integration: exercised by the live test (4 series, Y[3]~0.99888
 within 2%); unit-tested against a fixture-seeded fake MTF result.
 """
 import math
+import re
 
 from .._io import safe_exc, safe_float
 from ..errors import (AnalysisResultError, SessionClosedError, ToolParamError,
@@ -27,6 +28,20 @@ from . import _analysis_common as _ac
 from . import _collimation as _col
 from . import _config_common as _cfg
 from ._optimize_common import _base_token  # the ONE base-slot token read
+
+#: Series 0 of an FFT MTF run is the diffraction limit ONLY while the engine's saved Show
+#: Diffraction Limit setting is on; with it off the first series is field 1. The engine's own
+#: Description is the proof (``render_mtf_vs_field`` binds on it too and imports this name).
+_DIFF_RE = re.compile(r"^Field:\s*Diffraction limit$", re.IGNORECASE)
+_DL_HIDDEN_NOTE = (
+    "the diffraction-limit curve is not in this run (the saved MTF settings hide it): "
+    "series 0 is the first field, not the diffraction limit"
+)
+_DL_NOT_ON = "; get_mtf could not turn the diffraction limit on for this run"
+_DL_UNREAD_NOTE = (
+    "series 0 could not be identified as the diffraction limit (its description was not "
+    "readable), so it is not named; series 0 may be the first field"
+)
 
 # (S7 #16) Auto-extend the FFT-MTF grid to cover requested at_frequencies. The default
 # grid caps at 30.0 cyc/mm (probe-frozen), so an at_frequencies element above it silently
@@ -267,6 +282,44 @@ def get_mtf(session, params):
     return result
 
 
+def _show_diffraction_limit(analysis):
+    """Turn the diffraction-limit curve ON for THIS run and read it back; True only if it reads
+    back ``True``. The concrete settings view (``__implementation__``, as ``render_mtf_vs_field``
+    uses) is required: a bare ``IAS_`` base has no such property and would take a phantom attribute.
+    Never saved to disk (no ``Save()``): a saved setting stays as the user left it. A transport
+    loss propagates; any other fault is "not turned on", and the series-0 Description decides."""
+    try:
+        typed = getattr(analysis.GetSettings(), "__implementation__", None)
+        typed.ShowDiffractionLimit = True
+        return typed.ShowDiffractionLimit is True
+    except Exception as exc:  # noqa: BLE001 -- the Description binding below is the proof either way
+        if isinstance(map_dotnet_exception(exc), SessionClosedError):
+            raise
+        return False
+
+
+def _diffraction_limit_binding(results, turned_on=True):
+    """``(series, shown, note)``: ``(0, True, None)`` when series 0's engine Description says it is
+    the diffraction limit; ``(None, False, note)`` when it was READ and says otherwise (the saved
+    settings hide the limit); ``(None, None, note)`` when it could not be read (layout unknown).
+    ``shown`` is the explicit marker consumers use: null is "unread", never "hidden". A transport
+    loss still propagates. ``turned_on`` False (the write or its read-back failed) adds a short
+    sentence to the note of a run whose series 0 is not proven the limit. The series count against the lens's field count is NOT used to
+    prove the layout of an unread run."""
+    try:
+        raw = results.GetDataSeries(0).Description
+        if not isinstance(raw, str):  # None / a non-string is "unread", never "read and not the limit"
+            return None, None, _DL_UNREAD_NOTE + ("" if turned_on else _DL_NOT_ON)
+        desc = _base_token(raw)
+    except Exception as exc:  # noqa: BLE001 -- an unreadable label is "not proven"; transport loss re-raises
+        if isinstance(map_dotnet_exception(exc), SessionClosedError):
+            raise
+        return None, None, _DL_UNREAD_NOTE + ("" if turned_on else _DL_NOT_ON)
+    if isinstance(desc, str) and _DIFF_RE.match(desc):
+        return 0, True, None
+    return None, False, _DL_HIDDEN_NOTE + ("" if turned_on else _DL_NOT_ON)
+
+
 def _get_mtf_at(session, params):
     """The pure per-config FFT-MTF body (read at the ACTIVE config). See ``get_mtf``."""
     system = session.system
@@ -321,6 +374,14 @@ def _get_mtf_at(session, params):
             "get_mtf", "analysis_malformed",
             "the FFT MTF window could not be opened: " + safe_exc(exc, repr_form=True),
         )
+    try:
+        dl_turned_on = _show_diffraction_limit(analysis)
+    except BaseException:  # a transport loss here would otherwise skip the window's Close()
+        try:
+            analysis.Close()
+        except Exception:  # noqa: BLE001 -- teardown must never mask the real error
+            pass
+        raise
     max_frequency_applied = None
     if max_frequency is not None:
         max_frequency_applied = False
@@ -357,6 +418,8 @@ def _get_mtf_at(session, params):
                 + (f"; engine messages: {messages}" if messages else ""),
                 **extra,
             )
+
+        dl_series, dl_shown, dl_note = _diffraction_limit_binding(results, dl_turned_on)
 
         if series_sel is not None:
             if not (0 <= series_sel < n):
@@ -437,8 +500,11 @@ def _get_mtf_at(session, params):
     result = {
         "ok": True,
         "number_of_data_series": n,
-        # series 0 is ALWAYS the diffraction limit, whichever ``series`` was asked for
-        "diffraction_limit_series": 0,
+        # series 0, proved by its engine Description (whichever ``series`` was asked for); null when
+        # it is not the diffraction limit or could not be read, with ``diffraction_limit_note``
+        "diffraction_limit_series": dl_series,
+        # true: series 0 proved the limit; false: read and it is not (limit hidden); null: unread
+        "diffraction_limit_shown": dl_shown,
         "x_label": "Spatial Frequency",
         # the FFT MTF abscissa is cycles/mm for EVERY lens unit, measured mm/cm/in/m
         "x_units": "cycles/mm",
@@ -447,6 +513,12 @@ def _get_mtf_at(session, params):
         # the engine's own words (e.g. 'Sampling too low, data inaccurate!'), always present
         "messages": messages,
     }
+    if dl_note is not None:
+        result["diffraction_limit_note"] = dl_note
+    if dl_shown is not True:
+        # Not proven shown: a consumer that maps series by position (idx0 = the limit) would be
+        # wrong, and ``validity_warning`` is the key every internal reader already screens.
+        result["validity_warning"] = dl_note
     if messages_unread:
         result["engine_messages_unread"] = True
     if grid_max is not None:
@@ -495,7 +567,10 @@ GET_MTF_SPEC = ToolSpec(
         "series (large). Pass at_frequencies=[f1,f2,...] for SUMMARY mode: each "
         "series returns only the interpolated tangential+sagittal at those "
         "frequencies (compact; null+note past the grid max). The series map: idx0 = "
-        "the diffraction-limit series, idx1..N = the fields in order; on-axis T == S. "
+        "the diffraction-limit series, idx1..N = the fields in order: get_mtf turns the "
+        "diffraction-limit curve on for the run. diffraction_limit_shown true: idx0 is the limit; "
+        "false: idx0 is field 1; null: unknown, do not map series by position (validity_warning "
+        "says so); on-axis T == S. "
         "OBSCURED PUPILS: on a system with a central obscuration (a Cassegrain "
         "secondary shadow) author a CircularObscuration on the obstructing surface "
         "with set_surface_aperture FIRST, so this number is computed on the TRUE "

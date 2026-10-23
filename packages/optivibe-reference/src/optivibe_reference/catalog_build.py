@@ -29,7 +29,7 @@ import re
 import sqlite3
 import sys
 
-from . import manual_build
+from . import _paths, manual_build
 from .manual_build import normalize as _normalize_text
 
 
@@ -149,8 +149,7 @@ SYNONYMS_JSON_PATH = os.path.join(DATA_DIR, "operand_synonyms.json")
 # ``description``/``citation_handle``/``description_source='manual_verbatim'``
 # merge fields at build time. ABSENT on a fresh install -> synonyms-only build.
 RAW_DESCRIPTIONS_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(_HERE)),
-    "scripts", "captures", "operand_raw_descriptions.json",
+    _paths.captures_dir(), "operand_raw_descriptions.json",
 )
 # Committed, regenerable deterministic sign-convention artifact (semantics §1) emitted
 # by ``scripts/build_operand_semantics.py``. Merged into the catalog at build time.
@@ -1058,9 +1057,7 @@ def main():
     on synonyms-absent (committed -> broken checkout) or semantics-absent (committed
     -> broken/projection error) — see the §3 matrix.
     """
-    captures = os.path.join(
-        os.path.dirname(os.path.dirname(_HERE)), "scripts", "captures"
-    )
+    captures = _paths.captures_dir()
     inventory_path = os.path.join(captures, "operand_inventory_438.json")
     probe_path = os.path.join(captures, "probe_operands_capture.json")
 

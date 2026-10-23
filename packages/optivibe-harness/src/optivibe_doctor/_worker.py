@@ -32,8 +32,8 @@ REAP_BASELINE_ENV = "OPTIVIBE_DOCTOR_REAP_BASELINE"
 
 #: The two distributions doctor grades.  Duplicated from the contract on purpose — a worker
 #: importing ``_contract`` would couple the child to the parent's module set for no gain.
-DISTRIBUTIONS = ("optivibe-harness", "optivibe-reference")
-TOP_LEVEL = {"optivibe-harness": "optivibe_harness",
+DISTRIBUTIONS = ("optivibe-mcp", "optivibe-reference")
+TOP_LEVEL = {"optivibe-mcp": "optivibe_harness",
              "optivibe-reference": "optivibe_reference"}
 
 _ERROR_CHARS = 240

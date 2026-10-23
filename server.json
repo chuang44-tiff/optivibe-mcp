@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.chuang44-tiff/optivibe-mcp",
+  "title": "OptiVibe",
+  "description": "Lens design automation for Zemax OpticStudio through the typed ZOS-API",
+  "repository": {
+    "url": "https://github.com/chuang44-tiff/optivibe-mcp",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "optivibe-mcp",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

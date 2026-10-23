@@ -2,12 +2,69 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.1.18`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.2.0`). Each tag points at the merge
 commit that published that version, and every tag was verified against the four version
 literals in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.0] — 2026-10-23
+
+OptiVibe installs with one command. The server and the reference layer are published on PyPI,
+and the server is listed in the MCP Registry.
+
+### Added
+
+- **`pip install optivibe-mcp`** installs the MCP server and the reference layer it composes
+  (`optivibe-reference` comes as a dependency). Three console commands come with it:
+  `optivibe-mcp` (the stdio server), `optivibe-doctor` (the install check) and
+  `optivibe-build-data` (builds the reference data from your own licensed OpticStudio install,
+  with no clone; `--probe` needs the `optivibe-reference[probe]` extra, which the server install
+  already carries).
+- **`get_operand` adds a `paraxial_caution` to `ISNA` and `ISFN`.** On a fast lens the paraxial
+  image-space NA reads below the real one (and `ISFN` above the working F-number); the caution
+  points at `WFNO` and at `lookup_operand`. The value is unchanged. `lookup_operand` carries the
+  same caution on its `ISNA` and `ISFN` entries.
+- **`get_mtf` proves which series is the diffraction limit.** It turns the diffraction-limit
+  curve on for its own run (the saved setting is not changed) and names series 0 the limit only
+  when the engine's description of it says so. New fields: `diffraction_limit_shown` and
+  `diffraction_limit_note`; `diffraction_limit_series` is null when the curve could not be
+  proven, and `validity_warning` then carries the note.
+- **`trial_glass_swaps` sizes its own budget and reruns an unfinished set once.** Without
+  `time_budget_s`, the control runs first and each swap set gets a budget sized from the
+  control's time to rest. A set that stops on its time budget is rerun once from its checkpoint
+  after all sets have run, and the rerun gives the verdict. The new `budget` field says how each
+  budget was sized, cut or rerun. An explicit `time_budget_s` still wins.
+
+### Changed
+
+- **The harness distribution is renamed `optivibe-harness` → `optivibe-mcp`.** The import
+  packages (`optivibe_harness`, `optivibe_doctor`) are unchanged. In a clone, install the
+  reference package first (`pip install -e packages/optivibe-reference`), then
+  `pip install -e packages/optivibe-harness`; uninstall an old `optivibe-harness` first.
+- **The data build moves into the reference package.** The glass, manual and probe scripts under
+  `packages/optivibe-reference/scripts/` keep their command lines and now call the package
+  modules. In an installed package the live-probe captures go
+  under the package's `data/captures` folder.
+- **The doctor names the `optivibe-mcp` distribution**, and its missing-data remedy tells an
+  install without a clone to run `optivibe-build-data`.
+- **`optivibe-mcp` pins `optivibe-reference` to the same version**, so the server and its
+  reference layer always install as a matched pair.
+
+### Fixed
+
+- **The reference tools' "not built" errors name `optivibe-build-data`** (and the clone script
+  second), so an install without a clone is told a command it has.
+- **`set_field` (replacing all fields) reports a partial rebuild.** An engine error mid-rebuild
+  now says how many new fields were added and how many old ones were deleted before it stopped.
+- **A failed configuration restore is no longer lost.** When a tool that switches configuration
+  fails and the switch back does not verify, the error carries the restore warning.
+- **The stdio log follows the workspace root the server anchored at start**, not a later change
+  to `OPTIVIBE_WORKSPACE_ROOT`.
+- **`release_engine` with `kill_others=true` no longer calls an engine whose command line it
+  cannot read "interactive".** It is listed in `cmdline_unreadable`, never killed, and counted
+  as still running.
 
 ## [0.1.18] — 2026-10-22
 
@@ -338,6 +395,7 @@ A housekeeping release: no new tools.
 
 - Initial public release of optivibe-mcp.
 
+[0.2.0]: ../../compare/v0.1.18...v0.2.0
 [0.1.18]: ../../compare/v0.1.17...v0.1.18
 [0.1.17]: ../../compare/v0.1.16...v0.1.17
 [0.1.16]: ../../compare/v0.1.15...v0.1.16

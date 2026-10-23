@@ -9,18 +9,22 @@
 # `optivibe-harness` conda env, so pip sees them satisfied): pythonnet bridges the
 # ZOS-API .NET surface, mcp serves the stdio MCP loop, psutil drives the PID-scoped
 # process reaper, and matplotlib + numpy render the headless meridional layout figures
-# (Agg backend). The reference layer is installed SEPARATELY and one-way
-# (`pip install -e ../optivibe-reference`), not declared here, so the two packages keep
-# their own envs and the dependency direction stays harness -> reference.
+# (Agg backend). The reference layer `optivibe-reference` is DECLARED (one-way: the
+# harness imports the reference, never the reverse), so one `pip install optivibe-mcp`
+# brings both. The distribution is `optivibe-mcp`; the import packages are
+# `optivibe_harness` and `optivibe_doctor`. In a clone, install the reference editable
+# FIRST (`pip install -e ../optivibe-reference`), or pip fetches it from PyPI.
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "optivibe-harness"
-version = "0.1.18"
+name = "optivibe-mcp"
+version = "0.2.0"
 description = "OptiVibe harness: ZOS-API automation, typed tools, and the single OptiVibe MCP"
 requires-python = ">=3.11"
+readme = "README.md"
+license = {text = "Apache-2.0"}
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.11",
@@ -45,10 +49,22 @@ dependencies = [
     # matplotlib already requires Pillow; ``_layout_register`` imports ``PIL`` directly
     # to read the native layout raster, so the dependency is declared, not inherited.
     "pillow",
+    # The reference layer, composed in-process by the single OptiVibe MCP, pinned to
+    # the same release.
+    "optivibe-reference==0.2.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+
+[project.scripts]
+optivibe-mcp = "optivibe_harness.__main__:main"
+optivibe-doctor = "optivibe_doctor.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/chuang44-tiff/optivibe-mcp"
+Issues = "https://github.com/chuang44-tiff/optivibe-mcp/issues"
+Changelog = "https://github.com/chuang44-tiff/optivibe-mcp/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]

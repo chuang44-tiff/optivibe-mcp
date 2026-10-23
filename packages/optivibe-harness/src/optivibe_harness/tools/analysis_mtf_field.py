@@ -49,7 +49,7 @@ from ._mtf_field_plot import (ReferenceInvalid, exclusive_temp, line_disclosure,
                               reference_digest, render_png, validate_reference)
 from ._solve_trace import _primary_wave
 from .workspace import _resolve_root  # import != edit; the root, never a fixed name
-from .analysis_mtf import (_as_finite, _auto_extended_ceiling, _interp_at, _series_xy,
+from .analysis_mtf import (_DIFF_RE, _as_finite, _auto_extended_ceiling, _interp_at, _series_xy,
                            _validate_at_frequencies)
 
 TOOL = "render_mtf_vs_field"
@@ -57,7 +57,6 @@ TOOL = "render_mtf_vs_field"
 FIELD_TYPES = ("Angle", "ObjectHeight", "ParaxialImageHeight", "RealImageHeight")
 SAMPLE_SIZES, DEFAULT_FREQUENCIES, MAX_FREQUENCIES, MAX_MINT_ATTEMPTS = (64, 128, 256, 512), \
     (10.0, 20.0, 40.0), 6, 3
-_DIFF_RE = re.compile(r"^Field:\s*Diffraction limit$", re.IGNORECASE)
 #: printed Description unit -> the lens-unit token ``_lens_units_string`` returns. MEASURED spellings only
 #:: the engine prints ``mm`` / ``cm`` / ``in`` / ``M`` in a height field's Description
 #: for a Millimeters / Centimeters / Inches / Meters lens -- a unit absent here is REFUSED before any engine work.

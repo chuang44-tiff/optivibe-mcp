@@ -65,7 +65,7 @@ TOOL_PLANE = {
 
 BASE_CHECKS = (
     "env.python", "env.cwd_shadow", "env.pythonnet_runtime",
-    "version.optivibe-harness", "version.optivibe-reference",
+    "version.optivibe-mcp", "version.optivibe-reference",
     "dependency.mcp", "dependency.psutil", "dependency.pythonnet",
     "dependency.mcp_range",
     "dependency.coverage",
@@ -853,7 +853,7 @@ BEHAVIOUR_MATRIX = [
      (), "BROKEN", 2),
 
     ("pip -e at 0.1.2, source at 0.1.3",
-     _rows({"version.optivibe-harness": (Status.WARN, "version_skew", "")}),
+     _rows({"version.optivibe-mcp": (Status.WARN, "version_skew", "")}),
      (), "DEGRADED", 1),
 
     ("wheel install, no checkout",
@@ -1003,11 +1003,13 @@ def test_d13_every_pinned_door_has_a_plane_and_a_canned_case():
 
 def test_d5_build_script_remedies_use_the_repository_relative_form():
     """D-5: `packages/optivibe-reference/scripts/` is outside `src/` and ships in neither
-    wheel, so there is no module spelling that resolves in any install mode."""
+    wheel, so a checkout's remedy names the repository-relative script. An install without a
+    checkout is told to run the `optivibe-build-data` command instead (0.1.15), which the
+    installed package provides."""
     for key, text in sorted(_contract.REMEDY.items()):
         assert FORBIDDEN_SCRIPT_SPELLING not in text, key
-    for key in ("vendor_data", "vendor_data_no_checkout"):
-        assert REPO_RELATIVE_SCRIPT in _contract.REMEDY[key], key
+    assert REPO_RELATIVE_SCRIPT in _contract.REMEDY["vendor_data"]
+    assert "optivibe-build-data" in _contract.REMEDY["vendor_data_no_checkout"]
 
 
 def test_d6_the_unwired_remedy_says_rebuilding_will_not_help():
@@ -1029,7 +1031,8 @@ def test_d6_the_unwired_path_never_emits_the_missing_data_remedy():
 
 def test_d16_the_missing_data_remedy_is_checkout_aware():
     """D-16: the build scripts ship in neither wheel.  A checkout-less install told to run
-    them is told to run commands that are not on its disk."""
+    them is told to run commands that are not on its disk, so it is given the installed
+    `optivibe-build-data` command instead."""
     for check, reason in (("plane.glass", "absent_expected"),
                           ("tool.lookup_glass", "plane_absent")):
         with_checkout = remedy_for(check, Status.WARN, reason, checkout_present=True)
@@ -1037,7 +1040,7 @@ def test_d16_the_missing_data_remedy_is_checkout_aware():
         assert with_checkout == _contract.REMEDY["vendor_data"]
         assert without == _contract.REMEDY["vendor_data_no_checkout"]
         assert with_checkout != without
-    assert "clone the repository" in _contract.REMEDY["vendor_data_no_checkout"]
+    assert "optivibe-build-data" in _contract.REMEDY["vendor_data_no_checkout"]
 
 
 def test_c3_every_absent_plane_carries_a_non_empty_remedy():
@@ -1738,7 +1741,7 @@ def _healthy_emissions():
         Observation("env.cwd_shadow", {"cwd": "C:/w", "shadowed": []}),
         Observation("env.pythonnet_runtime", {"value": None}),
     ]
-    for dist in ("optivibe-harness", "optivibe-reference"):
+    for dist in ("optivibe-mcp", "optivibe-reference"):
         base.append(Observation("version." + dist, {
             "meta": "0.1.3", "source": "0.1.3", "manifest": "0.1.3", "origin": origin}))
     base.append(Observation("dependency.universe",
@@ -3365,7 +3368,7 @@ def test_c3_every_absent_plane_remedy_is_checkout_aware(tmp_path):
     origin = os.path.join("C:", "src", "optivibe_harness", "__init__.py")
 
     def version(manifest):
-        return {"version.optivibe-harness": Observation("version.optivibe-harness", {
+        return {"version.optivibe-mcp": Observation("version.optivibe-mcp", {
             "meta": "0.1.3", "source": "0.1.3", "manifest": manifest, "origin": origin})}
 
     for item in _plane_findings(captured, version("0.1.3")):
@@ -5342,7 +5345,7 @@ def test_b3_a_child_with_psutil_blocked_still_produces_a_whole_json_document():
         assert "psutil" in findings["dependency.psutil"]["summary"]
         # The base tier is unaffected: it is a separate child and does not import psutil.
         for check in ("env.python", "env.cwd_shadow", "env.pythonnet_runtime",
-                      "version.optivibe-harness", "version.optivibe-reference"):
+                      "version.optivibe-mcp", "version.optivibe-reference"):
             assert findings[check]["status"] in ("pass", "warn"), check
         for check in BASE_CHECKS:
             assert check in findings, check

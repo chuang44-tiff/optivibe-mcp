@@ -63,7 +63,8 @@ def _enumerate_opticstudio():
                 continue
             out.append({"pid": int(info["pid"]),
                         "create_time": info.get("create_time"),  # None when denied
-                        "cmdline": list(info.get("cmdline") or [])})
+                        # None = the command line was DENIED (unknown); [] = read, and empty
+                        "cmdline": None if info.get("cmdline") is None else list(info["cmdline"])})
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     return out
@@ -169,12 +170,14 @@ def _kill_others(own_idents):
         raise EngineReleaseError(
             f"could not list OpticStudio processes ({type(exc).__name__}); "
             "nothing was killed") from None
-    targets, interactive = [], []
+    targets, interactive, unreadable = [], [], []
     for p in procs:
         ct = p["create_time"]
         if ct and (p["pid"], float(ct)) in own:
             continue
-        if _is_server(p["cmdline"]):
+        if p["cmdline"] is None:  # denied: neither a proven server nor a proven GUI
+            unreadable.append(p)
+        elif _is_server(p["cmdline"]):
             targets.append(p)
         else:
             interactive.append(p["pid"])
@@ -189,6 +192,8 @@ def _kill_others(own_idents):
         idents.append((p["pid"], float(ct)))
         if res is not None and getattr(res, "ok", False):
             killed.append({"pid": p["pid"], "owner_pid": _owner_pid(p["cmdline"])})
+    for p in unreadable:  # never killed, but it may still hold the seat: verify it like the rest
+        idents.append((p["pid"], float(p["create_time"] or 0.0)))
     alive = _wait_gone(idents)
     _forget_ledger_rows([i for i in idents if i[0] not in alive and i[1]])
     report = {"killed": [k for k in killed if k["pid"] not in alive],
@@ -196,6 +201,8 @@ def _kill_others(own_idents):
               "interactive_skipped": sorted(interactive)}
     if unverifiable:
         report["unverifiable_identity"] = sorted(unverifiable)
+    if unreadable:
+        report["cmdline_unreadable"] = sorted(p["pid"] for p in unreadable)
     if errors:
         report["terminate_errors"] = {str(k): v for k, v in sorted(errors.items())}
     return report
@@ -291,6 +298,8 @@ TOOL_SPEC = ToolSpec(
         "error_family engine_release_failed. "
         "kill_others: also kills every other session's OpticStudio server engine on this "
         "machine, busy or not, and their unsaved lens is lost; ask the user before using "
-        "it. A person's interactive OpticStudio is never touched."
+        "it. A person's interactive OpticStudio is never touched. An OpticStudio whose "
+        "command line cannot be read is never killed either; it is listed in "
+        "cmdline_unreadable and counts as still running."
     ),
 )

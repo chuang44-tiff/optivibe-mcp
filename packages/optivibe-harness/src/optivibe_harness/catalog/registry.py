@@ -207,11 +207,28 @@ def _mtf_extract(result):
             break
     best = None
     best_idx = None
+    # WHERE THE FIELDS START IS THE RESULT'S OWN CLAIM: shown -> series 0 is the limit and field k
+    # is series k; hidden -> series 0 IS field 1 and nothing is excluded. A result that proves
+    # neither is not identified, and scoring it would be a guess about which series is a field.
+    # Positively shown (series 0 AND shown true) -> 1; positively hidden (series null AND shown
+    # false: the Description was read) -> 0; null/absent/unread/contradictory -> not identified.
+    offset = None
+    if isinstance(result, dict) and "diffraction_limit_series" in result:
+        marker = result["diffraction_limit_series"]
+        shown = result.get("diffraction_limit_shown")
+        if marker is None and shown is False:
+            offset = 0
+        elif type(marker) is int and marker == 0 and shown is True:
+            offset = 1
+    if offset is None:
+        note = "MTF series layout not identified"
+        return [Reading(column="mtf_worst", raw=None, note=note),
+                Reading(column="mtf_worst_field", raw=None, note=note)]
     for s in series:
         if not isinstance(s, dict):
             continue
         idx = s.get("index")
-        # SERIES 0 IS THE DIFFRACTION LIMIT, NOT A FIELD -- get_mtf's own contract
+        # When the limit is series 0 it is NOT a field -- get_mtf's own contract
         # ("idx0 = the diffraction-limit series, idx1..N = the fields in order").
         # It is the theoretical UPPER bound, so letting it into a worst-FIELD
         # collapse can only ever report a number no real field achieved.  Two ways
@@ -224,7 +241,7 @@ def _mtf_extract(result):
         # prove it is NOT the limit, and this collapse must never score a series it
         # cannot identify.  If that leaves nothing, the null path below reports no
         # data -- the honest answer, and the one that keeps the row out of the rank.
-        if not isinstance(idx, int) or isinstance(idx, bool) or idx <= 0:
+        if not isinstance(idx, int) or isinstance(idx, bool) or idx < offset:
             continue
         ats = s.get("at") if isinstance(s.get("at"), list) else []
         for entry in ats:
@@ -236,7 +253,7 @@ def _mtf_extract(result):
                 if _num(mod):
                     if best is None or mod < best:
                         best = mod
-                        best_idx = idx
+                        best_idx = idx - offset + 1  # the 1-based FIELD ordinal
     if best is None:
         note = "frequency beyond MTF grid" if series else "no MTF series"
         return [Reading(column="mtf_worst", raw=None, note=note),

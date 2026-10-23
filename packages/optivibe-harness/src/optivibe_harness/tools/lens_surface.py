@@ -585,7 +585,7 @@ def remove_surface(session, params):
         raise SolveRefsRefusalError(_refs.refusal_message(at, scan))
 
     rows_before = _bnr.snapshot(system, at)
-    removed = lde.RemoveSurfaceAt(at)
+    removed = _c.call_noting(lde.RemoveSurfaceAt, at, lambda: _refs.failure_note(at, scan))
     new_count = int(lde.NumberOfSurfaces)
     if not bool(removed) or new_count != n - 1:
         raise SurfaceWriteError(

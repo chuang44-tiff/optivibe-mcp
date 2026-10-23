@@ -314,6 +314,16 @@ def _build_slot_args(headers, supplied):
     return slot_args, applied_slots, slot_header_list, density_unset
 
 
+# The operands that read the PARAXIAL image-space aperture: on a fast lens they sit below
+# the real (marginal-ray) value. The value is returned unchanged (a caller may want the
+# paraxial number on purpose); the result only gains a fixed pointer to the real-ray reading.
+_PARAXIAL_CAUTION_OPERANDS = frozenset({"ISNA", "ISFN"})
+_PARAXIAL_CAUTION = (
+    "paraxial value: on a fast lens ISNA reads below the real image-space NA (ISFN reads "
+    "above the working F/#). For the working F/# read WFNO; see lookup_operand ISNA."
+)
+
+
 def get_operand(session, params):
     """Read one scalar operand SLOT-AWARELY via the 9-arg ``GetOperandValue``.
 
@@ -532,6 +542,8 @@ def get_operand(session, params):
         # config-independent scalar closed over; each per-config copy carries it).
         if surf_defaulted is not None:
             result["surf_defaulted"] = surf_defaulted
+        if operand.strip().upper() in _PARAXIAL_CAUTION_OPERANDS:
+            result["paraxial_caution"] = _PARAXIAL_CAUTION
         if flags:
             result["flags"] = list(flags)    # list() so each config entry gets its own copy
         return result
@@ -580,6 +592,8 @@ GET_OPERAND_SPEC = ToolSpec(
         "flag — pass surf= to read a specific surface. The surface actually used is "
         "echoed as surf_defaulted. "
         "config (None|int|'all') reads the operand at one/every configuration. "
+        "ISNA and ISFN are PARAXIAL (below the real NA on a fast lens): their result "
+        "carries paraxial_caution pointing at WFNO for the working F/#. "
         "BEFORE YOU TRUST AN MTF OPERAND READING: cross-check the operand reading "
         "against get_mtf at the same field+frequency -- two independent engine paths -- "
         "and only then treat it as the number."

@@ -73,7 +73,7 @@ OUTCOME = "_outcome"
 #: UNKNOWN — which is why ownership is single-valued and asserted against BASE_CHECKS.
 WORKER_CHECKS = {
     "base": ("env.python", "env.cwd_shadow", "env.pythonnet_runtime",
-             "version.optivibe-harness", "version.optivibe-reference"),
+             "version.optivibe-mcp", "version.optivibe-reference"),
     "pkg": ("dependency.mcp", "dependency.psutil", "dependency.pythonnet",
             "dependency.mcp_range", "dependency.coverage", "reference.import",
             "reference.dispatcher",
