@@ -1620,8 +1620,9 @@ def _impl(session, floors, params, consult_session_budget=False):
     # design with gaps 1->2 and 2->3 only, and the old unconditional "the gaps bounding it
     # were computed" asserted a computation that never occurred. Scoping the EMISSION
     # would empty this list on a fold (a fold never calls ``_audit_gaps``, so ``gaps ==
-    # []``) and destroy the paired assertion, so scoping is deferred with its
-    # measurement attached.
+    # []``) and destroy the paired assertion, so the EMISSION stays unscoped and the
+    # CONSUMER (``workspace._unfaithful_bounds_audited_gap``) filters the verdict against
+    # the audited gaps' endpoints.
     # This string and ``workspace._COVERAGE_TYPE`` are TWO COPIES OF ONE CLAIM — a
     # hazard — and both were edited together; a test parametrised over both sites pins it.
     for s in sag_model_unfaithful:

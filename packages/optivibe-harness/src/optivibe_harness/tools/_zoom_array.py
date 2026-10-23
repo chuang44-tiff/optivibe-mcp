@@ -323,6 +323,71 @@ def reach_span_all_configs(system, first_surface):
         }
 
 
+def pin_span_apertures(system, first_surface, pins=None):
+    """Hold the reach span's Automatic semi-diameters at their CURRENT (config-1) values.
+
+    The reach gate compares the beam against each surface's semi-diameter, and an Automatic
+    semi-diameter GROWS to enclose a beam the placement walked off the optic (measured: a
+    1e6 mm decenter grew surface 4's semi-diameter from 8.8 to 1,000,008, so the beam
+    "reached"). The caller makes config 1 active BEFORE this call, so the values pinned are the
+    pre-placement ones. Only an ``Automatic`` semi-diameter is touched (a ``Fixed`` one is
+    already held; a ``Variable``/pickup/unreadable one is LEFT AS IT IS and listed in
+    ``skipped``). Interior surfaces ``max(1, first-1) .. N-2`` only (the IMAGE surface is
+    never pinned: a legitimate channel's image may land off its config-1 aperture).
+
+    Returns ``{"pinned": [(surface, value), ...], "skipped": [(surface, reason), ...]}``;
+    pass ``pins`` (that same shape, empty) to keep the partial result when it raises, so the
+    caller can still re-float what was pinned. Raises ``SurfaceWriteError`` (from the Fixed write) when a write fails or does not read
+    back as ``Fixed``; the checkpointed caller rolls back.
+    """
+    from ..errors import SurfaceWriteError
+    from . import freeze_semi as _fs
+
+    pins = pins if pins is not None else {"pinned": [], "skipped": []}
+    pinned, skipped = pins["pinned"], pins["skipped"]
+    n = int(system.LDE.NumberOfSurfaces)
+    for k in range(max(1, int(first_surface) - 1), n - 1):
+        kind = _fs._semi_solve_name(system, k)
+        if kind == "Fixed":
+            continue
+        if kind != "Automatic":
+            skipped.append((k, "solve_%s" % (kind if kind is not None else "unreadable")))
+            continue
+        value = _fs._read_semi(system.LDE.GetSurfaceAt(k))
+        if value is None:
+            skipped.append((k, "value_unreadable"))
+            continue
+        _fs._write_fixed_semi(system, k, value)
+        if _fs._semi_solve_name(system, k) != "Fixed":
+            raise SurfaceWriteError(
+                f"the Fixed semi-diameter pin on surface {k} did not read back as Fixed; "
+                "refusing to grade the reach gate against a floating aperture",
+                field="semi_diameter", intended="Fixed", actual=None, surface=k,
+            )
+        pinned.append((k, value))
+    return pins
+
+
+def restore_span_apertures(system, pinned):
+    """Re-float every semi-diameter ``pin_span_apertures`` pinned. NEVER raises.
+
+    Returns the list of surfaces that did NOT read back as ``Automatic`` afterwards (empty
+    when the restore is proven). Called from a ``finally`` on every path.
+    """
+    from . import freeze_semi as _fs
+
+    failed = []
+    for k, _value in (pinned or {}).get("pinned", ()):
+        try:
+            _fs._write_auto_semi(system, k)
+            ok = _fs._semi_solve_name(system, k) == "Automatic"
+        except Exception:  # noqa: BLE001 - a failed re-float is DISCLOSED, never raised
+            ok = False
+        if not ok:
+            failed.append(k)
+    return failed
+
+
 __all__ = [
     "z_to_thic",
     "read_ray_global_x",
@@ -330,6 +395,8 @@ __all__ = [
     "read_image_landing_y",
     "array_placement_bites",
     "reach_span_all_configs",
+    "pin_span_apertures",
+    "restore_span_apertures",
     "_ARRAY_UNREACHED",
     "_ARRAY_NO_BITE",
 ]

@@ -1852,7 +1852,9 @@ def set_solve(session, params):
     raw = {} if raw is None else raw
     if canonical == "SurfacePickup" and isinstance(raw, dict):
         _require_pickup_fields(token, raw)
-    resolved = _resolve_fields(system, lde, surface, token, canonical, raw)
+    resolved = _st.refuse_inert_chief_angle(
+        system, lde, surface, token, canonical,
+        _resolve_fields(system, lde, surface, token, canonical, raw))
     prior = _capture(cell, lde.GetSurfaceAt(surface), token, surface)
 
     def _verify():
@@ -1901,7 +1903,7 @@ def set_solve(session, params):
                 "the %s solve on surface %s did not do what you asked: %s. The engine "
                 "accepted it and reported Success. This row GATES because a disagreement "
                 "population was MEASURED and separated from the agreement population "
-                "(9.09e+07 apart), so the threshold sits in a measured gap.%s"
+                "(1.65e+07 apart), so the threshold sits in a measured gap.%s"
                 % (canonical, surface, relation.get("reason"),
                    (" " + relation["read_location_proof"])
                    if relation.get("read_location_proof") else ""),

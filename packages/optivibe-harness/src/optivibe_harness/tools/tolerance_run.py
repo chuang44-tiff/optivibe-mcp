@@ -374,6 +374,16 @@ def _default_mechanical(system):
     backwards (``surf-1 .. surf``) would tolerance a DIFFERENT element's tilt and report
     it as this one's, which is worse than the gap. So the fix is disclosure: ``skipped``
     carries the surfaces that got irregularity only, and the caller warns.
+
+    A STANDING LIMIT, not an open defect (measured on OpticStudio 25.1.0 with a 1 mm
+    cover glass touching the image): no operand route yields a correct number there.
+    TETX/TEDX with ``surface2`` = the image are refused client-side and, injected past
+    that bound, the engine returns the FRONT-surface tilt number, about 47x the rigid-
+    plate oracle; TSTX/TSDX on the single surface and TETX(7,8) (another element) read
+    other quantities; TETX(s,s) and TUTX/TUDX are refused. A zero-thickness air surface
+    after the last glass (identical geometry, identical nominal) makes the default set
+    work, so that is the remedy the warning names. The tool does NOT insert one itself:
+    that would change the prescription during a run that promises to leave it untouched.
     """
     try:
         n = int(system.LDE.NumberOfSurfaces)
@@ -525,9 +535,16 @@ def tolerance(session, params):
                     + " carry only a TIRR irregularity tolerance — no TETX tilt and no "
                     "TEDX decenter. Those are surface-RANGE operands needing "
                     "surface < surface2 < image, and the next interface here IS the "
-                    "image surface, so no legal range exists. That element's tilt and "
-                    "decenter sensitivity is UNBOUNDED in this run; author an explicit "
-                    "'tolerances' list if it matters."
+                    "image surface, so no legal range exists. This is a STANDING LIMIT "
+                    "of the tool, not a fault of this design: no operand route gives a "
+                    "correct tilt or decenter number for a glass element that touches "
+                    "the image (the image-surface route returns the tilt of the element's "
+                    "single FRONT surface, not the element's tilt: about 47x too large "
+                    "on the measured case). That element's "
+                    "tilt and decenter sensitivity is UNBOUNDED in this run. REMEDY: add "
+                    "a zero-thickness air surface after the last glass surface (the "
+                    "geometry is unchanged) and run again — the default set then covers "
+                    "it."
                 )
         if not to_validate:
             return _ac.error_envelope(
@@ -557,7 +574,7 @@ def tolerance(session, params):
     grin_coverage_warning = _grin_coverage_warning(system, authored)
 
     # preflight WARN-and-run: classify system.SystemFile. A non-blessed
-    # backing file (empty / New-default / %TEMP% / a harness checkpoint) WARNS that the
+    # backing file (empty / New-default / a harness checkpoint) WARNS that the
     # run will likely produce no report (load_design a saved design) — never a refuse
     # (cond F: pre-run blessing is unpredictable; the post-run empty-report net is the
     # real guarantee).

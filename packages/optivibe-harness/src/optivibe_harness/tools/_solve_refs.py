@@ -198,10 +198,10 @@ VERDICTS = ("none_affected", "affected", "could_not_scan")
 #: the row the author named. Such a token would be wrong in every reachable case, not
 #: merely unproven in some. It is therefore absent from the vocabulary AND from this
 #: module, so a reader cannot find the word and infer the claim was merely unproven.
-CONSEQUENCES = ("solve_removed", "retained_type", "unmeasured")
+CONSEQUENCES = ("solve_removed", "retained_type", "repointed_to_successor", "unmeasured")
 
 _NONE_AFFECTED, _AFFECTED, _COULD_NOT_SCAN = VERDICTS
-_SOLVE_REMOVED, _RETAINED_TYPE, _UNMEASURED = CONSEQUENCES
+_SOLVE_REMOVED, _RETAINED_TYPE, _REPOINTED, _UNMEASURED = CONSEQUENCES
 
 #: The two ``table`` values an entry or a gap can carry.
 _GEOMETRY, _CB_PAR = "geometry", "cb_par"
@@ -231,7 +231,14 @@ _PICKUP = "SurfacePickup"
 #: on a Par cell — widening past the measurement to the nearest ready-made vocabulary is
 #: the inference-as-measurement error this module exists to correct, one token over. An
 #: ``Automatic`` Par cell therefore still GAPS, and stays a measurement to make.
-_PAR_DEFAULTS = frozenset({"Fixed", "None", "Variable"})
+#:
+#: ``"PickupChiefRay"`` WAS ADDED ON A LIVE MEASUREMENT (OpticStudio 25.1.0): it is
+#: legal on Par1-4 of a coordinate break, and a PickupChiefRay authored on the return CB's Par1
+#: exposes only Field and Wavelength -- no ``INDEX_FIELDS`` member, so it names no surface and
+#: cannot carry a reference. Before it, such a cell gapped as "par solve type unmeasured
+#: (PickupChiefRay)" and ``remove_surface(refuse_on_solve_refs=true)`` refused. ``ZPLMacro`` and
+#: ``Automatic`` stay gaps: neither was measured to be reference-free on a Par cell.
+_PAR_DEFAULTS = frozenset({"Fixed", "None", "Variable", "PickupChiefRay"})
 
 
 #: Surface types whose Par table this package RECOGNISES and does not audit. A POSITIVE
@@ -350,9 +357,10 @@ _UNREADABLE = object()
 #: looks like: it tells a caller the other three cells are unmeasured when they were
 #: measured, on the one string that ships with every disclosure.
 #:
-#: ``insert_surface``'s "Par1/Par3" is a DIFFERENT CLAIM and is correctly left alone —
-#: reference TRACKING across an insert/remove of ANOTHER row, where Par2/Par4/Par5 remain
-#: genuinely inferred. Two claims, two measurements, two ranges; a sweep that unified them
+#: ``insert_surface``'s "Par1-Par6" is a DIFFERENT CLAIM and is correctly left alone —
+#: reference TRACKING across an insert/remove of ANOTHER row, measured on all six Par cells
+#: (OpticStudio 25.1.0; it read "Par1/Par3" with Par2/Par4/Par5 inferred until
+#: then). Two claims, two measurements, two ranges; a sweep that unified them would launder
 #: would launder an inference into a measurement (a test pins them apart).
 #:
 #: THE COVERAGE CLAUSE NAMES **BOTH** KEYS, AND THE SECOND HALF WAS MISSING (0.1.6 PR
@@ -922,6 +930,13 @@ def confirm_after(system, lde, at, scan):
 #   2. a NON-driving token                   -> "solve_removed"  measured, this call
 #   3. driving AND == the authored type      -> "retained_type"  the TYPE is still there;
 #                                               the RELATIONSHIP is not claimed intact
+#      ...and, for a NON-pickup family, the re-read reference field still equals the removed row
+# -> "repointed_to_successor" MEASURED (OpticStudio 25.1.0): a cocentric
+#                                               centre-of-curvature / compensator / position solve
+#                                               whose referent was removed keeps its type and its
+#                                               index, which now names the row that slid in, and is
+#                                               recomputed against that surface (radius 148 -> -64).
+#                                               "retained_type" read as harmless; this does not.
 #   4. driving AND != the authored type      -> "unmeasured"   the RESIDUAL bucket
 #
 # Row 1 is tested first deliberately, and the two orderings happen to AGREE:
@@ -941,12 +956,13 @@ def confirm_after(system, lde, at, scan):
 # ``_MEASURED`` intersection; this is the CONSEQUENCE classifier, over a token already in
 # hand, after the mutation. One shared predicate, two questions — named as distinct so a
 # later de-duplication sweep cannot merge them.
-def _consequence(solve_type, type_after):
+def _consequence(solve_type, type_after, ref_after=None, source=None):
     if type_after is None:
         return _UNMEASURED
     if not _sc.is_driving(type_after):
         return _SOLVE_REMOVED
-    return _RETAINED_TYPE if type_after == solve_type else _UNMEASURED
+    return ((_REPOINTED if solve_type != _PICKUP and ref_after is not None and ref_after == source
+             else _RETAINED_TYPE) if type_after == solve_type else _UNMEASURED)
 
 
 # One wire entry: the pre-mutation hit plus BOTH halves of the confirm.
@@ -955,7 +971,7 @@ def _entry(hit, confirmed):
     entry = dict(hit)
     entry["type_after"] = type_after
     entry["ref_after"] = ref_after
-    entry["consequence"] = _consequence(hit["solve_type"], type_after)
+    entry["consequence"] = _consequence(hit["solve_type"], type_after, ref_after, hit.get("source"))
     return entry
 
 

@@ -95,18 +95,22 @@ _ELEMENT_SOLVE_LOSS = "element_solve_loss"        # the native wrap lost a solve
 #:     of this kind go missing" from a multiset DECREASE — but the native generator
 #:     authors its OWN solves, and when it authors one of the SAME ``(cell, type)`` kind
 #:     on the same call the count does not fall. Measured (live): a user
-#:     ``thickness`` SurfacePickup INSIDE the span is destroyed (reads back ``Fixed``)
-#:     while the native's own thickness pickup on the back-up spacer holds the count at 1,
-#:     ``losses()`` returns ``[]``, and the placement returns ``ok: true``. ``radius`` and
-#:     ``conic`` pickups inside the same span survive and re-point correctly.
+#:     SurfacePickup INSIDE the span as destroyed because the predicted row reads
+#: ``Fixed``; the later batch-B2 probe (``engine/batchB2``) showed
+#:     the pickup MOVED to the return CB (single-face span) or the dummy row (multi-face
+#:     span, last row), source, scale and offset intact and still live. A destruction
+#:     masked this way has not been observed; ``radius`` and ``conic`` pickups re-point.
 _SOLVE_AUDIT_SCOPE = (
     "solve-type COUNTS were conserved and every pickup still has a readable source. That "
     "is NOT a guarantee that each solve survived on the RIGHT row, and it is NOT a "
     "guarantee that none was destroyed: the native generator authors solves of its own, "
-    "so a destroyed solve can be MASKED by one of the same kind it created. MEASURED: a "
-    "thickness SurfacePickup on a surface INSIDE the placed span is destroyed by the "
-    "native wrap and this audit does not see it (radius and conic survive and re-point "
-    "correctly). Re-read read_surface `solves` on the wrapped rows before relying on them."
+    "so a destroyed solve could be MASKED by one of the same kind it created (none "
+    "observed). MEASURED: a thickness SurfacePickup on a surface INSIDE the placed span "
+    "is not destroyed, it MOVES with the gap it describes, but only in two measured cases: "
+    "a single-face span's pickup moves to the return CB, and a multi-face span's LAST-row "
+    "pickup moves to the dummy row (source, scale and offset intact and still live). Read it "
+    "there; do not re-author it from the predicted row, which reads Fixed. A pickup on a "
+    "non-last row stays on its predicted row, and radius and conic pickups re-point to it. Re-read read_surface `solves` on the wrapped rows before relying on them."
 )
 
 # The orientation-restored gate: reuse the CB primitive's machine-epsilon gate (the
@@ -598,6 +602,11 @@ def _audit_solve_survival(system, lde, solves_before, sources_before):
     likewise; a DOWNSTREAM pickup on surface 4 naming source 2 became surface 7 naming
     source **3**. Through the shipped ``place_element``: ``ok:true``,
     ``orientation_restored:true``, ``rays_reach:true``, and the solves intact.
+
+    ─── CORRECTION: the "destroyed" reading below is
+        superseded. The thickness pickup MOVES with its gap, to the return CB (single-face
+        span) or the dummy row (multi-face span, last row), source/scale/offset intact. It
+        is read there, not re-authored. The text below is kept as the record. ───
 
     ─── AND THAT GENERALISATION IS NOW FALSIFIED. READ THIS BEFORE TRUSTING THE PARAGRAPH
         ABOVE ─────────────────────────────────────────────────────────────────────────

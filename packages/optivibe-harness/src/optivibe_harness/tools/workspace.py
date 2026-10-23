@@ -410,8 +410,10 @@ _COVERAGE_TEXT = {
     # not occur — the cycle's own charter defect. The provenance that MEASURES the two
     # failure directions is the probe: on a Tilted surface a real 0.926 mm violation
     # was erased to 2.600 and a false 0.300 mm one invented. It lives here, at the point
-    # of use, not in the agent-facing string. Scoping the EMISSION to audited
-    # gap endpoints is deferred, with the measurement above on file.
+    # of use, not in the agent-facing string. The EMISSION still lists every unfaithful
+    # surface; the CONSUMER (``_unfaithful_bounds_audited_gap``) now scopes the verdict
+    # to surfaces that bound an audited gap, so an unfaithful OBJECT surface no longer
+    # makes the verdict indeterminate.
     _COVERAGE_TYPE: (
         "clearance was NOT faithfully audited: at least one surface's geometry is not "
         "represented by the radius/conic/polynomial sag model this audit uses; where "
@@ -713,6 +715,47 @@ def _coverage_text(summary):
     return _COVERAGE_TEXT.get(reason, _COVERAGE_TEXT_DEFAULT)
 
 
+def _unfaithful_bounds_audited_gap(clearance):
+    """True when a ``sag_model_unfaithful`` surface in ``clearance`` bounds an AUDITED gap.
+
+    ``check_clearance`` emits the unfaithful list over EVERY surface, but the edge audit
+    only walks the gaps between optical surfaces, and a surface that bounds none of them
+    (the OBJECT surface, measured: a Tilted s0 with all gaps unchanged) cannot have
+    corrupted any audited number. Only an unfaithful surface that is an endpoint of a
+    surviving gap record (``surface`` or ``next_surface``) makes the verdict
+    indeterminate.
+
+    FAIL-CLOSED: a record with no readable ``gaps`` list, or whose list holds no
+    readable endpoint, scopes nothing and every listed surface counts (the behaviour
+    before this scoping), so a malformed envelope can only stay indeterminate. The
+    caller keeps its own ``not folded`` conjunct: a fold never calls the gap audit
+    (``gaps == []`` by construction), so the fold arm keeps its own rule and the
+    whole-system fold reason; this predicate is never consulted for it.
+    """
+    unfaithful = clearance.get("sag_model_unfaithful")
+    if not unfaithful:
+        return False
+    gaps = clearance.get("gaps")
+    if not isinstance(gaps, list):
+        return True
+    endpoints = set()
+    for g in gaps:
+        if not isinstance(g, dict):
+            continue
+        for key in ("surface", "next_surface"):
+            s = g.get(key)
+            if isinstance(s, int) and not isinstance(s, bool):
+                endpoints.add(s)
+    if not endpoints:
+        return True
+    # An entry that is not a plain int cannot be placed against the endpoints, so it
+    # counts (fail-closed) rather than being silently dropped.
+    return any(
+        (not isinstance(s, int)) or isinstance(s, bool) or s in endpoints
+        for s in unfaithful
+    )
+
+
 def _classify_clearance(env):
     """Return ``("clean"|"thin"|"indeterminate", summary|None)`` over a check_clearance
     envelope — SHAPE-aware (single-config vs ``config="all"``), fail-closed (§1).
@@ -771,7 +814,7 @@ def _classify_clearance(env):
         # fabricated number presented as a finding — is unmet, and the fold reason names
         # the whole-system cause of which the CB's type is a consequence.
         for pc in per:
-            if (isinstance(pc, dict) and pc.get("sag_model_unfaithful")
+            if (isinstance(pc, dict) and _unfaithful_bounds_audited_gap(pc)
                     and not pc.get("folded")):
                 summary = _summary_all(env)
                 summary["coverage_reason"] = _COVERAGE_TYPE
@@ -824,7 +867,7 @@ def _classify_clearance(env):
     viol = env.get("violations")
     if viol is None:
         return "indeterminate", None                     # row 1, malformed single envelope
-    if env.get("sag_model_unfaithful") and not env.get("folded"):   # row 2, DQ-6
+    if _unfaithful_bounds_audited_gap(env) and not env.get("folded"):   # row 2, DQ-6
         summary = _summary_single(env)
         summary["coverage_reason"] = _COVERAGE_TYPE
         return "indeterminate", summary
@@ -1039,6 +1082,15 @@ _PNG_RECORD_NAMES_NO_PICTURE = "png_not_vouched_by_record"
 #: the name was recovered from a disk scan). Distinct from "no row was ever written":
 #: nothing here establishes either way, and those are different answers.
 _PNG_EVIDENCE_UNREADABLE = "png_candidate_provenance_unreadable"
+#: The identity ladder withheld the candidate's audit record as ``scope_insufficient``:
+#: the record's audit scope does not cover this promote (the save and promote floors
+#: differ, the record is not keeper-scope, or this promote's floors did not resolve), and
+#: the picture, which a v2 keeper publishes only on the production record, goes with it.
+#: ``scope_insufficient`` is only reached after a record was found and validated, so
+#: "no record was written" (``_PNG_RECORD_NOT_WRITTEN``) is false here. What this does
+#: NOT say: that the record names a picture digest (it may name none), only that the cause
+#: is the record's scope.
+_PNG_RECORD_SCOPE_MISMATCH = "png_record_scope_mismatch"
 
 #: THE EXEMPT SET IS POSITIVE, AND IT IS THE ONLY WAY TO REACH ``paired_by_seq``.
 #:
@@ -1193,7 +1245,7 @@ _KEEPER_DIR_UNLISTABLE = "unlistable"
 
 
 def _png_publication_evidence(rec, src_png, cand_file, candidate_evidence,
-                              name_scheme):
+                              name_scheme, identity=None):
     """THE ONE RULE FOR PUBLISHING A PICTURE. Returns ``(png_identity, reason)``.
 
     > **``promote_best`` publishes a picture ONLY on POSITIVE, READABLE evidence that
@@ -1201,7 +1253,10 @@ def _png_publication_evidence(rec, src_png, cand_file, candidate_evidence,
       UNREADABLE and ABSENT all withhold.**
 
     Exactly one of the pair is not None: an identity token means PUBLISH, a reason means
-    WITHHOLD. The ``.zmx`` is unaffected either way -- withholding a picture is not
+    WITHHOLD. The identity token speaks about BYTES, never about design identity:
+    ``digest_proven`` says the picture's digest equals the one the save recorded for
+    these candidate bytes -- "the bytes of this save". Picture equality is not a
+    geometry oracle (a lossy projection renders unlike designs to identical bytes). The ``.zmx`` is unaffected either way -- withholding a picture is not
     refusing a promotion, and ``best_png_reason`` is the channel that says which.
 
     WHY THIS FUNCTION EXISTS (external re-audit; 3 HIGH read as ONE defect). Three
@@ -1242,8 +1297,21 @@ def _png_publication_evidence(rec, src_png, cand_file, candidate_evidence,
     ``cand_file`` is accepted and deliberately UNUSED: the digest binds the bytes, and a
     name check would be weaker evidence sitting beside stronger. It stays in the
     signature so a future rung can key on the candidate without re-threading callers.
+
+    ``identity`` (optional) is the identity ladder's verdict dict. It exists ONLY to
+    name the cause of a withheld picture: ``rec`` is ``None`` both when no record was
+    written and when a record WAS written but its scope does not cover this promote
+    (``scope_insufficient``: the floors differ, or the record is not keeper-scope), and
+    reporting the second as "record not written" is false -- a record was found and
+    validated. It does NOT claim that record names a picture digest. It never PUBLISHES
+    anything: that case still withholds.
     """
     if rec is None:
+        # A record that exists but is scoped out is NOT "not written" (see above). Checked
+        # first: ``scope_insufficient`` is only ever returned after a record was found and
+        # validated, so a legacy-exempt evidence token cannot co-occur with it.
+        if isinstance(identity, dict) and identity.get("reason") == _ID_SCOPE:
+            return None, _PNG_RECORD_SCOPE_MISMATCH     # SCOPED OUT  -> withhold
         # ABSENT SPLITS IN TWO, and the split is the whole reason the legacy corpus
         # survives this rule. ``snapshot()`` ALWAYS appends a manifest row, so a
         # candidate resolved BY A ROW was written by a save -- and if that save left no
@@ -2933,9 +3001,45 @@ def _design_ok(name):
     return _design_name_error(name) is None
 
 
+def _companion_stat(path):
+    """``("absent", None)`` | ``("present", (mtime_ns, size))`` | ``("unreadable", text)``.
+
+    ``os.stat`` with explicit handling, NOT ``os.path.isfile``: ``isfile`` swallows every
+    stat error into ``False``, so an unreadable companion would read as ABSENT with no
+    error disclosed. Only ``FileNotFoundError`` is absence; any other ``OSError`` (or a
+    ``ValueError`` for an embedded NUL) is UNREADABLE, which is a different answer.
+    """
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return "absent", None
+    except (OSError, ValueError) as exc:  # noqa: BLE001 - classified, never raised
+        return "unreadable", _exc_text(exc)
+    return "present", (st.st_mtime_ns, st.st_size)
+
+
+def _forward_slash(path):
+    """Normalize to a forward-slash path (SaveAs/LoadFile want forward slashes).
+
+    The same rule ``optimize_run._forward_slash`` applies to its own checkpoints; a local
+    copy because this module cannot import ``optimize_run`` (it is a heavier sibling).
+    """
+    return str(path).replace(os.sep, "/").replace("\\", "/")
+
+
 def _save_as_seam(session):
-    """The injected save seam: ``session.system.SaveAs(path) -> None`` (§0.7)."""
-    return lambda path: session.system.SaveAs(path)
+    """The injected save seam: ``session.system.SaveAs(path) -> None`` (§0.7).
+
+    The path handed to the engine is FORWARD-SLASH. A backslash in the path
+    ``SaveAs`` is given becomes the system's ``SystemFile``, and the headless tolerancing
+    report writer then returns an empty report; a forward-slash path keeps the saved
+    design tolerance-able (measured on OpticStudio 25.1.0: backslash ->
+    ``tolerancing_empty_report``, forward slash -> ok, same nominal). ONLY the string
+    given to ``SaveAs`` changes: the sink still builds, checks, records and returns its
+    native-separator ``target`` (the same file on disk), so no manifest or envelope path
+    changes spelling.
+    """
+    return lambda path: session.system.SaveAs(_forward_slash(path))
 
 
 def _active_configuration(session):
@@ -3835,6 +3939,17 @@ _FIGURE_ENVELOPE_KEYS = (
     # provenance of the drawing convention actually matters: without it a reviewer
     # scoring the figure cannot tell which outline convention produced the ink.
     "element_outline",
+    # The self renderer's two conditional render findings (and the native renderer's own
+    # self fallback, whose result carries them too): ``interfaces_extended`` lists the
+    # surfaces whose stroke runs past the measured aperture -- the synthetic ink, which is
+    # NOT derivable from the prescription -- and ``groups_not_split`` the cemented groups
+    # the per-element outline DECLINED to split (with the unmeasured pairs that blocked
+    # it). Both are emitted by the renderer only when non-empty, so the
+    # ``if key in render_res`` copy leaves them ABSENT (never ``None``) on a native render
+    # and on a design with nothing to report, keeping those candidate records
+    # byte-identical. A native save lists none because no synthetic ink was drawn.
+    "interfaces_extended",
+    "groups_not_split",
     # native-layout-retool:
     # per field, how many SAMPLED rays reach the image -- a trace, not a reading of the
     # ink (`basis` names the sample). Graded-clean fields and the no_rays_requested /
@@ -4147,11 +4262,31 @@ def save_candidate(session, params):
             "png_ok": False,
         }
 
-    # Durable .zmx via the sink (gate + manifest + fsync; never raises).
-    snap = sink.snapshot(label, meta={
-        "workspace": design_name, "label": label,
-        "active_configuration": active_before,
-    }, index=candidate_index, filename=candidate_filename)
+    # The state of the ``.ZDA`` companion of the file the engine is ABOUT to write, read
+    # immediately before ``SaveAs`` (the sink may advance the index, so the real target is
+    # only known inside it). A companion that already existed is not this save's product
+    # and is never deleted. Wrapped on the instance and restored in ``finally``. The
+    # instance wrap relies on the single-seat serialised contract: calls never overlap on
+    # one session, so no other save can see (or race) the temporary attribute.
+    _zda_before = {}
+    _inner_save_as = getattr(sink, "save_as", None)
+    if callable(_inner_save_as):
+        def _recording_save_as(target):
+            try:
+                _zda_before["state"] = _companion_stat(_naming.sibling(target, ".ZDA"))
+            except Exception:  # noqa: BLE001 - recording must never break the save
+                _zda_before["state"] = ("unreadable", "pre-save state could not be read")
+            return _inner_save_as(target)
+        sink.save_as = _recording_save_as
+    try:
+        # Durable .zmx via the sink (gate + manifest + fsync; never raises).
+        snap = sink.snapshot(label, meta={
+            "workspace": design_name, "label": label,
+            "active_configuration": active_before,
+        }, index=candidate_index, filename=candidate_filename)
+    finally:
+        if callable(_inner_save_as):
+            sink.save_as = _inner_save_as
     # NOTE: read the SnapshotResult fields via dataclasses.asdict so the source
     # never forms the dotted ``snap.s e q`` literal the release guard flags as a
     # legacy converter file-extension (it is the dataclass field name) — mirrors
@@ -4168,6 +4303,41 @@ def save_candidate(session, params):
     # with no ``error`` and no ``error_family`` anywhere on the envelope, so the caller
     # was told it failed and never told why. Carried to the envelope below.
     zmx_error = fields["error"]
+
+    # The ``.ZDA`` companion ``SaveAs`` wrote beside the ``.zmx`` is the engine's own
+    # state file, not part of the design: deleting it changes nothing on reload (measured
+    # on OpticStudio 25.1.0 with a full fingerprint over a 9-surface Cooke
+    # triplet and a 14-surface 3-configuration zoom: identical fingerprint and spot RMS,
+    # and the engine did not regenerate it). Removed only after a SUCCESSFUL save, so a
+    # failed save leaves whatever the engine wrote for the owner to see. A failed delete
+    # is DISCLOSED (``zda_removal_error``, emitted only then) and never raised, and
+    # ``zda_present`` below reads the post-removal state from disk, so a leftover still
+    # reads True.
+    #
+    # ONLY a companion THIS save produced is deleted: absent immediately before SaveAs and
+    # present after. One that pre-existed (a same-stem file this save did not write) is NOT
+    # deleted (the engine's SaveAs may still rewrite its content: measured live, a 192-byte
+    # placeholder became 15207 bytes) and is disclosed as ``zda_preexisting``; an unreadable state (before or
+    # after) deletes nothing and is disclosed in ``zda_removal_error``, with ``zda_present`` None.
+    zda_removal_error = None
+    zda_preexisting = False
+    if zmx_ok and isinstance(zmx_path, str):
+        _zda_path = _naming.sibling(zmx_path, ".ZDA")
+        _before = _zda_before.get("state")
+        _after = _companion_stat(_zda_path)
+        if _before is None:
+            zda_removal_error = "the .ZDA state before SaveAs was not recorded; not removed"
+        elif _before[0] == "unreadable":
+            zda_removal_error = "the .ZDA before SaveAs was unreadable: " + _before[1]
+        elif _after[0] == "unreadable":
+            zda_removal_error = "the .ZDA after SaveAs was unreadable: " + _after[1]
+        elif _before[0] == "present":
+            zda_preexisting = True
+        elif _after[0] == "present":
+            try:
+                os.remove(_zda_path)
+            except (OSError, ValueError) as exc:  # noqa: BLE001 - disclosed, never raised
+                zda_removal_error = _exc_text(exc)
 
     # Save-time clearance/visual gate (save-clearance-gate §3): WARN-and-surface,
     # NEVER blocks. Audit the live geometry, stamp ADDITIVE keys, and NEVER flip ``ok``
@@ -4924,6 +5094,17 @@ def save_candidate(session, params):
         if (png_unproven and zmx_ok and not _zmx_error_keys and not render_path_mismatch)
         else {}
     )
+    # Emitted ONLY when the ``.ZDA`` companion could not be removed, so a normal save stays
+    # byte-identical (the ``zda_present`` key beside it already reads True then).
+    _zda_keys = {}
+    if zda_removal_error is not None:
+        _zda_keys["zda_removal_error"] = zda_removal_error
+    if zda_preexisting:
+        _zda_keys["zda_preexisting"] = True
+    _zda_final = (_companion_stat(_naming.sibling(zmx_path, ".ZDA"))
+                  if isinstance(zmx_path, str) else ("absent", None))
+    if _zda_final[0] == "unreadable" and zda_removal_error is None:
+        _zda_keys["zda_removal_error"] = "the .ZDA state is unreadable: " + _zda_final[1]
     return {
         "ok": ok,
         "design_name": design_name,
@@ -4978,16 +5159,17 @@ def save_candidate(session, params):
         "png_replaced_existing": png_replaced_existing,
         "index_advanced": index_advanced,
         "requested_index": requested_index,
-        # A2: ``SaveAs`` writes a ``.ZDA`` companion beside the ``.zmx``. It is
-        # TRACKED here and NOT removed — deleting engine state is an unmeasured
-        # behaviour change, and its removal is a ticket, not this cycle.
+        # A2: ``SaveAs`` writes a ``.ZDA`` companion beside the ``.zmx``. It is removed
+        # after a successful save (see ``zda_removal_error`` above); this reads the state
+        # ON DISK NOW, so it is False after a removal and True only when one is left
+        # (a failed removal also carries ``zda_removal_error``).
         "zda_present": (
-            os.path.isfile(_naming.sibling(zmx_path, ".ZDA"))
-            if isinstance(zmx_path, str) else False
+            None if _zda_final[0] == "unreadable" else _zda_final[0] == "present"
         ),
         **_mismatch_keys,
         **_zmx_error_keys,
         **_png_unproven_keys,
+        **_zda_keys,
         "zmx_path": os.path.normpath(zmx_path) if isinstance(zmx_path, str) else zmx_path,
         "zmx_ok": zmx_ok,
         "png_path": os.path.normpath(png_path) if isinstance(png_path, str) else png_path,
@@ -5949,7 +6131,7 @@ def promote_best(session, params):
                 # ``else`` to route into.
                 png_identity, best_png_reason = _png_publication_evidence(
                     rec, src_png, cand_file, owner_evidence,
-                    cand_name_scheme)
+                    cand_name_scheme, identity)
                 if best_png_reason is None:
                     try:
                         _atomic_copy(src_png, best_png)
@@ -6212,8 +6394,12 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "The workspace root is set ONCE at MCP launch from OPTIVIBE_WORKSPACE_ROOT "
         "(else the launch cwd; a relative value is made absolute against the launch "
         "cwd) and is echoed as workspace_root; no tool takes a path "
-        "argument. SaveAs also writes a .ZDA companion beside the .zmx — that is the "
-        "engine's own state file, it is tracked as zda_present and is not removed. "
+        "argument. SaveAs also writes a .ZDA companion beside the .zmx — the engine's "
+        "own state file, not part of the design: it is deleted after a successful save, "
+        "zda_present reads the state afterwards, only a companion this save produced is deleted "
+        "(a pre-existing one is not deleted and is flagged zda_preexisting; the engine's "
+        "save may rewrite its content), and a failed delete or "
+        "unreadable state is disclosed as zda_removal_error (unreadable: zda_present null; never raised). "
         "index_advanced:true (normally false) says the name this save asked for was "
         "already on disk and the index was advanced rather than the bytes overwritten. "
         "The optimizer's per-pass trail and save_snapshot's checkpoints do NOT land "
@@ -6236,6 +6422,8 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "stop_label, figure_disclosures, disclosures_truncated (how many disclosure boxes the canvas could not fit: "
         "figure_disclosures lists only the boxes DRAWN, so a non-zero count means that list is short, never that the "
         "figure is clean), flags, config_evaluated, element_outline, "
+        "interfaces_extended and groups_not_split (self-drawn figures only, each present only when non-empty: the surfaces "
+        "whose stroke runs past the measured aperture, and the cemented groups drawn as one body), "
         "ray_coverage (per field, how many SAMPLED rays reach the image: a trace whose "
         "basis names the sample, not a reading of the drawn ink; status unavailable "
         "means unknown, not zero failures), registration and stamps_withheld (native "
@@ -6347,7 +6535,9 @@ PROMOTE_BEST_SPEC = ToolSpec(
         "can ride a live_session_geometry verdict (the bytes are proven, that audit was "
         "not usable). "
         "A picture is published only when it can be bound to the promoted .zmx "
-        "(png_identity / best_png_reason say which); the render param is INERT. "
+        "(best_png_reason says why one was withheld; png_identity digest_proven means the "
+        "picture matches the digest recorded for the bytes of this save, a statement about "
+        "those bytes and never proof that two designs are the same); the render param is INERT. "
         "This door and save_candidate persist designs into a per-design project "
         "workspace for the user to review; that folder, not this envelope, is how the "
         "design reaches them. "

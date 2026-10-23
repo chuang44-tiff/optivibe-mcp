@@ -51,6 +51,36 @@ and the server is listed in the MCP Registry.
   install without a clone to run `optivibe-build-data`.
 - **`optivibe-mcp` pins `optivibe-reference` to the same version**, so the server and its
   reference layer always install as a matched pair.
+- **`set_zoom` (array mode) moves the whole span.** The decenter is written on the surface before
+  `first`, so surface `first` moves with the rest of the span (the same arguments give different
+  geometry than before). `first=1` with a lateral decenter is refused up front. The reach check
+  holds the Automatic semi-diameters of the span at their configuration-1 values, so a beam that
+  walks off is refused as `array_unreached` and rolled back; the new `reach_apertures` field says
+  which surfaces were held. The image surface is not held, so check the image landing yourself.
+- **`add_return_cb` on a surface that is already a coordinate break no longer overwrites a solve
+  silently.** A Par cell holding a non-Fixed solve, or one that cannot be read, is refused as
+  `cb_solve_loss` with nothing written, unless `replace_solve=true`; the result then lists
+  `replaced_par_solves`, `preserved_par_solves` and `unreadable_par_cells`. A cell that already
+  holds the same pickup is not a loss. `par_solve_not_checked` and `par_solve_reason` are removed;
+  `par_solve_loss_audited` is true instead.
+- **`remove_surface` reports `repointed_to_successor`** when a cocentric, center-of-curvature,
+  compensator or position solve that referenced the removed surface now points at the surface that
+  slid into its place. A PickupChiefRay Par cell is no longer reported as unscanned.
+- **`save_candidate` deletes the `.ZDA` companion its own save produced.** `zda_present` is false
+  after a normal save (null when it cannot be read). A companion that existed before the save is
+  kept and flagged `zda_preexisting`; a failed delete adds `zda_removal_error`.
+- **`promote_best` names a scope mismatch.** When the picture's record was written at different
+  floors than the promote, `best_png_reason` reads `png_record_scope_mismatch`;
+  `png_production_record_not_written` now means only that no record was written.
+- **`render_layout` proves `out_of_plane` from geometry too**: a surface vertex or a traced ray
+  point off the drawing plane makes it true, so tilted mirrors and X decenters now read true. It is
+  null, with a disclosure line, when a surface frame could not be read. `out_of_plane_scope` says
+  what was read. A far-object view whose end gap is negative reports `virtual_conjugate_no_cut`,
+  and on an unfolded design the fill ignores coordinate breaks and undrawn dummy rows.
+- **`tolerance` and `load_design` no longer warn about a real design saved under the temp
+  folder**; the harness's own checkpoint files still warn. The warning for a last glass element
+  that touches the image now says it is a standing limit and how to cover it (a zero-thickness air
+  surface after the last glass).
 
 ### Fixed
 
@@ -65,6 +95,17 @@ and the server is listed in the MCP Registry.
 - **`release_engine` with `kill_others=true` no longer calls an engine whose command line it
   cannot read "interactive".** It is listed in `cmdline_unreadable`, never killed, and counted
   as still running.
+- **`set_solve` refuses a ChiefRayAngle solve that cannot act**: on a mirror, or on a radius with
+  no refractive power for the chief ray (a stop dummy, a plane or air-air surface), it is refused
+  before anything is written. It was accepted, changed nothing, and could be reported as a match.
+- **`set_solve` verifies negative MarginalRayHeight and ChiefRayHeight targets** like positive
+  ones, instead of declining to check them.
+- **`tolerance` works on a design saved by `save_candidate` or `save_snapshot`.** The save hands
+  the engine a forward-slash path; before, the next `tolerance` could return an empty report.
+- **A tilted object surface no longer makes a save or promote clearance verdict indeterminate**;
+  only a sag-unfaithful surface that bounds a measured gap does.
+- **Folded layouts draw the image plane and the stop ticks in the surface's own tilted frame**,
+  not as vertical lines.
 
 ## [0.1.18] — 2026-10-22
 
