@@ -86,6 +86,11 @@ and the server is listed in the MCP Registry.
 
 - **The reference tools' "not built" errors name `optivibe-build-data`** (and the clone script
   second), so an install without a clone is told a command it has.
+- **`optivibe-build-data` says when your OpticStudio's operand list differs from the curated
+  one.** The merit and tolerance catalogs build only for the operand set their curated data
+  covers; on another set the step now says so instead of asking you to run `--probe` again. The
+  manual step no longer fails when only one of the two operand captures is present. The clone
+  script `scripts/build_vendor_data.py` behaves the same.
 - **`set_field` (replacing all fields) reports a partial rebuild.** An engine error mid-rebuild
   now says how many new fields were added and how many old ones were deleted before it stopped.
 - **A failed configuration restore is no longer lost.** When a tool that switches configuration

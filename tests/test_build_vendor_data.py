@@ -51,3 +51,15 @@ def test_vendor_data_other_missing_module_stays_failed(bvd, monkeypatch, capsys)
     rc, out = bvd.main(), capsys.readouterr().out
     assert (rc, bvd.calls) == (1, ["glass", "operand", "tolerance"])
     assert "[manual-build] FAILED - ModuleNotFoundError" in out and "SKIPPED - PyMuPDF" not in out
+
+
+def test_vendor_data_names_a_different_operand_count_instead_of_reprobing(bvd, capsys):
+    # The probe read 442 merit operands; the curated build covers 438. That is not a
+    # missing probe, so the skip must say so rather than send the user back to probe.
+    with open(os.path.join(bvd._CAPTURES, "probe_operands_capture.json"), "w",
+              encoding="utf-8") as fh:
+        fh.write('{"inventory_count": 442}')
+    rc, out = bvd.main(), capsys.readouterr().out
+    assert rc == 0 and "operand" not in bvd.calls and "tolerance" in bvd.calls
+    line = [l for l in out.splitlines() if l.startswith("[operand-build] SKIPPED")][0]
+    assert "442 merit operands" in line and "Run the probes" not in line

@@ -36,7 +36,9 @@ skipped) steps. ASCII status output only.
 """
 import argparse
 import importlib.util
+import json
 import os
+import re
 import sys
 
 from . import _paths, build_steps, catalog_build, tolerance_build
@@ -47,6 +49,9 @@ OPERAND_CAPTURES = ("operand_inventory_438.json", "probe_operands_capture.json")
 TOLERANCE_CAPTURES = ("tolerance_inventory_62.json", "probe_tolerances_capture.json")
 # The capture the manual step's ``--emit-raw`` opens unconditionally (tolerance oracle).
 TOLERANCE_INVENTORY_CAPTURE = "tolerance_inventory_62.json"
+# ``--emit-raw`` opens BOTH inventories: the merit one for the glued-code gate, the
+# tolerance one for the tolerance oracle. Either absent -> no ``--emit-raw``.
+EMIT_RAW_CAPTURES = (OPERAND_CAPTURES[0], TOLERANCE_INVENTORY_CAPTURE)
 
 _DESCRIPTION = (
     "Build the OptiVibe reference data (glass catalog, manual corpus, merit and "
@@ -68,9 +73,43 @@ def _error_text(exc):
     return _ascii("%s: %s" % (type(exc).__name__, exc))
 
 
-def _captures_present(names):
-    captures = _paths.captures_dir()
+def _captures_present(names, captures=None):
+    captures = _paths.captures_dir() if captures is None else captures
     return all(os.path.isfile(os.path.join(captures, n)) for n in names)
+
+
+def probed_count(capture_path):
+    """The ``inventory_count`` a probe recorded in its capture, or None.
+
+    None when the capture is absent, unreadable, or carries no integer count.
+    """
+    try:
+        with open(capture_path, encoding="utf-8") as fh:
+            count = json.load(fh).get("inventory_count")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return count if isinstance(count, int) and not isinstance(count, bool) else None
+
+
+def catalog_step_blocker(captures, captures_dir=None):
+    """Why this operand/tolerance catalog cannot be built for the probed install, or None.
+
+    ``captures`` is ``(<kind>_inventory_<N>.json, probe_<kind>s_capture.json)``; N is the
+    operand count the shipped curated data (sign conventions, run-verdict buckets) was
+    built against. The probe names its inventory by the LIVE count, so an OpticStudio
+    with a different operand list writes a different file and the curated data does not
+    cover it. That is not a missing probe, so it must not be reported as one.
+    """
+    captures_dir = _paths.captures_dir() if captures_dir is None else captures_dir
+    curated = int(re.search(r"_(\d+)\.json$", captures[0]).group(1))
+    probed = probed_count(os.path.join(captures_dir, captures[1]))
+    if probed is None or probed == curated:
+        return None
+    kind = "tolerance" if captures[0].startswith("tolerance") else "merit"
+    return ("your OpticStudio exposes %d %s operands; the curated data shipped with "
+            "this release covers the %d it was built against, so this catalog cannot "
+            "be built for your OpticStudio version yet (re-running the probes will not "
+            "change that)." % (probed, kind, curated))
 
 
 def _run_probe(label, probe_main):
@@ -111,6 +150,12 @@ def _run_catalog_step(label, captures, build_main):
     (that domain's operand tools answer operand_catalog_unavailable until built).
     Present captures + a raised error OR a nonzero build exit code -> FAILED.
     """
+    blocker = catalog_step_blocker(captures)
+    if blocker is not None:
+        _say("[%s] SKIPPED - %s" % (label, blocker))
+        _say("[%s] this operand family answers operand_catalog_unavailable."
+             % label)
+        return 0
     if not _captures_present(captures):
         _say("[%s] SKIPPED - live-probe captures not present in %s. Run the probes "
              "against your OpticStudio first: optivibe-build-data --probe"
@@ -161,18 +206,18 @@ def _run_manual_step():
         return 0
     try:
         # --emit-raw ALSO writes the gitignored operand/tolerance raw oracles that
-        # steps 3-4 merge as verbatim-local descriptions. The TOLERANCE oracle opens
-        # the tolerance INVENTORY capture unconditionally — absent, --emit-raw raises
-        # FileNotFoundError mid-run and the whole manual step (corpus + merit oracle
-        # already written) is mis-reported FAILED. Preflight that capture: emit the
-        # oracles only when it is present, else build the corpus WITHOUT --emit-raw —
+        # steps 3-4 merge as verbatim-local descriptions. It opens BOTH inventory
+        # captures unconditionally (merit for the glued-code gate, tolerance for the
+        # tolerance oracle) — either absent, --emit-raw raises FileNotFoundError mid-run
+        # and the whole manual step is mis-reported FAILED. Preflight both: emit the
+        # oracles only when both are present, else build the corpus WITHOUT --emit-raw —
         # the SAME fresh-install degrade steps 3-4 take (operand/tolerance stay
         # synonyms-only / unavailable), never a FAIL.
-        if _captures_present((TOLERANCE_INVENTORY_CAPTURE,)):
+        if _captures_present(EMIT_RAW_CAPTURES):
             emit_args = ["--emit-raw"]
         else:
             emit_args = []
-            _say("[manual-build] NOTE: tolerance inventory capture absent -> building "
+            _say("[manual-build] NOTE: an operand inventory capture is absent -> building "
                  "corpus WITHOUT --emit-raw; operand/tolerance catalogs stay "
                  "synonyms-only until the live-probe captures are regenerated.")
         build_steps.build_manual_corpus(emit_args, find_pdf=lambda: pdf)
