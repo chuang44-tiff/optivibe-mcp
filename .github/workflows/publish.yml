@@ -15,8 +15,9 @@ permissions:
 # Uploads skip a file PyPI already has, so a run that stopped part-way can be re-run, or run
 # by hand from the Actions tab.
 
-# The check step fails the run if a wheel carries any data file beyond the four the reference
-# package ships: data a user builds from their own OpticStudio install never reaches a wheel.
+# The check step fails the run if a wheel or a source archive carries any data file beyond the
+# four the reference package ships: data a user builds from their own OpticStudio install never
+# reaches PyPI.
 
 jobs:
   build:
@@ -32,10 +33,10 @@ jobs:
           python -m pip install build
           python -m build packages/optivibe-reference --outdir dist/reference
           python -m build packages/optivibe-harness --outdir dist/mcp
-      - name: check the wheels
+      - name: check the wheels and source archives
         run: |
           python - <<'EOF'
-          import glob, sys, zipfile
+          import glob, sys, tarfile, zipfile
           allowed = {
               "optivibe_reference/data/operand_semantics.json",
               "optivibe_reference/data/operand_synonyms.json",
@@ -43,18 +44,28 @@ jobs:
               "optivibe_reference/data/provenance_grants.txt",
           }
           wheels = glob.glob("dist/*/*.whl")
-          if len(wheels) != 2:
-              sys.exit("expected 2 wheels, found %r" % wheels)
-          bad = []
+          sdists = glob.glob("dist/*/*.tar.gz")
+          if len(wheels) != 2 or len(sdists) != 2:
+              sys.exit("expected 2 wheels and 2 source archives, found %r" % (wheels + sdists))
+          members = []
           for wheel in wheels:
-              for name in zipfile.ZipFile(wheel).namelist():
-                  if "/data/" in name and ".dist-info/" not in name and name not in allowed:
-                      bad.append((wheel, name))
-                  if name.endswith((".db", ".agf", ".pdf")):
-                      bad.append((wheel, name))
+              members += [(wheel, name, name) for name in zipfile.ZipFile(wheel).namelist()]
+          for sdist in sdists:
+              for name in tarfile.open(sdist).getnames():
+                  # optivibe_reference-0.2.0/src/optivibe_reference/... -> optivibe_reference/...
+                  inner = name.split("/", 1)[1] if "/" in name else ""
+                  if inner.startswith("src/"):
+                      inner = inner[len("src/"):]
+                  members.append((sdist, name, inner))
+          bad = []
+          for archive, name, inner in members:
+              if "/data/" in inner and ".dist-info/" not in inner and inner not in allowed:
+                  bad.append((archive, name))
+              if inner.endswith((".db", ".agf", ".pdf")):
+                  bad.append((archive, name))
           if bad:
-              sys.exit("data a wheel must not carry: %r" % bad)
-          print("wheels OK:", wheels)
+              sys.exit("data a wheel or source archive must not carry: %r" % bad)
+          print("archives OK:", wheels + sdists)
           EOF
       - uses: actions/upload-artifact@v4
         with:

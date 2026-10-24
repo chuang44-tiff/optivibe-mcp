@@ -95,6 +95,10 @@ OpticStudio install, and `--probe` also runs the two operand probes, which open 
 need the ZOS-API licence. `optivibe-doctor` checks the install. Then
 [register the server with Claude Code](#register-with-claude-code).
 
+`optivibe-build-data` writes into the installed package's `data/` and `data/captures/`
+directories, so install `optivibe-mcp` into a virtual environment (or with `pip install --user`)
+rather than into a system Python whose site-packages is not writable.
+
 ### From a clone
 
 Clone the repository, then run one command from its root:
