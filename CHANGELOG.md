@@ -3,8 +3,8 @@
 All notable changes to **optivibe-mcp**.
 
 Versions are tagged in this repository (`v0.1.0` … `v0.2.0`). Each tag points at the merge
-commit that published that version, and every tag was verified against the four version
-literals in the tree at that commit.
+commit that published that version, and every tag was verified against the version literals
+in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).

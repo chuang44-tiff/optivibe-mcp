@@ -48,10 +48,6 @@ import build_manual_corpus  # noqa: E402
 from optivibe_reference import build_data, catalog_build, tolerance_build  # noqa: E402
 
 _CAPTURES = os.path.join(_HERE, "captures")
-# The live-probe captures each operand-catalog build REQUIRES (regenerated from
-# the user's OpticStudio install); absent -> that step is a fresh-install SKIP.
-_OPERAND_CAPTURES = ("operand_inventory_438.json", "probe_operands_capture.json")
-_TOLERANCE_CAPTURES = ("tolerance_inventory_62.json", "probe_tolerances_capture.json")
 
 
 def _captures_present(names):
@@ -141,12 +137,12 @@ def main():
 
     print("=== [3/4] merit operand catalog (user-built; synonyms + local oracle) ===")
     failures += _run_catalog_step(
-        "operand-build", _OPERAND_CAPTURES, catalog_build.main
+        "operand-build", build_data.OPERAND_CAPTURES, catalog_build.main
     )
 
     print("=== [4/4] tolerance operand catalog (user-built; synonyms + local oracle) ===")
     failures += _run_catalog_step(
-        "tolerance-build", _TOLERANCE_CAPTURES, tolerance_build.main
+        "tolerance-build", build_data.TOLERANCE_CAPTURES, tolerance_build.main
     )
 
     if failures:

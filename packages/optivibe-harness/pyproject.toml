@@ -15,7 +15,7 @@
 # `optivibe_harness` and `optivibe_doctor`. In a clone, install the reference editable
 # FIRST (`pip install -e ../optivibe-reference`), or pip fetches it from PyPI.
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -24,9 +24,8 @@ version = "0.2.0"
 description = "OptiVibe harness: ZOS-API automation, typed tools, and the single OptiVibe MCP"
 requires-python = ">=3.11"
 readme = "README.md"
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
 classifiers = [
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.11",
     "Operating System :: Microsoft :: Windows",
 ]
