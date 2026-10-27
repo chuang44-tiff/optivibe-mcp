@@ -845,3 +845,22 @@ def test_subprocess_garbage_stdin_all_subcommands():
             assert r.returncode == 0 and r.stdout == ""
     r = run_hook(["enforce", "bogus"], _prompt_input("."))  # unknown subcommand: fail open
     assert r.returncode == 0 and r.stdout == ""
+
+
+def test_unremovable_stale_lock_fails_open_at_the_deadline(tmp_path, monkeypatch):
+    sdir = tmp_path / "s"
+    sdir.mkdir()
+    lock = sdir / h.LOCK_NAME
+    lock.write_text("")
+    old = time.time() - 10 * h.LOCK_STALE_S
+    os.utime(lock, (old, old))
+
+    def refuse(path):
+        raise PermissionError(path)
+
+    monkeypatch.setattr(h, "LOCK_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(h.os, "remove", refuse)
+    start = time.time()
+    with h.locked(str(sdir)) as held:
+        assert held is False
+    assert time.time() - start < 5

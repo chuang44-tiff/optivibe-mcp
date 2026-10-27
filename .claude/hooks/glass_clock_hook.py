@@ -321,7 +321,7 @@ def locked(sdir):
                     os.remove(path)
                     continue
             except OSError:
-                continue
+                pass  # a lock we cannot read or remove: wait and retry, bounded by the deadline
         if time.time() >= deadline:
             append_log(sdir, {"kind": "error", "t": time.time(), "why": "lock_timeout"})
             break
