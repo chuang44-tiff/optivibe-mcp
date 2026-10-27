@@ -14,8 +14,9 @@ see [PROVENANCE.md](PROVENANCE.md).
   serialized; do not assume concurrency.
 - **Lazy engine-open.** The engine seat is taken on the *first design-touching tool
   call*, not at startup. Reference and lookup tools run "cold" with no engine open.
-- **Reaping is automatic.** The engine is closed for you on shutdown — you never manage
-  the process lifecycle, never call a connect/close yourself.
+- **Reaping is automatic.** The engine is closed for you on shutdown — you never open or
+  connect it yourself. When you are done with engine work and something else needs the
+  seat, call `release_engine`.
 
 ## The trust model — proof, not absence-of-error
 

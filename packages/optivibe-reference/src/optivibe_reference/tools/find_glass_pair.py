@@ -184,7 +184,7 @@ def _load_pair_eligible(db_conn, catalogs):
         where += f" AND LOWER(catalog) IN ({marks})"
         sql_params.extend(c.lower() for c in catalogs)
     sql = (
-        "SELECT catalog, name, vd, pg_f, nd FROM glass "
+        "SELECT catalog, name, vd, pg_f, nd, tce FROM glass "
         f"WHERE {where} ORDER BY pg_f, catalog, name"
     )
     return db_conn.execute(sql, sql_params).fetchall()
@@ -226,7 +226,7 @@ def _resolve_anchor(db_conn, anchor, anchor_catalog, catalogs):
         sql_params.append(anchor_catalog)
     rows = db_conn.execute(
         "SELECT catalog, name, vd, pg_f, nd, pg_f_valid, "
-        "(vd IS NOT NULL), nd_valid FROM glass "
+        "(vd IS NOT NULL), nd_valid, tce FROM glass "
         f"WHERE {where} ORDER BY catalog",
         sql_params,
     ).fetchall()
@@ -298,18 +298,22 @@ def _pair_numbers(a, b):
     }
 
 
-def _pair_dict(a, b, delta_vd, delta_pg_f, score):
+def _pair_dict(a, b, delta_vd, delta_pg_f, score, anchor_row=None):
     """Build one result pair dict with the HIGHER-Vd glass as ``a`` for stability."""
     # Canonical orientation: the higher-Vd (crown-ish) glass first is a stable,
     # readable convention. a/b are (catalog, name, vd, pg_f, nd) tuples.
     if a[2] < b[2]:
         a, b = b, a
+    # delta_tce = tce(second) - tce(first), the anchor first when there is one; None if either is unknown.
+    first, second = (b, a) if anchor_row and (b[0], b[1]) == anchor_row[:2] else (a, b)
+    delta_tce = None if None in (first[5], second[5]) else round(second[5] - first[5], 3)
     return {
         "a": {"catalog": a[0], "name": a[1], "vd": a[2], "pg_f": a[3], "nd": a[4]},
         "b": {"catalog": b[0], "name": b[1], "vd": b[2], "pg_f": b[3], "nd": b[4]},
         "delta_vd": delta_vd,
         "delta_pg_f": delta_pg_f,
         "score": score,
+        "delta_tce": delta_tce,
         **_pair_numbers(a, b),
     }
 
@@ -334,14 +338,14 @@ def _emit_pairs(eligible, cluster_ids, max_delta_pg_f, min_delta_vd, anchor_row)
     # so an emitted (A, B) never re-appears as (B, A).
     hi = 0
     for i in range(n):
-        cat_i, name_i, vd_i, pgf_i, nd_i = eligible[i]
+        cat_i, name_i, vd_i, pgf_i, nd_i = eligible[i][:5]
         cid_i = cluster_ids[i]
         if hi < i + 1:
             hi = i + 1
         while hi < n and (eligible[hi][3] - pgf_i) <= max_delta_pg_f:
             hi += 1
         for j in range(i + 1, hi):
-            cat_j, name_j, vd_j, pgf_j, nd_j = eligible[j]
+            cat_j, name_j, vd_j, pgf_j, nd_j = eligible[j][:5]
             cid_j = cluster_ids[j]
             # Self-pair exclusion: same physical glass (same cluster) OR the exact
             # same (catalog, name) row. A same-name-but-DIFFERENT-properties pair
@@ -365,7 +369,7 @@ def _emit_pairs(eligible, cluster_ids, max_delta_pg_f, min_delta_vd, anchor_row)
                     continue
             score = _score(delta_vd, delta_pg_f)
             pair = _pair_dict(
-                eligible[i], eligible[j], delta_vd, delta_pg_f, score
+                eligible[i], eligible[j], delta_vd, delta_pg_f, score, anchor_row
             )
             # Stash the unordered physical-identity key for the dedup step.
             pair["_cluster_key"] = frozenset((cid_i, cid_j))
@@ -492,7 +496,7 @@ def find_glass_pair(db_conn, params):
                     "dispersion) - no pairs"
                 ),
             }
-        anchor_row = (resolved[0], resolved[1], resolved[2], resolved[3], resolved[4])
+        anchor_row = (resolved[0], resolved[1], resolved[2], resolved[3], resolved[4], resolved[8])
 
     eligible, left_out_kinds, unclassified = _build_pool(
         db_conn, catalogs, excluded, anchor_row, max_delta_pg_f, min_delta_vd
@@ -555,7 +559,8 @@ FIND_GLASS_PAIR_SPEC = ToolSpec(
         "heuristic prefilter, and cut at limit; a smaller max_delta_pg_f brings "
         "low secondary-colour pairs to the top. Each pair also carries "
         "secondary_per_focal, power_sum and petzval_per_power for a thin cemented "
-        "doublet of the pair; read caveat in the result. Gotcha: an ambiguous bare anchor name returns an "
+        "doublet of the pair, and delta_tce (thermal expansion of the second glass minus "
+        "the first, the anchor first; null when either is unknown); read caveat in the result. Gotcha: an ambiguous bare anchor name returns an "
         "ambiguous_glass candidate list - qualify the catalog. See find_glasses to "
         "window-search single glasses. See lookup_glass for one glass's full data."
     ),

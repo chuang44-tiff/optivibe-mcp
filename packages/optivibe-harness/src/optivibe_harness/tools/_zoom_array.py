@@ -388,6 +388,138 @@ def restore_span_apertures(system, pinned):
     return failed
 
 
+# The SDIA cell solves the hold may overwrite with a value (a pickup / thermal / unreadable one is refused).
+_PLAIN_SDIA_SOLVES = ("Fixed", "Variable")
+
+
+def _sdia_rows_in_span(system, first_surface):
+    """Every MCE ``SDIA`` row whose surface is in the pinned range, as ``(row_handle, surface, ordinal)``.
+
+    The range is the one ``pin_span_apertures`` covers (``max(1, first-1) .. N-2``, never the
+    image). ``ordinal`` counts the ``SDIA`` rows on the same surface in row order, so a row is
+    found again by type + surface + ordinal, never by its row index (the compose appends rows).
+    """
+    from . import _mce_catalog as _cat
+    from ._mce_cells import read_param
+    from .mce_config import _operand_code
+
+    n = int(system.LDE.NumberOfSurfaces)
+    lo = max(1, int(first_surface) - 1)
+    seen = {}
+    found = []
+    for r in range(1, int(system.MCE.NumberOfOperands) + 1):
+        op = system.MCE.GetOperandAt(r)
+        if _operand_code(op) != "SDIA":
+            continue
+        surface = read_param(op, 1)
+        ordinal = seen.get(surface, 0)
+        seen[surface] = ordinal + 1
+        if lo <= surface < n - 1:
+            found.append((op, surface, ordinal))
+    return found, _cat.meta_for("SDIA").value_datatype
+
+
+def hold_span_sdia_rows(system, first_surface, pins):
+    """Hold every MCE ``SDIA`` row over the reach span at its config-1 value in every config.
+
+    An ``SDIA`` row makes its surface's semi-diameter ``Fixed`` and applies the row's per-config
+    value on a config switch, so ``pin_span_apertures`` sees it as already held while a config
+    still carries a wider aperture (measured: cfg2 = 40 mm let a 15 mm decenter pass). The caller
+    has config 1 active. Each row's saved per-config values go into ``pins["held_mce"]`` as
+    ``(surface, ordinal, values, solves)`` BEFORE its cells are written, so a raise part way still leaves
+    a restorable record. Every written cell is read back twice: on the write handle
+    (``write_config_cell`` raises on a miss) and on a FRESH handle (``reconcile_one_cell``, the
+    canonical MCE author path's second read).
+
+    A row with any cell whose solve is not ``Fixed`` or ``Variable`` (a pickup, a thermal solve,
+    or an unreadable one) is REFUSED before any SDIA cell is written: overwriting a slaved cell
+    with its config-1 value would break the solve, and a value-only restore could not prove it
+    came back.
+    """
+    from ._mce_cells import (
+        number_of_configurations, operand_cell, read_config_cell, reconcile_one_cell,
+        solve_type_name, write_config_cell, _mce_cell_error,
+    )
+
+    held = pins.setdefault("held_mce", [])
+    rows, datatype = _sdia_rows_in_span(system, first_surface)
+    n_cfg = number_of_configurations(system)
+    for _op, surface, _ordinal in rows:
+        for c in range(1, n_cfg + 1):
+            kind = solve_type_name(operand_cell(system, _op, c))
+            if kind not in _PLAIN_SDIA_SOLVES:
+                raise _ZoomUnverified(
+                    f"array: the MCE SDIA row on surface {surface} carries a "
+                    f"{kind if kind is not None else 'unreadable'} solve in config {c}; the reach "
+                    "check holds SDIA rows at their config-1 value and will not overwrite a solve "
+                    "cell, so it cannot check this span - make the row's cells Fixed or Variable, "
+                    "or remove the row",
+                    family="zoom_param",
+                    extra={"sdia_surface": surface, "config": c, "solve": kind},
+                )
+    for op, surface, ordinal in rows:
+        values = [read_config_cell(system, op, c, datatype) for c in range(1, n_cfg + 1)]
+        solves = [solve_type_name(operand_cell(system, op, c)) for c in range(1, n_cfg + 1)]
+        held.append((surface, ordinal, values, solves))
+        for c in range(2, n_cfg + 1):
+            if values[c - 1] != values[0]:
+                write_config_cell(system, op, c, datatype, values[0])
+                if not reconcile_one_cell(system, op, c, datatype, values[0]):
+                    raise _mce_cell_error(
+                        f"the MCE SDIA row on surface {surface}, config {c}, did not read back "
+                        "the held config-1 value on a fresh handle; refusing rather than "
+                        "checking reach against an aperture that was not held"
+                    )
+    return pins
+
+
+def restore_span_sdia_rows(system, pins):
+    """Write back the cell values ``hold_span_sdia_rows`` saved and read each back. NEVER raises.
+
+    Each row is found again by type ``SDIA`` + surface + ordinal among the ``SDIA`` rows on that
+    surface (the compose adds rows of other types, so the row index may have moved). Returns the
+    surfaces whose cells did not read back as saved (empty when the restore is proven).
+    """
+    from . import _mce_catalog as _cat
+    from ._mce_cells import (
+        operand_cell, read_param, reconcile_one_cell, solve_type_name, write_config_cell,
+    )
+    from .mce_config import _operand_code
+
+    failed = []
+    for surface, ordinal, values, solves in (pins or {}).get("held_mce", ()):
+        try:
+            datatype = _cat.meta_for("SDIA").value_datatype
+            match = None
+            seen = 0
+            for r in range(1, int(system.MCE.NumberOfOperands) + 1):
+                op = system.MCE.GetOperandAt(r)
+                if _operand_code(op) == "SDIA" and read_param(op, 1) == surface:
+                    if seen == ordinal:
+                        match = op
+                        break
+                    seen += 1
+            ok = match is not None
+            if ok:
+                # Every cell is written and checked, even after an earlier one failed:
+                # write_config_cell reads back on its own handle (and raises on a miss), then a
+                # fresh-handle re-read and the solve type are checked.
+                for c, v in enumerate(values, start=1):
+                    try:
+                        write_config_cell(system, match, c, datatype, v)
+                        cell_ok = (reconcile_one_cell(system, match, c, datatype, v)
+                                   and solve_type_name(operand_cell(system, match, c))
+                                   == solves[c - 1])
+                    except Exception:  # noqa: BLE001 - this cell failed; keep restoring the rest
+                        cell_ok = False
+                    ok = ok and cell_ok
+        except Exception:  # noqa: BLE001 - a failed restore is DISCLOSED, never raised
+            ok = False
+        if not ok:
+            failed.append(surface)
+    return failed
+
+
 __all__ = [
     "z_to_thic",
     "read_ray_global_x",
@@ -397,6 +529,8 @@ __all__ = [
     "reach_span_all_configs",
     "pin_span_apertures",
     "restore_span_apertures",
+    "hold_span_sdia_rows",
+    "restore_span_sdia_rows",
     "_ARRAY_UNREACHED",
     "_ARRAY_NO_BITE",
 ]

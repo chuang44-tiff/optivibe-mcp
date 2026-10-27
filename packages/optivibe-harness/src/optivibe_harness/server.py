@@ -701,8 +701,8 @@ def load_manifest():
 #:   ``set_zoom``/``set_config_operand`` (configuration STRUCTURE),
 #:   ``scale_lens`` (the owner named it: a scaled design changes the meaning of every
 #:   mm), ``normalize_stop``/``set_stop_surface`` (may relocate/insert a stop surface),
-#:   ``ramp_aperture`` and ``tolerance`` (both perturb the live design across a
-#:   SaveAs/LoadFile checkpoint and restore it; a failed restore is a different design),
+#:   ``ramp_aperture`` (perturbs across a SaveAs/LoadFile checkpoint; a failed restore
+#:   is a different design), ``tolerance`` (perturbs through the Tolerance Data Editor),
 #: and EVERY tool not present.
 #: Cap on ``session.design_epoch_faults``. The list is DISCLOSURE, not a ledger:
 #: the budget dies on the first fault, so the entries after that name which other

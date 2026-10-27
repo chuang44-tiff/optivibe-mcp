@@ -93,7 +93,7 @@ _MSG = {
     "drop": "drop must be true or false",
     "open_dropped": "rerun this set with drop=false",
     "not_run": "not measured: see this call's error",
-    "coverage": "slots at rest %d of %d; open %s; untried %s",
+    "coverage": "slots at rest %d of %d; open %s; untried %s; sweep %s; never tried %s; search %.0f s",
     "budget": "time_budget_s must be a number from 10 to 600",
     "budget_call": "time_budget_s is per arm (the control and each set) and one call is capped at "
                    "%g s: with %d sets each arm can have at most %g s",
@@ -1104,9 +1104,21 @@ def _coverage(run, sets, res):
     at_rest = [x for x in run.slots if x in led["at_rest"]]
     open_ = [x for x in run.slots if x in led["tried"] and x not in led["at_rest"]]
     untried = [x for x in run.slots if x not in led["tried"]]
+    scope = getattr(run.session, "_glass_search", None)       # the search: survives a keep (radii, not slots)
+    if not (isinstance(scope, dict) and scope.get("slots") == tuple(run.slots)
+            and isinstance(scope.get("ever"), set) and type(scope.get("t0")) is float and math.isfinite(scope["t0"])):
+        scope = run.session._glass_search = {"slots": tuple(run.slots), "t0": run.t0, "ever": set()}
+    for entries, arm in zip(sets, res["arms"]):
+        if arm:
+            scope["ever"] |= {e["surface"] for e in entries}
+    never = [x for x in run.slots if x not in scope["ever"]]
+    done = not open_ and not untried
+    wall = round(_call_clock() - scope["t0"], 1)
     names = lambda rows: ", ".join("S%d" % x for x in rows) or "none"  # noqa: E731
     return {"slots": run.slots, "at_rest": at_rest, "open": open_, "untried": untried,
-            "summary": _MSG["coverage"] % (len(at_rest), len(run.slots), names(open_), names(untried))}
+            "sweep_done": done, "never_tried": never, "search_wall_s": wall,
+            "summary": _MSG["coverage"] % (len(at_rest), len(run.slots), names(open_), names(untried),
+                                           "done" if done else "not done", names(never), wall)}
 
 
 def _budget_block(run, sets, res):
@@ -1231,7 +1243,11 @@ TRIAL_GLASS_SWAPS_SPEC = ToolSpec(
         "no arm is dropped. open_arms lists every arm not measured (the "
         "control included) with the action that closes it. coverage counts this lens's glass rows at "
         "rest, open or untried across calls (information, not a gate); it resets when anything the lens state records changes except glass: radii, thicknesses, conics, "
-        "semi-diameters, surface types, solves, even-asphere terms, the stop, merit rows, wavelengths, fields, aperture; vignetting and other settings are not seen. not_measured gives a "
+        "semi-diameters, surface types, solves, even-asphere terms, the stop, merit rows, wavelengths, fields, aperture; vignetting and other settings are not seen. "
+        "coverage also reports sweep_done (every slot at rest on the current lens), never_tried "
+        "(slots no arm has run on in this search, which a keep does not reset) and search_wall_s "
+        "(seconds since the first trial_glass_swaps call on these slots started in this session; two designs with the same glass "
+        "rows share one search, and reloading the same design does not restart the clock). not_measured gives a "
         "reason and says nothing about whether the glass helps. Nothing is applied: load_design "
         "applies your choice."
     ),

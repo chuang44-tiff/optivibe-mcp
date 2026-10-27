@@ -207,11 +207,11 @@ def _structural(code, family, layout, int_cells, units, precondition=None):
     )
 
 
-def _control(code, family, layout, int_cells):
+def _control(code, family, layout, int_cells, precondition=None, reason=_CONTROL):
     return TolOperandMeta(
         code=code, family=family, cell_layout=layout, int_cells=int_cells,
         has_minmax=False, tier="control", units=None,
-        precondition=None, reason=_CONTROL, ticket=None,
+        precondition=precondition, reason=reason, ticket=None,
     )
 
 
@@ -373,12 +373,15 @@ TOL_OPERAND_META: Dict[str, TolOperandMeta] = {
     # per-the-targeted-MCE-operand (a CRVT TMCO is dimensionless, a THIC TMCO is
     # lens_units — operand-agnostic, disclosed). The headless run analyzes only the
     # CURRENT config, so a TMCO whose Config# != current reads a silent zero (the
-    # tmco_config_mismatch WARN). TEDV stays _control (ChangeType(TEDV) FAILS — a labeled
-    # known_gap refusal).
+    # tmco_config_mismatch WARN). TEDV stays tier "control" but is REFUSED before
+    # authoring (ChangeType(TEDV) FAILS in the engine: a labeled known_gap).
     "TMCO": _supported("TMCO", "multi_config", "config_row",
                        _cells((2, "Row"), (3, "Config#")), "per_targeted_mce_operand"),
     "TEDV": _control("TEDV", "parameter", "surf_par",
-                     _cells((2, "Surf"), (3, "Par#"))),
+                     _cells((2, "Surf"), (3, "Par#")),
+                     precondition="type_change_fails",
+                     reason="ChangeType(TEDV) fails in the engine (recorded probe, MCE "
+                            "); refused before authoring."),
 
     # --- element pivot-tilt -> CB-required (single Surf) ----------------------- #
     "TUTX": _cb("TUTX", "element_pivot", "single_surf", _cells((2, "Surf")), "degrees"),

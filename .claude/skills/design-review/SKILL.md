@@ -83,9 +83,9 @@ count before you map them, and label the limit as the limit.
 ```
 
 **The report ends with the verdict heading.** It begins with the literal token
-`### Verdict:` followed by exactly one of `PASS`, `NEEDS WORK`, or `FAIL`. That token
-is read by tooling downstream — do not substitute prose for it ("Bottom line",
-"Summary", "Overall"). Anything else you want to say goes *above* the line.
+`### Verdict:` followed by exactly one of `PASS`, `NEEDS WORK`, or `FAIL`. Keep that
+marker exactly as written, so the verdict stays easy to find for the reader and in later
+sessions — do not substitute prose for it ("Bottom line", "Summary", "Overall"). Anything else you want to say goes *above* the line.
 
 Keep every section. If a section has nothing in it, say why rather than dropping it
 — an absent `Manufacturability` block reads as "clean" when it means "not measured."

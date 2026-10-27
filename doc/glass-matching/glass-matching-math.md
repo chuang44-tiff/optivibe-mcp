@@ -161,7 +161,8 @@ and g.<sup>3</sup>
 Catalogue values of $\Delta P$ cannot be mixed between manufacturers, because each maker draws its normal
 line through different reference glasses: Schott through K7 and F2,<sup>3</sup> HOYA through C7 and
 F2,<sup>7</sup> and OHARA through NSL7 and PBM2.<sup>8</sup> The tools therefore compute $P$ and $\Delta P$
-from each glass's dispersion formula against one stated line, and never read a catalogue's $\Delta P$ column.
+from each glass's dispersion formula against one stated line. A catalogue's own $\Delta P$ is served
+beside them (`delta_pg_f`, read verbatim from the `.agf`) for reference, and no computation uses it.
 
 ### 3.4 Worked example
 

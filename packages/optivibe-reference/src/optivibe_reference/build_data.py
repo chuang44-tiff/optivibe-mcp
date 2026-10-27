@@ -69,8 +69,18 @@ def _say(text):
     print(_ascii(text))
 
 
+_NOT_WRITABLE_HINT = (
+    " (if the install location is not writable -- the build writes into the "
+    "package's data and captures directories, so install optivibe-mcp into a virtual "
+    "environment, or use `pip install --user`, then re-run.)"
+)
+
+
 def _error_text(exc):
-    return _ascii("%s: %s" % (type(exc).__name__, exc))
+    text = "%s: %s" % (type(exc).__name__, exc)
+    if isinstance(exc, PermissionError):
+        text += _NOT_WRITABLE_HINT
+    return _ascii(text)
 
 
 def _captures_present(names, captures=None):
@@ -91,6 +101,16 @@ def probed_count(capture_path):
     return count if isinstance(count, int) and not isinstance(count, bool) else None
 
 
+def _capture_incomplete(capture_path):
+    """True iff the capture reads and says ``ok: false``: a probe that failed after its first
+    step writes its capture early (so the count matches the new inventory) but never marks it ok."""
+    try:
+        with open(capture_path, encoding="utf-8") as fh:
+            return json.load(fh).get("ok") is False
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def catalog_step_blocker(captures, captures_dir=None):
     """Why this operand/tolerance catalog cannot be built for the probed install, or None.
 
@@ -102,8 +122,12 @@ def catalog_step_blocker(captures, captures_dir=None):
     """
     captures_dir = _paths.captures_dir() if captures_dir is None else captures_dir
     curated = int(re.search(r"_(\d+)\.json$", captures[0]).group(1))
-    probed = probed_count(os.path.join(captures_dir, captures[1]))
+    capture = os.path.join(captures_dir, captures[1])
+    probed = probed_count(capture)
     if probed is None or probed == curated:
+        if _capture_incomplete(capture):
+            return ("the last live probe did not finish (%s is marked incomplete), so this "
+                    "catalog is not built from it; re-run `optivibe-build-data --probe`." % captures[1])
         return None
     kind = "tolerance" if captures[0].startswith("tolerance") else "merit"
     return ("your OpticStudio exposes %d %s operands; the curated data shipped with "
@@ -112,11 +136,20 @@ def catalog_step_blocker(captures, captures_dir=None):
             "change that)." % (probed, kind, curated))
 
 
-def _run_probe(label, probe_main):
-    """Run one live probe; return 1 iff it FAILED (a missing pythonnet included)."""
+def _run_probe(label, module_name):
+    """Run one live probe; return 1 iff it FAILED (a missing pythonnet included).
+
+    The probe module is imported INSIDE the guard, so a broken import is that probe's
+    FAILED report and the other probe still runs.
+    """
     # Lazy: importing the probe modules is cheap and clr-free, but keep them off the
     # import path of a plain build run.
-    from ._probe_common import PROBE_EXTRA_HINT, PythonnetMissing
+    try:
+        from ._probe_common import PROBE_EXTRA_HINT, PythonnetMissing
+        probe_main = importlib.import_module("." + module_name, __package__).main
+    except Exception as exc:  # noqa: BLE001 — report per-step, keep going
+        _say("[%s] FAILED - cannot import the probe: %s" % (label, _error_text(exc)))
+        return 1
     try:
         rc = probe_main()
     except PythonnetMissing:
@@ -134,12 +167,11 @@ def _run_probe(label, probe_main):
 
 def run_probes():
     """Step 0: the two live probes, merit first. Returns the number that FAILED."""
-    from . import probe_operands, probe_tolerances
     failures = 0
     _say("=== [probe 1/2] merit operand surface (boots a headless OpticStudio) ===")
-    failures += _run_probe("probe-operands", lambda: probe_operands.main())
+    failures += _run_probe("probe-operands", "probe_operands")
     _say("=== [probe 2/2] tolerance operand surface (boots a headless OpticStudio) ===")
-    failures += _run_probe("probe-tolerances", lambda: probe_tolerances.main())
+    failures += _run_probe("probe-tolerances", "probe_tolerances")
     return failures
 
 

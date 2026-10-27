@@ -25,7 +25,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "optivibe-reference"
-version = "0.2.0"
+version = "0.2.1"
 description = "OptiVibe reference layer: lookup tables + RAG + intent->ZOS-API grounding"
 requires-python = ">=3.11"
 readme = "README.md"

@@ -19,9 +19,13 @@ glass names are committed).
 Record grammar (opened by ``NM``):
     name=NM[1], formula=parse_formula_field(NM[2]), nd_stored=NM[4], vd_stored=NM[5];
     density=ED[3], dpgf=ED[4]; cd=CD[1:]; min_wave=LD[1], max_wave=LD[2].
+    Also (-1 or absent reads None): status_code=NM[7], tce=ED[1] (0 reads None), OD[1..6], IT rows.
 """
 import glob
 import os
+
+
+_OD_KEYS = ("relative_cost", "climate", "stain", "acid", "alkali", "phosphate")
 
 
 def parse_formula_field(tok):
@@ -52,6 +56,14 @@ def parse_float(tok):
         return float(tok)
     except (ValueError, TypeError):
         return None
+
+
+def _field(p, i):
+    """Float of split field ``i``, or None when absent, unparseable or the file's unset marker -1."""
+    v = parse_float(p[i]) if len(p) > i else None
+    if v is None or abs(v + 1.0) < 1e-9:
+        return None
+    return v
 
 
 def _decode_agf(raw):
@@ -105,6 +117,9 @@ def iter_glass_records(path):
     minw = maxw = None
     have = False
     formula_is_sci = False
+    status_code = tce = None
+    od = {}
+    it = []
 
     def emit():
         return {
@@ -112,6 +127,7 @@ def iter_glass_records(path):
             "density": density, "dpgf": dpgf, "cd": cd,
             "min_wave": minw, "max_wave": maxw, "catalog": os.path.basename(path),
             "formula_is_sci": formula_is_sci,
+            "status_code": status_code, "tce": tce, "it": it, **od,
         }
 
     with open(path, "rb") as fh:
@@ -131,14 +147,28 @@ def iter_glass_records(path):
             density = dpgf = None
             cd = None
             minw = maxw = None
+            status_code = _field(p, 7)
+            status_code = int(status_code) if status_code is not None and status_code.is_integer() else None
+            tce = None
+            od = dict.fromkeys(_OD_KEYS)
+            it = []
             have = True
         elif ln.startswith("ED ") and have:
             # ED tce1 tce2 density dPgF ...  (dPgF = ED field 4 -> token[4])
             p = ln.split()
             density = parse_float(p[3]) if len(p) > 3 else None
             dpgf = parse_float(p[4]) if len(p) > 4 else None
+            tce = _field(p, 1) or None
         elif ln.startswith("CD ") and have:
             cd = [parse_float(x) for x in ln.split()[1:]]
+        elif ln.startswith("OD ") and have:
+            p = ln.split()
+            od = {k: _field(p, i) for i, k in enumerate(_OD_KEYS, 1)}
+        elif ln.startswith("IT ") and have:
+            p = ln.split()
+            w, t, d = _field(p, 1), _field(p, 2), _field(p, 3)
+            if None not in (w, t, d) and d > 0:
+                it.append([w, t, d])
         elif ln.startswith("LD ") and have:
             p = ln.split()
             minw = parse_float(p[1]) if len(p) > 1 else None

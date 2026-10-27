@@ -46,6 +46,7 @@ from . import _zoom_array as _za
 from . import _zoom_solve as _zs
 from . import mce_config as _mce
 from ._analysis_common import error_envelope
+from ._config_common import _carry_restore_warning
 from ._mce_cells import current_configuration, number_of_configurations
 from ._zoom_solve import _ZoomFloored, _ZoomUnverified
 from .lens_system import _zosapi_enum
@@ -973,29 +974,65 @@ def _compose_array(session, plan):
     Automatic semi-diameters are held at their current values, the composer runs, and the
     semi-diameters are re-floated in a ``finally`` on EVERY path (success, refusal,
     exception). A restore that does not read back as Automatic after a successful compose
-    rolls the call back. The IMAGE surface is not pinned (the after-surface decenter moves every later
+    rolls the call back. An MCE ``SDIA`` row over the span is held the same way: its Fixed
+    solve would otherwise let a later config carry a wider aperture, so every config cell is set
+    to the row's config-1 value for the compose and the saved values are written back (and read
+    back) on every path, the row found again by type and surface because the compose adds rows.
+    The IMAGE surface is not pinned (the after-surface decenter moves every later
     surface including the image while the beam stays, so a normal placement lands at -dx in the image
     frame, off the config-1 image aperture): the image landing is NOT bounded by
     an aperture and a beam leaving the detector is not caught here. See ``_compose_array_body``.
     """
     system = session.system
     _switch_config(session, 1)
-    pins = {"pinned": [], "skipped": []}
+    pins = {"pinned": [], "skipped": [], "held_mce": []}
+
+    def _restore():
+        failed_sd = _za.restore_span_apertures(system, pins)
+        failed_mce = _za.restore_span_sdia_rows(system, pins)
+        notes = []
+        if failed_sd:
+            notes.append(
+                f"the pinned semi-diameters of surfaces {failed_sd} did not read back as "
+                "Automatic after the array compose; the rollback does not check "
+                "semi-diameter solve types, so they may still be Fixed")
+        if failed_mce:
+            notes.append(
+                f"the SDIA rows on surfaces {failed_mce} did not read back as saved after the "
+                "array compose; their per-config cells may still hold the config-1 value")
+        return notes
+
     try:
         _za.pin_span_apertures(system, plan["first"], pins)
+        _za.hold_span_sdia_rows(system, plan["first"], pins)
         result = _compose_array_body(session, plan)
-    finally:
-        failed = _za.restore_span_apertures(system, pins)
-    if failed:
+    except BaseException as exc:
+        # The restore runs once, BEFORE the error leaves (it never raises), so a failed one
+        # is disclosed on the raised error instead of being dropped.
+        notes = _restore()
+        if notes and isinstance(exc, Exception):
+            replacement = _carry_restore_warning(exc, "; ".join(notes))
+            if replacement is not exc:
+                raise replacement from exc
+        raise
+    notes = _restore()
+    if notes:
         raise _ZoomUnverified(
-            f"the pinned semi-diameters of surfaces {failed} did not read back as Automatic "
-            "after the array compose; rolling back rather than leaving a frozen aperture",
+            "; ".join(notes) + "; rolling back rather than leaving a frozen aperture or an "
+            "altered MCE row",
             family=_ZOOM_WRITE,
         )
+    active = plan.get("active_before")
+    if pins["held_mce"] and active not in (None, 1):
+        # The restore wrote the SDIA cells while the caller's config was active; switch away and
+        # back so the engine re-applies the restored row to that config's semi-diameters.
+        _switch_config(session, 1)
+        _switch_config(session, active)
     result["reach_apertures"] = {
         "basis": "config_1_semi_diameters_except_image",
         "pinned_surfaces": [k for k, _v in pins["pinned"]],
         "not_pinned": [{"surface": k, "reason": r} for k, r in pins["skipped"]],
+        "held_mce_rows": [{"surface": k, "operand": "SDIA"} for k, _o, _v, _s in pins["held_mce"]],
     }
     return result
 
@@ -1666,7 +1703,7 @@ SET_ZOOM_SPEC = ToolSpec(
         "positions list of {decenter_x, decenter_y, z}: the decenter is an after-surface "
         "decenter authored on surface first-1, so surface first and every later surface of "
         "the span move and the surface before the span does not. The reach check holds the semi-diameters of the "
-        "reach span (surface first-1 through N-2, every optic downstream of the span; not the image) at their config-1 values (reach_apertures); the image surface is "
+        "reach span (surface first-1 through N-2, every optic downstream of the span; not the image) at their config-1 values, including an MCE SDIA row there (its cells held at the config-1 value for the duration of the check; an SDIA row with a pickup or other solve cell there is refused) (reach_apertures); the image surface is "
         "NOT pinned, so the image landing is not bounded by an aperture and a beam leaving the "
         "detector is not caught by this gate. first=1 with a decenter is refused (the decenter "
         "row would be the object). Proves zoom/focus/conjugate by "

@@ -476,13 +476,18 @@ def _carry_restore_warning(error, warning):
     The dispatcher serves ``str(error)``, so a restore fault that only reached ``ctx`` was lost
     whenever the block raised (a ``ToolParamError`` for a bad path or range). An error that
     already carries envelope disclosures (a dict ``extra``, e.g. ``_Refuse``) gets the warning
-    there, where its caller already puts it. Any other goes through the one shared
+    there, where its caller already puts it; an existing ``mutation_warning`` keeps its text and
+    the new one is joined after it (one key, both disclosed). Any other goes through the one shared
     ``_error_note.annotate`` (same type and family where it can, else a family-identical
     replacement chained from the original)."""
     try:
         extra = getattr(error, "extra", None)
         if isinstance(extra, dict):
-            extra.setdefault("mutation_warning", warning)
+            old = extra.get("mutation_warning")
+            if not (isinstance(old, str) and old):
+                extra["mutation_warning"] = warning
+            elif warning not in old:
+                extra["mutation_warning"] = f"{old}; {warning}"
             return error
         return _en.annotate(error, f"; {warning}")
     except Exception:  # noqa: BLE001 -- a failed annotation must never replace the real error

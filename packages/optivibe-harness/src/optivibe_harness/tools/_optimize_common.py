@@ -5289,7 +5289,7 @@ def _optimizer_session(system, *, algorithm_member=None, cores=None,
 
 
 @contextmanager
-def _hammer_session(system, *, run_time_m=None, cores=None):
+def _hammer_session(system, *, run_time_m=None, cores=None, automatic=True):
     """Open the Hammer (global-search) optimizer ONCE, configure it, ALWAYS ``Close()``.
 
     The SIBLING of ``_optimizer_session`` for the
@@ -5312,12 +5312,17 @@ def _hammer_session(system, *, run_time_m=None, cores=None):
     4. ``finally: ham.Close()`` ALWAYS (guarded — a teardown failure never masks the run
        outcome). This is the L22 single-seat reap.
 
-    HARD constraints (each a probe-falsified trap — the manager DELIBERATELY does not expose
-    them): call ONLY ``RunAndWaitForCompletion()``. NEVER ``Run()`` / ``RunAndWaitWithTimeout()``
-    / ``Cancel()`` — they improve an INTERNAL copy that never commits to the live LDE AND WEDGE
-    the single-instance ``Tools`` resource (the next ``OpenHammerOptimization()`` -> None),
-    even after ``Cancel()`` (probe rounds 3, 4). ``ham.Systems`` is an int (0), NOT a
-    candidate collection — no copy-back path.
+    TWO MODES. ``automatic=True`` (the default) is the run above, and its constraint stands:
+    call ONLY ``RunAndWaitForCompletion()`` and NEVER ``Run()`` / ``RunAndWaitWithTimeout()`` /
+    ``Cancel()`` on an automatic handle (rounds 3 and 4: they improved an INTERNAL copy that
+    never committed and wedged the single-instance ``Tools`` resource). ``automatic=False`` is
+    the manual mode the timed run uses (probe Q1-Q7): ``AutomaticOptimization =
+    False``, no ``TargetRunTimeM`` (accepted but ignored there), then
+    ``RunAndWaitWithTimeout(seconds)`` -> ``Cancel()`` -> ``WaitForCompletion()``. Measured:
+    the result reaches the live lens at the WAIT, not before, and after a clean ``Close()`` the
+    slot opens again. Why rounds 3 and 4 wedged is not established by that probe. In either
+    mode NEVER read a member of ``ham`` after ``Close()`` (that read killed the engine).
+    ``ham.Systems`` is an int, NOT a candidate collection.
     """
     ham = system.Tools.OpenHammerOptimization()
     if ham is None:
@@ -5329,8 +5334,8 @@ def _hammer_session(system, *, run_time_m=None, cores=None):
     try:
         # AutomaticOptimization FIRST — load-bearing on all three axes (probe round 2/5):
         # it makes RunAndWaitForCompletion RUN, COMMIT to the live LDE, AND release cleanly.
-        ham.AutomaticOptimization = True
-        if run_time_m is not None:
+        ham.AutomaticOptimization = bool(automatic)
+        if automatic and run_time_m is not None:
             ham.TargetRunTimeM = float(run_time_m)  # a wall CAP; auto mode stops early
         cores_used = _clamp_cores(ham, cores)       # reuse (guards a missing MaxCores)
         yield ham, cores_used

@@ -20,7 +20,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "optivibe-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "OptiVibe harness: ZOS-API automation, typed tools, and the single OptiVibe MCP"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -50,7 +50,7 @@ dependencies = [
     "pillow",
     # The reference layer, composed in-process by the single OptiVibe MCP, pinned to
     # the same release.
-    "optivibe-reference==0.2.0",
+    "optivibe-reference==0.2.1",
 ]
 
 [project.optional-dependencies]
