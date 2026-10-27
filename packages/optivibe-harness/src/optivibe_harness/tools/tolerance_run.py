@@ -485,10 +485,9 @@ def tolerance(session, params):
     probe §5). The tool CLEARS the Tolerance Data Editor (author-as-scratch, D10). The
     LDE prescription is left untouched (a side-effect tripwire flags a regression).
 
-    The FULL operand vocabulary (62 codes) is supported via the catalog table; pass a
-    RESOLVED code (the agent grounds tolerance intent via ``lookup_operand`` with
-    ``domain="tolerance"`` — the structured tolerance catalog — or ``search_reference``
-    for chapter context). A
+    The catalogue breakdown is in the served description. Pass a RESOLVED code (ground
+    tolerance intent via ``lookup_operand`` with ``domain="tolerance"``, or
+    ``search_reference`` for chapter context). A
     CB/NSC-required operand (TUTX/TUDX/TNPS …) is a LABELED ``known_gap`` refusal (run
     the valid operands + disclose loud unless ``strict=True``); a crash-class operand
     (TNPA/TNMA) is a HARD refusal (the tool never opens). ``include_mechanical=True``
@@ -585,6 +584,10 @@ def tolerance(session, params):
 
     # (2) the LDE side-effect snapshot (D16) — BEFORE any author/run.
     lde_before = _tc.snapshot_lde(system)
+    # The side files that already exist: the finally reap keeps them.
+    side_patterns = _tc._tol_side_patterns(system)  # resolved ONCE: listing + reap share it
+    pre_side_files = (None if side_patterns is None  # no path read: reap no side file
+                      else _tc.existing_tol_side_files(system, side_patterns))
 
     operand_enum = _tc._tolerance_operand_enum(system)  # TYPE reach -> tolerancing_unavailable
     tde = system.TDE
@@ -619,10 +622,12 @@ def tolerance(session, params):
                 f"({safe_exc(exc, repr_form=True)}); "
                 "it may carry leftover scratch rows — reload your .zmx before re-authoring"
             )
-        # (7/D15) reap the engine's .ZTD side files on EVERY path; reap the report only
-        # when it is the tool's own temp (an explicit output_file is the caller's to keep).
+        # (7/D15) reap the engine's .ZTD side files on EVERY path, except those that
+        # existed before the run; reap the report only when it is the tool's own
+        # temp (an explicit output_file is the caller's to keep).
         try:
-            _tc.reap_tol_artifacts(system, output_path, reap_report=is_temp)
+            _tc.reap_tol_artifacts(system, output_path, reap_report=is_temp,
+                                   keep=pre_side_files, patterns=side_patterns)
         except Exception:  # noqa: BLE001 — a reap throw must not mask the body
             pass
 
@@ -662,6 +667,11 @@ def tolerance(session, params):
     parser_warnings = parsed.get("warnings")
     if parser_warnings:
         warnings.extend(parser_warnings)
+    if _tc._PARAXIAL_FOCUS_HEADER not in text:
+        warnings.append(
+            "the report lacks the 'Paraxial Focus compensation only.' header; "
+            "compensator_participates:false may not hold for this engine version"
+        )
 
     # (10) LDE re-read + tripwire (D16).
     lde_after = _tc.snapshot_lde(system)
@@ -1171,9 +1181,16 @@ TOLERANCE_SPEC = ToolSpec(
         "RMS-wavefront sensitivity (+ worst offenders + an RSS estimate); "
         "mode='monte_carlo' gives mean/std/best/worst + cumulative-probability "
         "percentiles. tolerances is a list of {type:<TDE code>, surface, surface2?, "
-        "code?, param?, roll_surf?, delta>0 | min+max}; the FULL operand vocabulary "
-        "(radius/thickness/index/abbe, surface+element tilt/decenter, irregularity, "
-        "roll, ISO, ...) is supported — pass a RESOLVED code, never a phrase. Ground "
+        "code?, param?, roll_surf?, delta>0 | min+max}; pass a RESOLVED code, never a "
+        "phrase. Of the 62 catalogue operands, 36 are perturbation operands: 29 in the "
+        "real-change tier and 7 that read a structural zero on a sequential system. 13 "
+        "are run-state rows: 11 control rows, plus the COMP and CPAR compensators, which "
+        "are inert headless. 13 are always refused by name with a reason: 5 need a "
+        "coordinate break, 1 needs a non-sequential surface, 2 would crash the run, 4 "
+        "(ISOA-ISOD) have parameter cells that are not yet grounded, and TEDV fails its "
+        "type change. A perturbation entry still needs its own cells (surface2, param, "
+        "term range, MCE selectors) and a surface it applies to; otherwise it is refused "
+        "or skipped with the reason. Ground "
         "tolerance intent via lookup_operand with domain='tolerance' (the structured "
         "tolerance catalog); calling lookup_operand without domain='tolerance' "
         "mis-routes to merit operands. For chapter context use search_reference. Range ops "
@@ -1188,7 +1205,12 @@ TOLERANCE_SPEC = ToolSpec(
         "family that mixes them (e.g. scalar holds TTHI=lens_units beside "
         "TIND=dimensionless) is omitted and named in units_ambiguous_families. omit "
         "tolerances for a default budget; include_mechanical=true adds a conservative "
-        "tilt/decenter/irregularity set. Gotcha: a CB/NSC-required operand "
+        "tilt/decenter/irregularity set, but cannot tolerance the tilt/decenter of an "
+        "element touching the image (standing limit; add a zero-thickness air "
+        "surface after the last glass). trials (default 20) sets the monte_carlo run "
+        "count, full=true adds the per-trial array, output_file overrides the temp "
+        "report path (kept, never deleted). TMCO analyses the current configuration "
+        "only. Gotcha: a CB/NSC-required operand "
         "(TUTX/TUDX/TNPS) is a labeled known_gap refusal (run the rest + disclose unless "
         "strict=true); a crash-class operand (TNPA/TNMA) is a HARD refusal (the tool "
         "never opens); monte_carlo is non-deterministic (deterministic:false / "

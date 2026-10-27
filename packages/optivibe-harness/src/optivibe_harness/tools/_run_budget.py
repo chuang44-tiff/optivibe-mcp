@@ -6,8 +6,12 @@ returns ``TimedOut`` with the optimizer still running; ``Cancel()`` then stops i
 succeeds and the optimizer opens again. A lens that held one DLS cycle for more than 160 s
 stopped the same way.
 
-LOCAL optimizer only. On the Hammer optimizer the same calls improve an internal copy that
-never commits and block the tool slot, so the Hammer fork must never come through here.
+LOCAL optimizer only. This module's pass loop (``run_pass`` / ``Budget``) is not used for Hammer.
+On an AUTOMATIC Hammer handle those calls improved an internal copy that never committed and
+blocked the tool slot (earlier probe rounds). A MANUAL Hammer handle (``AutomaticOptimization``
+False) was measured later: ``RunAndWaitWithTimeout`` -> ``Cancel`` -> ``WaitForCompletion``
+commits at the wait and the slot reopens after ``Close()``. That run lives in ``_hammer_timed``,
+not here.
 
 Cycle-safe: imports nothing from ``optimize_run``.
 """

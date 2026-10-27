@@ -198,6 +198,10 @@ def main():
         }
         report["inventory_count"] = n
         report["inventory_file"] = write_json(f"operand_inventory_{n}.json", inventory)
+        # Write the capture NOW (ok False = incomplete) so its inventory_count matches the
+        # inventory just written even if P2-P4 or the teardown raises; the final write
+        # below overwrites it.
+        write_json("probe_operands_capture.json", report)
 
         # --- P2: live-label existence ---
         print("[probe] P2 — live-label existence (TypeName/RowTypeName/AvailableOperandTypes)")

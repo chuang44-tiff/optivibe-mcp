@@ -38,8 +38,8 @@ MERIT_INVENTORY_PATH = os.path.join(
 def load_merit_operand_inventory(path=MERIT_INVENTORY_PATH):
     """Return the merit operand code set (a ``frozenset``) from the user-built inventory.
 
-    A missing file names its PRODUCER: the capture is written by ``scripts/probe_operands.py``
-    (a live probe).
+    A missing file names its PRODUCER: the capture is written by the live probe
+    (``optivibe-build-data --probe``; in a clone also ``scripts/probe_operands.py``).
 
     Raises loudly (``OSError`` / ``KeyError`` / ``ValueError``) on a missing or
     malformed file — the caller must never silently fall back to the ungated pairer.
@@ -49,9 +49,11 @@ def load_merit_operand_inventory(path=MERIT_INVENTORY_PATH):
             inventory = json.load(fh)
     except FileNotFoundError as exc:
         raise FileNotFoundError(
-            f"merit operand inventory {path} is missing -- it is written by "
-            f"packages/optivibe-reference/scripts/probe_operands.py (a live probe; "
-            f"operand_inventory_<N>.json under scripts/captures/)") from exc
+            f"merit operand inventory {path} is missing -- it is written by the live "
+            f"probe: run `optivibe-build-data --probe` (searched captures dir: "
+            f"{os.path.dirname(os.path.abspath(path))}). In a clone the same probe is "
+            f"packages/optivibe-reference/scripts/probe_operands.py "
+            f"(operand_inventory_<N>.json under scripts/captures/)") from exc
     codes = frozenset(m["code"] for m in inventory["members"])
     if len(codes) != inventory["total_members"]:
         raise ValueError(
@@ -75,9 +77,11 @@ def load_tolerance_operand_inventory(path=None):
             inventory = json.load(fh)
     except FileNotFoundError as exc:
         raise FileNotFoundError(
-            f"tolerance operand inventory {path} is missing -- it is written by "
-            f"packages/optivibe-reference/scripts/probe_tolerances.py (a live probe; "
-            f"tolerance_inventory_<N>.json under scripts/captures/)") from exc
+            f"tolerance operand inventory {path} is missing -- it is written by the "
+            f"live probe: run `optivibe-build-data --probe` (searched captures dir: "
+            f"{os.path.dirname(os.path.abspath(path))}). In a clone the same probe is "
+            f"packages/optivibe-reference/scripts/probe_tolerances.py "
+            f"(tolerance_inventory_<N>.json under scripts/captures/)") from exc
     codes = frozenset(m["code"] for m in inventory["members"])
     if len(codes) != inventory["total_members"]:
         raise ValueError(

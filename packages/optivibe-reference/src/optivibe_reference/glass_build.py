@@ -25,6 +25,7 @@ CLOSED unless the ``.agf``-derivation ledger row is on file in ``PROVENANCE.md``
 """
 import json
 import os
+import re
 import sqlite3
 
 from . import _paths
@@ -42,7 +43,7 @@ from .glass_dispersion import (
 )
 from .glass_parse import find_catalogs, iter_glass_records
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUILDER_VERSION = 1
 
 # A computed value whose |nF-nC| denominator is below this floor is a near-flat-
@@ -108,6 +109,11 @@ def in_band(min_wave, max_wave, line):
             and min_wave <= line <= max_wave)
 
 
+# NM status code -> name (the five names; any other code or None reads None).
+STATUS_NAMES = {0: "standard", 1: "preferred", 2: "obsolete", 3: "special", 4: "melt"}
+_BUILD_KEYS = ("tce", "relative_cost", "climate", "stain", "acid", "alkali", "phosphate")
+
+
 def _build_row(rec):
     """Recompute one parsed record into a committed-JSON row dict (§5/§6)."""
     formula = rec["formula"]
@@ -169,6 +175,9 @@ def _build_row(rec):
         "nd_valid": nd_valid,
         "pg_f_valid": pg_f_valid,
         "provenance": "agf_recompute",
+        "status": STATUS_NAMES.get(rec.get("status_code")),
+        **{k: rec.get(k) for k in _BUILD_KEYS},
+        "it": rec.get("it") or [],
     }
 
 
@@ -289,6 +298,9 @@ def write_glass_catalog_json(out_path, catalog):
     """
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     text = json.dumps(catalog, indent=2, ensure_ascii=True)
+    # each row's ``it`` list on ONE line (it would otherwise take one line per number)
+    text = re.sub(r'(?<="it": )\[\n.*?\n      \]',
+                  lambda m: json.dumps(json.loads(m.group(0))), text, flags=re.DOTALL)
     with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
         fh.write("\n")
@@ -321,6 +333,15 @@ CREATE TABLE glass (
     nd_valid      INTEGER NOT NULL,
     pg_f_valid    INTEGER NOT NULL,
     provenance    TEXT,
+    status        TEXT,
+    tce           REAL,
+    relative_cost REAL,
+    climate       REAL,
+    stain         REAL,
+    acid          REAL,
+    alkali        REAL,
+    phosphate     REAL,
+    it            TEXT,
     PRIMARY KEY (catalog, name)
 )
 """
@@ -354,7 +375,8 @@ def build_glass_db(catalog_json_path, conn):
     in use — YAGNI).
 
     The SQL ``PRIMARY KEY (catalog, name)`` raises ``IntegrityError`` on a
-    duplicate (the storage-layer dedupe). ``cd`` is stored as a JSON string. The
+    duplicate (the storage-layer dedupe). ``cd`` and ``it`` are stored as JSON strings (a schema-1
+    JSON has no buildability keys: those columns read NULL). The
     ``*_valid`` flags are stored as 0/1 INTEGERs. Returns ``conn``.
     """
     # One-shot precondition: a pre-existing ``glass`` table means this connection
@@ -374,8 +396,9 @@ def build_glass_db(catalog_json_path, conn):
         conn.execute(
             "INSERT INTO glass (catalog, name, formula, formula_name, cd, "
             "min_wave, max_wave, nd_stored, vd_stored, delta_pg_f, nd, ng, nf, "
-            "nc, vd, pg_f, nd_valid, pg_f_valid, provenance) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "nc, vd, pg_f, nd_valid, pg_f_valid, provenance, status, tce, "
+            "relative_cost, climate, stain, acid, alkali, phosphate, it) "
+            "VALUES (" + ", ".join("?" * 28) + ")",
             (
                 row["catalog"],
                 row["name"],
@@ -396,6 +419,9 @@ def build_glass_db(catalog_json_path, conn):
                 1 if row.get("nd_valid") else 0,
                 1 if row.get("pg_f_valid") else 0,
                 row.get("provenance"),
+                row.get("status"),
+                *(row.get(k) for k in _BUILD_KEYS),
+                json.dumps(row["it"]) if row.get("it") is not None else None,
             ),
         )
     conn.commit()

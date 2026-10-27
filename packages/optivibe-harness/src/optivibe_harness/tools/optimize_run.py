@@ -37,6 +37,7 @@ from ..errors import OptimizeError, ToolParamError
 from ..server import ToolSpec
 from . import _config_common as _ccfg
 from . import _fold_gaps as _fg
+from . import _hammer_timed as _ht  # timed Hammer run (cycle-safe: imports optimize_run only late)
 from . import _grin_index_common as _gic  # GRIN — cycle-safe (never imports optimize_run)
 from . import _optimize_common as _oc
 from . import _run_budget as _rb  # cycle-safe (never imports optimize_run)
@@ -1055,6 +1056,10 @@ def _optimize_impl(session, params):
     # trail folder -- see ``_workspace_paths.trail_run_id``. Generated when absent.
     run_id = _wsp.trail_run_id(params)
     guard_warning = None
+    # The timed Hammer run: its params and refusals, BEFORE anything below mutates the lens.
+    timed, refusal = _ht.preflight(system, params)
+    if refusal is not None:
+        return refusal
 
     # (1) embed the preflight gate — open NOTHING on a fail. The stop-convention
     # gate rides here (after no_variables/no_merit) when require_free_stop is True.
@@ -1178,7 +1183,8 @@ def _optimize_impl(session, params):
     # for every algorithm — the default 1.0 is valid so DLS/OD callers are unaffected; a bad
     # value -> optimize_param with NO engine opened. USED only on the Hammer fork below.
     run_time_m = _require_pos_float(
-        params, "run_time_m", _DEFAULT_RUN_TIME_M, cap=_RUN_TIME_M_CAP
+        params, "run_time_m", _DEFAULT_RUN_TIME_M,
+        cap=_ht.TIMED_RUN_CAP if timed is not None else _RUN_TIME_M_CAP
     )
     time_budget_s = _require_pos_float(
         params, "time_budget_s", _rb.DEFAULT_TIME_BUDGET_S, cap=_rb.TIME_BUDGET_S_CAP
@@ -1259,7 +1265,7 @@ def _optimize_impl(session, params):
     # NOT reached on the DLS path (the _resolve_cycles_member call + the _optimizer_session
     # block below are DLS-only). Same agent surface + envelope shape.
     if algorithm_token == _ALGORITHM_TOKEN_HAMMER:
-        return _optimize_hammer_impl(
+        return _ht.route(timed, system, lambda: _optimize_hammer_impl(
             session, system, mfe,
             run_time_m=run_time_m,
             cores=cores,
@@ -1274,7 +1280,8 @@ def _optimize_impl(session, params):
             nudge_disclosure=nudge_disclosure,
             grin_dn_max=grin_dn_max,
             negative_weight_scan=nw,
-        )
+            timed=timed,
+        ))
 
     # (4) open the optimizer ONCE; (5) run the bounded passes; (4-finally) reap.
     # The cycle COUNT is set on opt.Cycles (an OptimizationCycles enum member, snapped
@@ -1596,7 +1603,7 @@ def _optimize_impl(session, params):
 def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, run_id,
                           artifact_trail, guard_warning, warning, variables, wall_start,
                           sink=None, nudge_disclosure=None, grin_dn_max=None,
-                          negative_weight_scan=None):
+                          negative_weight_scan=None, timed=None):
     """The Hammer (global-search) fork of ``optimize`` (§2.4/§2.5).
 
     Hammer opens ``Tools.OpenHammerOptimization()`` (NOT the local optimizer), sets
@@ -1605,6 +1612,14 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
     WORSE (never return worse than entry). The result dict is a PARALLEL build that CALLS the
     same leaf helpers the DLS tail uses (no DLS refactor), so the
     ``negative_air_gap_warning`` (via ``_edge_audit_warnings``) rides a Hammer result too.
+
+    ``timed`` (None for the run above) selects the TIMED path, planned by ``_hammer_timed``: the
+    same checkpoint, never-worse restore and result build, but the run is manual
+    (``AutomaticOptimization`` False, ``RunAndWaitWithTimeout`` for ``run_time_m`` minutes, then
+    ``Cancel()`` and ``WaitForCompletion()``, where the result reaches the lens), the Substitute
+    solves' ``Catalog`` field is written for the run and put back after the handle closes, and
+    ``Succeeded`` is not a gate. ``_hammer_timed.route`` adds the timed result keys. The automatic
+    result is unchanged.
 
     All reaps run in the ``finally``: the checkpoint ``.zmx``/``.ZDA`` is glob-reaped (#59)
     and ``_hammer_session`` ``Close()``s the optimizer. Failure classes reuse the
@@ -1638,8 +1653,8 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
     run_failed = False
     run_failed_msg = None
     try:
-        with _oc._hammer_session(
-            system, run_time_m=run_time_m, cores=cores
+        with _ht.writes(timed, system), _oc._hammer_session(
+            system, run_time_m=run_time_m, cores=cores, **_ht.session_kwargs(timed)
         ) as (ham, cores_used):
             # sibling: wrap the run + post-run reads in ONE try/except so ANY mid-run
             # throw (RAWFC faults, or the CurrentMeritFunction/Status read throws after the
@@ -1673,8 +1688,10 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
                         # the outer finally either way.
                         **_oc._uncomputable_row_diagnostics(system),
                     )
-                ok = ham.RunAndWaitForCompletion()    # -> True commits to the live LDE
-                succeeded = bool(getattr(ham, "Succeeded", True))
+                ok = (ham.RunAndWaitForCompletion() if timed is None   # -> True commits to the live LDE
+                      else timed.run(ham, run_time_m))
+                # A timed run reads Succeeded True after a Cancel, so it is not a gate there.
+                succeeded = timed is not None or bool(getattr(ham, "Succeeded", True))
                 if not bool(ok) or not succeeded:
                     # a genuinely-failed run may have committed a PARTIAL/worse
                     # mutation. Capture the failure + EXIT the `with` (Hammer closes) so the
@@ -4079,6 +4096,8 @@ OPTIMIZE_SPEC = ToolSpec(
         "cores": "number",
         "algorithm": "string",
         "run_time_m": "number",
+        "hammer_mode": "string",
+        "catalog": "string",
         "run_id": "string",
         "bound_kind": "string",
         "min_air": "number",
@@ -4139,11 +4158,11 @@ OPTIMIZE_SPEC = ToolSpec(
         "can read improved in all three cases. A Hammer result has none of these three keys. "
         "algorithm defaults to DLS (damped least squares); OD is orthogonal descent; "
         "algorithm='Hammer' runs a wall-time-bounded global search (run_time_m minutes, "
-        "default 1.0, cap 10.0) that escapes a shallow local minimum and best-restores if "
+        "default 1.0, cap 10.0; 60.0 with hammer_mode='timed') that escapes a shallow local minimum and best-restores if "
         "it comes out worse. run_time_m is a wall-time CAP, not a target: Hammer runs in "
         "AUTO mode and early-terminates when the global search converges, so a fast return "
         "(well under a second on a small or already-good system) with real merit improvement "
-        "is the expected early-stop, NOT a dropped cap. Gotcha: require_free_stop defaults True, so this REFUSES a "
+        "is the expected early-stop, NOT a dropped cap. The automatic Hammer run never substitutes a glass that carries a Substitute solve (set_solve, MaterialSubstitute). hammer_mode='timed' (Hammer only) runs it for the WHOLE run_time_m, up to 60 minutes, so the call blocks that long, and DOES substitute those glasses; glass_changes lists each change with catalog, kind and status, and a discontinued or non-lens pick is flagged, not filtered. catalog (timed only) limits the picks to ONE catalog already in use. A mixed catalog (GL, MISC, MISC1, MISC-CRB) is refused, as is a run whose Substitute solves could draw from one: pass catalog=. Gotcha: require_free_stop defaults True, so this REFUSES a "
         "glass-vertex stop with no optimizer opened — run normalize_stop first (or pass "
         "auto_normalize). Also REFUSES (optimize_negative_weight) a merit "
         "carrying a NEGATIVE weight, with nothing opened: the sign has been "

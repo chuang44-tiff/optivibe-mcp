@@ -1,0 +1,41 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/glass_clock_hook.py\" enforce prompt",
+            "timeout": 10,
+            "statusMessage": "Glass clock: marking the prompt start..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__optivibe__trial_glass_swaps|mcp__optivibe__load_design",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/glass_clock_hook.py\" enforce post",
+            "timeout": 30,
+            "statusMessage": "Glass clock: logging the trial..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/glass_clock_hook.py\" enforce stop",
+            "timeout": 30,
+            "statusMessage": "Glass clock: checking the stop..."
+          }
+        ]
+      }
+    ]
+  }
+}

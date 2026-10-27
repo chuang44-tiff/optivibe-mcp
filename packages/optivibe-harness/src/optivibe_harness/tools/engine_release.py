@@ -160,7 +160,8 @@ def _kill_others(own_idents):
     """Kill every other OpticStudio SERVER engine; returns the report dict (survivors in
     ``still_running``). Own engines are excluded by ``(pid, create_time)``, so a foreign
     engine that reuses a stale own pid is a target. A server engine whose create_time is
-    unreadable is never killed (identity unprovable) and counts as still running. Raises
+    unreadable is never killed (identity unprovable) and counts as still running; only PIDs
+    actually signalled are waited on, the rest get one immediate liveness read. Raises
     ``EngineReleaseError`` only when the listing itself fails, in which case nothing was
     killed."""
     own = {(int(p), float(ct)) for p, ct in own_idents}
@@ -181,7 +182,7 @@ def _kill_others(own_idents):
             targets.append(p)
         else:
             interactive.append(p["pid"])
-    killed, idents, unverifiable, errors = [], [], [], {}
+    killed, idents, signalled, unverifiable, errors = [], [], [], [], {}
     for p in targets:
         ct = p["create_time"]
         if not ct:
@@ -191,10 +192,14 @@ def _kill_others(own_idents):
         res = _call_terminate(p["pid"], float(ct), errors)
         idents.append((p["pid"], float(ct)))
         if res is not None and getattr(res, "ok", False):
+            # ok also covers already_gone / no_such_process: waiting on those returns at once
+            signalled.append((p["pid"], float(ct)))
             killed.append({"pid": p["pid"], "owner_pid": _owner_pid(p["cmdline"])})
     for p in unreadable:  # never killed, but it may still hold the seat: verify it like the rest
         idents.append((p["pid"], float(p["create_time"] or 0.0)))
-    alive = _wait_gone(idents)
+    waited = _wait_gone(signalled) if signalled else []
+    once = _still_running([i for i in idents if i not in signalled])  # one read, no waiting
+    alive = sorted(set(waited) | set(once))
     _forget_ledger_rows([i for i in idents if i[0] not in alive and i[1]])
     report = {"killed": [k for k in killed if k["pid"] not in alive],
               "still_running": sorted(alive),
@@ -276,8 +281,9 @@ def release_engine(session, params):
         if report["still_running"]:
             return _failure(
                 f"kill_others: OpticStudio server engine process(es) "
-                f"{report['still_running']} are still running after "
-                f"{_VERIFY_TIMEOUT_S:g} s; already killed: "
+                f"{report['still_running']} are still running (a signalled engine is checked "
+                f"after up to {_VERIFY_TIMEOUT_S:g} s, one never signalled on a single read); "
+                f"already killed: "
                 f"{[k['pid'] for k in report['killed']]}", result)
     return result
 

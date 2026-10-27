@@ -229,15 +229,6 @@ _PARAXIAL_FOCUS_HEADER = "Paraxial Focus compensation only."
 # word is normalized to its short form by ``_normalize_lens_units``.
 _UNITS_LINE_RE = r"Units are\s+([A-Za-z]+)\s*\."
 
-# The per-family unit map (D16): the report does NOT annotate the per-operand
-# unit, so the catalog ``units`` field is authoritative. ``lens_units`` (the report's
-# linear unit) substitutes for a "lens_units" catalog value (mm/cm/in/m).
-_UNITS_BY_FAMILY_LABELS = {
-    "lens_units": "lens_units",
-    "degrees": "degrees",
-    "fringes": "fringes",
-    "dimensionless": "dimensionless",
-}
 
 
 class ToleranceError(ToolError):
@@ -708,6 +699,13 @@ def _split_sens_cells(line):
     return [c for c in re.split(r"\s+", line.strip()) if c]
 
 
+def _is_short_operand_row(cells, width):
+    """A catalogue-operand line with fewer than ``width`` cells."""
+    import re
+    return (0 < len(cells) < width and re.match(r"^[A-Z]{3,4}$", cells[0]) is not None
+            and _cat.meta_for(cells[0]) is not None)
+
+
 def _parse_sensitivity(text, out):
     """Parse the TAB-delimited sensitivity table + worst offenders + RSS + back-focus.
 
@@ -733,6 +731,8 @@ def _parse_sensitivity(text, out):
             # [Type, Surf1, Surf2(maybe blank), MinVal, MinCrit, MinChg, MaxVal,
             # MaxCrit, MaxChg]. Require >=9 columns (the blank Surf2 is preserved).
             if len(cells) < 9 or not re.match(r"^[A-Z]{3,4}$", cells[0]):
+                if _is_short_operand_row(cells, 9):
+                    dropped_rows += 1  # a short operand row is a silent drop
                 continue
             min_crit, min_ok = _to_finite_float(cells[4])
             max_crit, max_ok = _to_finite_float(cells[7])
@@ -832,7 +832,9 @@ def _parse_sensitivity(text, out):
                 cells = _split_sens_cells(line)
             else:
                 cells = [c for c in re.split(r"\s+", line.strip()) if c]
-            if len(cells) >= 6 and re.match(r"^[A-Z]{3,4}$", cells[0]):
+            if _is_short_operand_row(cells, 6):
+                dropped_rows += 1
+            elif len(cells) >= 6 and re.match(r"^[A-Z]{3,4}$", cells[0]):
                 crit, crit_ok = _to_finite_float(cells[4])
                 if not crit_ok:
                     dropped_rows += 1
@@ -963,6 +965,12 @@ def _parse_monte_carlo(text, out, trials):
         if found:
             cumulative[pc] = v
             cum_order.append((pc, v))
+    if len(cum_order) < 5:
+        missing = [pc for pc in ("90%", "80%", "50%", "20%", "10%") if pc not in cumulative]
+        out.setdefault("warnings", []).append(
+            f"Monte-Carlo cumulative percentile(s) {', '.join(missing)} not found in "
+            "the report; the percentiles shown are INCOMPLETE"
+        )
     # The cumulative-probability rows are reported high->low percentile; their values must
     # be MONOTONIC non-increasing in that order (a higher percentile bounds a larger
     # criterion). A non-monotonic sequence is a corrupted MC table -> LOUD.
@@ -1381,6 +1389,24 @@ def validate_tolerances(system, tolerances, *, strict=False):
                 )
             continue
 
+        if getattr(meta, "precondition", None) == "type_change_fails":
+            msg = getattr(meta, "reason", None) or f"{token} fails its type change."
+            known_gaps.append({
+                "type": token, "gap": "type_change_fails", "ticket": None,
+                "message": msg,
+            })
+            if strict:
+                errors.append(
+                    f"tolerances[{i}] {token} refused (type_change_fails, strict=True): "
+                    f"{msg}"
+                )
+            else:
+                warnings.append(
+                    f"tolerances[{i}] {token} shelved (type_change_fails): {msg} "
+                    "(the valid operands still run; this gap is disclosed not silent.)"
+                )
+            continue
+
         # An operand exposing an ``other`` int cell with NO probe-grounded
         # entry key (TEXI/TEZI Max#/Min# Zernike-term range; ISOA/ISOB/ISOC/ISOD
         # Units/Statistics) would SILENTLY default that cell to 0 — encoding a DIFFERENT
@@ -1672,8 +1698,8 @@ def validate_tolerances(system, tolerances, *, strict=False):
         # Every entry was a soft-skip / a non-crash gap shelved -> nothing to run.
         if known_gaps and not strict:
             errors.append(
-                "every supplied tolerance is a known-gap operand (CB/NSC-required); "
-                "none could be authored — see 'known_gaps'"
+                "every supplied tolerance is a known-gap operand; none could be "
+                "authored — see 'known_gaps'"
             )
         else:
             errors.append(
@@ -2280,48 +2306,77 @@ def _unlink_quiet(path):
         pass
 
 
-def reap_tol_artifacts(system, report_path, *, reap_report=True):
+def _tol_side_patterns(system):
+    """The side-file glob patterns next to the loaded lens, or ``None`` (no lens path)."""
+    lens_path = None
+    try:
+        lens_path = str(system.SystemData.Files.OpticStudioFile)
+    except Exception:  # noqa: BLE001 — a path read throw -> no patterns
+        lens_path = None
+    if not lens_path:
+        # Fallback: try the older accessor name some builds expose.
+        try:
+            lens_path = str(system.SystemFile)
+        except Exception:  # noqa: BLE001 — no lens path -> no patterns
+            lens_path = None
+    if not lens_path:
+        return None
+    stem, _ext = os.path.splitext(lens_path)
+    # The tolerance-data-retention side-file extension (assembled to keep the bare
+    # literal out of the source; it is a boundary-safe ZOS-API file extension).
+    side_ext = "." + "Z" + "TD"
+    return [stem + side_ext, stem + side_ext.lower(), stem + ".ZDA", stem + ".zda"]
+
+
+def existing_tol_side_files(system, patterns=None):
+    """Normalised side files that exist NOW, or ``None`` if unknowable.
+
+    An incomplete listing must never authorise a delete: a failed path read or ANY failed
+    glob returns ``None`` (the caller passes it as ``keep=None`` -> no side file reaped).
+    """
+    patterns = _tol_side_patterns(system) if patterns is None else patterns
+    if patterns is None:
+        return None
+    hits = set()
+    try:
+        for pat in patterns:
+            hits.update(os.path.normcase(os.path.abspath(h))
+                        for h in glob.glob(glob.escape(pat)))
+    except Exception:  # noqa: BLE001 — a listing failure -> unknowable, never raise
+        return None
+    return frozenset(hits)
+
+
+def reap_tol_artifacts(system, report_path, *, reap_report=True, keep=frozenset(),
+                       patterns=None):
     """Glob-reap the engine's tolerance-data side files (D15). NEVER raises.
 
     Probe §2 capture: ``TolDataFile`` is a ``<lens-stem>.ZTD`` next to the lens
     (``UseDataRetention: True``). Even with ``SaveTolDataFile=False`` set, the headless
     run may land a data-retention file (the ``.ZDA`` #59 precedent — a side file the
     ``.zmx``-only reap would leak). We glob the lens stem's tolerance-data extension
-    next to the loaded ``.zmx`` and unlink each. ``report_path`` (the tool's own report)
-    is reaped too when ``reap_report`` is True (a workspace temp the tool wrote).
+    next to the loaded ``.zmx`` and unlink each hit NOT in ``keep`` (the
+    normalised pre-run listing — a file the user already had is never ours to delete;
+    ``keep=None`` = the listing failed, so NO side file is reaped; ``patterns`` = the
+    pre-run patterns, so the listing and the reap use ONE lens path). ``report_path`` (the
+    tool's own report) is reaped too when ``reap_report`` is True (a workspace temp).
 
     Returns the list of reaped file paths (for the live-gate leftover assertion). A
     read of the lens path / a glob / an unlink failure is swallowed (a reap must never
     mask the run outcome).
     """
     reaped = []
-    # Resolve the loaded lens path to find the side files next to it.
-    lens_path = None
-    try:
-        lens_path = str(system.SystemData.Files.OpticStudioFile)
-    except Exception:  # noqa: BLE001 — a path read throw -> only the report is reaped
-        lens_path = None
-    if not lens_path:
-        # Fallback: try the older accessor name some builds expose.
+    if patterns is None:
+        patterns = _tol_side_patterns(system)
+    for pat in (patterns or ()) if keep is not None else ():
         try:
-            lens_path = str(system.SystemFile)
-        except Exception:  # noqa: BLE001 — no lens path -> only the report is reaped
-            lens_path = None
-
-    if lens_path:
-        stem, _ext = os.path.splitext(lens_path)
-        # The tolerance-data-retention side-file extension (assembled to keep the bare
-        # literal out of the source; it is a boundary-safe ZOS-API file extension).
-        side_ext = "." + "Z" + "TD"
-        patterns = [stem + side_ext, stem + side_ext.lower(),
-                    stem + ".ZDA", stem + ".zda"]
-        for pat in patterns:
-            try:
-                for hit in glob.glob(glob.escape(pat)):
-                    _unlink_quiet(hit)
-                    reaped.append(hit)
-            except OSError:  # noqa: PERF203 — a glob failure must not mask the run
-                pass
+            for hit in glob.glob(glob.escape(pat)):
+                if os.path.normcase(os.path.abspath(hit)) in keep:
+                    continue
+                _unlink_quiet(hit)
+                reaped.append(hit)
+        except Exception:  # noqa: BLE001,PERF203 — a glob failure must not mask the run
+            pass
 
     if reap_report and report_path:
         try:
@@ -2350,6 +2405,7 @@ __all__ = [
     "snapshot_lde",
     "lde_unchanged",
     "reap_tol_artifacts",
+    "existing_tol_side_files",
     "_CRITERION_MEMBER",
     "_MODE_TO_SETUP",
     "_DEFAULT_TRIALS",

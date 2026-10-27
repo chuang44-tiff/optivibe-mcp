@@ -44,8 +44,10 @@ on every design. Adding an analysis after you have moved on costs a reload and
 invites an asymmetric comparison.
 
 **`get_mtf` returns one more data series than you have fields.** The FIRST series
-(index 0) is the **diffraction limit**, not a field — it is the same curve for both
-designs and comparing it tells you nothing. Count the series against the field
+(index 0) is the **diffraction limit**, not a field, when the result reports
+`diffraction_limit_shown` true — it is the same curve for both designs and comparing it
+tells you nothing. When `diffraction_limit_shown` is false, series 0 is the first field;
+when it is null, do not map the series by position at all. Count the series against the field
 count before you map them: with 3 fields you get 4 series, with 4 fields you get 5.
 On-axis is series **1**, and the last series is the corner. Two designs with
 different field counts have different series counts — map each one separately.
@@ -75,8 +77,9 @@ is the stronger candidate because ...]
 ```
 
 **The report ends with the recommendation.** It begins with the literal token
-`Recommendation:` and names one design. That token is read by tooling downstream —
-do not substitute prose for it.
+`Recommendation:` and names one design. Keep that marker exactly as written, so the
+verdict stays easy to find for the reader and in later sessions — do not substitute prose
+for it.
 
 The `Edge MTF@50` row is the one that decides most comparisons. Keep it, and keep
 it honest: it is the *worst* field, not the mid-field.

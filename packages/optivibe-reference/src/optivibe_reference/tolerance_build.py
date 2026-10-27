@@ -255,6 +255,9 @@ def build_tolerance_catalog_json(
     """
     inventory = _load_json(inventory_path)
     capture = _load_json(capture_path)
+    catalog_build._require(capture.get("ok") is not False,
+                           "the probe capture %s is marked incomplete (ok: false): the last live probe did not "
+                           "finish; re-run `optivibe-build-data --probe`" % capture_path)
 
     synonyms = (
         catalog_build.load_synonyms_rows(synonyms_path, tolerance=True)

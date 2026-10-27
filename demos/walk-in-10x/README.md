@@ -59,7 +59,8 @@ parfocal objective length.
 Measured in OpticStudio 2025 R1:
 
 - Strehl and wavefront error with the STRH and RWCE operands;
-- focal length and working distance from the first-order data;
+- focal length from the first-order data, and working distance from the last air gap (its thickness
+  on axis, the ETVA operand at the rim);
 - field curvature from the sagittal and tangential operands, at 11 field points and 4 wavelengths.
 
 ## Limits

@@ -1,7 +1,8 @@
 # Demos: what is here, and how to check it
 
-Each demo folder has a page (`README.md`), the brief the agent was given, the stage log the agent
-wrote during its run, and the lens file the run produced. This folder also has the two starting
+Each demo folder has a page (`README.md`), the brief the agent was given, and the lens file the run
+produced; the stage log the agent wrote is included where the run wrote one (the table says where
+not). This folder also has the two starting
 lenses and the script that measures a lens file the way the pages do.
 
 | Demo | Brief | Stage log | Starting lens | Result |
@@ -11,7 +12,7 @@ lenses and the script that measures a lens file the way the pages do.
 | [local-model-10x](local-model-10x/README.md), Opus comparison | [walk-in-10x/brief.md](walk-in-10x/brief.md) (the same brief) | [stage-log-opus.md](local-model-10x/stage-log-opus.md) | 60× seed | `local-model-10x/result_opus.zmx` |
 | [zoom-20x](zoom-20x/README.md) | [brief.md](zoom-20x/brief.md) | [stage-log.md](zoom-20x/stage-log.md) | zoom seed | `zoom-20x/result_zoom-20x.zmx` |
 | [vision-ab](vision-ab/README.md) | [brief-vision.md](vision-ab/brief-vision.md), [brief-numbers-only.md](vision-ab/brief-numbers-only.md) | none was written | 60× seed | `vision-ab/result_lens-a.zmx` to `result_lens-f.zmx` |
-| [glass-picking](glass-picking/README.md), 10× | [brief-glass-ab.md](glass-picking/10x/brief-glass-ab.md) | not included | `glass-picking/10x/result_10x-form-step.zmx` | `glass-picking/10x/result_10x-agent-run1.zmx`, `result_10x-agent-run2.zmx`; Hammer: `result_10x-hammer.zmx` |
+| [glass-picking](glass-picking/README.md), 10× | [brief-glass-ab.md](glass-picking/10x/brief-glass-ab.md) | not included | `glass-picking/10x/result_10x-form-step.zmx` | `glass-picking/10x/result_10x-agent-run1.zmx`, `result_10x-agent-run2.zmx`, `result_10x-agent-run3.zmx`; Hammer: `result_10x-hammer.zmx` |
 | [glass-picking](glass-picking/README.md), 20× | [brief-glass-ab.md](glass-picking/20x/brief-glass-ab.md) | not included | `glass-picking/20x/result_20x-start.zmx` | `glass-picking/20x/result_20x-agent-run1.zmx`, `result_20x-agent-run2.zmx`; Hammer: `result_20x-hammer.zmx` |
 
 The 60× seed is `seeds/seed_BEST_apo60x.zmx`. The zoom seed is `seeds/seed_BEST_zoom20x_pana5g.zmx`.

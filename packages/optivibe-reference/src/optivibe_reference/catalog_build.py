@@ -519,6 +519,9 @@ def build_catalog_json(
     """
     inventory = _load_json(inventory_path)
     probe = _load_json(probe_capture_path)
+    _require(probe.get("ok") is not False,
+             "the probe capture %s is marked incomplete (ok: false): the last live probe did not "
+             "finish; re-run `optivibe-build-data --probe`" % probe_capture_path)
 
     synonyms = load_synonyms_rows(synonyms_path) if synonyms_path else {}
     # The verbatim-local descriptions (gitignored). ``None`` (path absent or not

@@ -59,9 +59,10 @@ against 140–221 mm), and every vision lens held an on-axis Strehl ratio of 0.9
 all four wavelengths.
 
 [The agent's glass step against OpticStudio's Hammer, on two microscope objectives](demos/glass-picking/README.md)
-On the 10× / NA 0.45 apochromat both agent runs reached a lower merit than Hammer (by 13 % and 8 %) while changing
-3 of 14 glasses to Hammer's 10, and every lens passes at every field. On the 20× / NA 0.70 objective Hammer's lens
-has the lowest merit but fails on axis; both agent runs kept the on-axis target. The page lists the limits.
+On the 10× / NA 0.45 apochromat all three agent runs reached a lower merit than Hammer (by 12–19 %) and were
+better at every field, changing 3 to 5 of 14 glasses to Hammer's 10. On the 20× / NA 0.70 objective both agent
+runs kept the on-axis target that Hammer's lens fails; one also beat Hammer's merit and every field, with its last
+glass change made by hand. The page lists the limits.
 
 ## Prerequisites
 

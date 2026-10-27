@@ -20,7 +20,7 @@ NEVER-RAISE contract (mirrors ``lookup_glass`` / §7):
 - a ``min > max`` window is a ``ToolParamError`` (an empty-by-construction window
   is a caller mistake, not a legitimately-empty result);
 - AT LEAST ONE window bound is required (a bare ``find_glasses`` with no window
-  would dump the whole 4783-row catalog — refuse it as a ``ToolParamError``).
+  would dump the whole 4782-row catalog — refuse it as a ``ToolParamError``).
 
 THE VALIDITY GATE (the cardinal defense surfaced at the window boundary): a
 computed field (``vd``, ``pg_f``, ``nd``) is NULL in the row when it was NOT
@@ -45,14 +45,26 @@ see ``_glass_kind``) leaves rows of those kinds out; the result carries ``left_o
 (always), ``left_out_kinds`` (only when > 0) and ``unclassified`` (only when > 0).
 Rows are classified in Python BEFORE the limit, so the counts cover every match.
 
+COPIES: one glass redistributed by several catalogs (same name, ``_same_physical_glass``) is
+listed once, after the kind and opt-in screens and before the limit. The first copy in the sort
+order stays and names the catalogs of the removed copies in ``also_in``. A copy is removed only
+when it adds nothing: the optical values (nd, vd, pg_f, and the ``pg_f_anomaly`` computed from
+them) match within the identity tolerance, and every other listed value other than ``catalog`` plus
+the stored transmission data is equal; otherwise both stay. The kept row's ``pg_f_anomaly`` is its
+own. Two nulls are equal, a null against a known value differs. ``matched`` counts
+the rows after removal, ``duplicates_removed`` the rows removed; ``left_out``, ``screened_out``
+and ``unknown_kept`` count before removal. ``dedupe=False`` lists every copy.
+
 An empty result over a WELL-FORMED window is ``ok: True`` with an empty
 ``candidates`` list — a valid window can legitimately match nothing.
 """
+import bisect
+import json
 import math
 
 from ..errors import ToolParamError
 from ..server import ToolSpec
-from ._glass_common import check_catalogs_exist, normalize_catalogs
+from ._glass_common import _same_physical_glass, check_catalogs_exist, normalize_catalogs
 from ._glass_kind import material_kind, parse_exclude
 
 _TOOL = "find_glasses"
@@ -83,8 +95,21 @@ _RESULT_COLUMNS = (
     "formula_name",
     "min_wave",
     "max_wave",
-    "pg_f_anomaly",
+    "status",
+    "relative_cost",
+    "climate",
+    "stain",
+    "acid",
+    "tce",
+    "pg_f_anomaly",     # stays the last key
 )
+# A copy is removed only when every one of these (plus the stored transmission data) equals the kept row's.
+_COPY_COLUMNS = ("delta_pg_f", "formula", "formula_name", "min_wave", "max_wave", "status",
+                 "relative_cost", "climate", "stain", "acid", "tce")
+_STATUS_NAMES = ("standard", "preferred", "obsolete", "special", "melt")
+# Opt-in caps: param -> result column.
+_MAX_FILTERS = (("max_relative_cost", "relative_cost"), ("max_climate", "climate"),
+                ("max_stain", "stain"))
 
 # The window params: each maps the public ``<field>_min`` / ``<field>_max`` pair
 # onto a real glass column. ``valid_only=True`` adds the ``<col> IS NOT NULL``
@@ -142,6 +167,39 @@ def _validate_bound(name, value):
     if not finite:
         raise ToolParamError(f"'{name}' must be a finite number")
     return float(value)
+
+
+def _resolve_dedupe(params):
+    """Resolve ``dedupe`` (default True); a bool only, so 0 / 1 / "true" are refused."""
+    value = params.get("dedupe", True)
+    if not isinstance(value, bool):
+        raise ToolParamError(f"'dedupe' must be a bool; got {type(value).__name__}")
+    return value
+
+
+def _remove_copies(rows):
+    """Drop later copies of one glass; return ``(kept, also_in, removed)``.
+
+    A row is a copy of a kept row of the same name when ``_same_physical_glass`` says so AND its
+    every other served column and the stored transmission data equal the kept row's (two nulls are
+    equal, a null against a known value is not). ``also_in[i]`` lists the catalogs removed into ``kept[i]``, in the order met.
+    """
+    col = _RESULT_COLUMNS.index
+    key = lambda r: (r[0], r[1], r[col("vd")], r[col("pg_f")], r[col("nd")])   # noqa: E731
+    same_data = [col(c) for c in _COPY_COLUMNS] + [-1]    # -1: the fetched "it" transmission data
+    same = lambda a, b: all(a[i] == b[i] for i in same_data)   # noqa: E731
+    kept, also_in, by_name, removed = [], [], {}, 0
+    for r in rows:
+        twin = next((i for i in by_name.get(r[1], ())
+                     if _same_physical_glass(key(kept[i]), key(r)) and same(kept[i], r)), None)
+        if twin is None:
+            by_name.setdefault(r[1], []).append(len(kept))
+            kept.append(r)
+            also_in.append([])
+        else:
+            also_in[twin].append(r[0])
+            removed += 1
+    return kept, also_in, removed
 
 
 def _resolve_limit(params):
@@ -208,6 +266,51 @@ def _row_to_dict(row):
     return dict(zip(_RESULT_COLUMNS, row))
 
 
+def _transmission(it_json, wavelength):
+    """10 mm internal transmission at ``wavelength`` (um): rows rescaled by t ** (10 / d), linear
+    between neighbours, None outside the rows' range or with no rows."""
+    if not it_json:
+        return None
+    pts = sorted((w, t ** (10.0 / d)) for w, t, d in json.loads(it_json))
+    if not pts or not pts[0][0] <= wavelength <= pts[-1][0]:
+        return None
+    i = bisect.bisect_left([w for w, _ in pts], wavelength)
+    w1, t1 = pts[i]
+    if w1 == wavelength or i == 0:
+        return round(t1, 4)
+    w0, t0 = pts[i - 1]
+    return round(t0 + (t1 - t0) * (wavelength - w0) / (w1 - w0), 4)
+
+
+def _resolve_buildability(params):
+    """Validate the opt-in params; return ``(rules, wavelength)``, rules = ``(column, test)`` pairs
+    (a glass passes when the value is unknown or the test holds)."""
+    rules = []
+    if "status" in params:
+        raw = params["status"]
+        names = {x.strip().lower() for x in raw.split(",")} if isinstance(raw, str) else set()
+        if not names or not names <= set(_STATUS_NAMES):
+            raise ToolParamError(
+                f"'status' must be a comma-separated list of {', '.join(_STATUS_NAMES)}; got {raw!r}"
+            )
+        rules.append(("status", names.__contains__))
+    rules += [(col, lambda v, b=_validate_bound(key, params[key]): v <= b)
+              for key, col in _MAX_FILTERS if key in params]
+    wavelength = None
+    if "transmission_wavelength" in params:
+        wavelength = _validate_bound("transmission_wavelength", params["transmission_wavelength"])
+        if wavelength <= 0:
+            raise ToolParamError("'transmission_wavelength' must be > 0 (micrometres)")
+    if "min_transmission" in params:
+        low = _validate_bound("min_transmission", params["min_transmission"])
+        if not 0.0 <= low <= 1.0:
+            raise ToolParamError(f"'min_transmission' must be in [0, 1]; got {low}")
+        if wavelength is None:
+            raise ToolParamError("'min_transmission' needs 'transmission_wavelength'")
+        rules.append(("transmission", lambda v: v >= low))
+    return rules, wavelength
+
+
 def find_glasses(db_conn, params):
     """Window-search the glass catalog by Vd / Pg,F / Nd / ΔPg,F (never raises).
 
@@ -216,8 +319,10 @@ def find_glasses(db_conn, params):
     catalogs = normalize_catalogs(params.get("catalog"))
     excluded = parse_exclude(params.get("exclude"))
     limit = _resolve_limit(params)
+    dedupe = _resolve_dedupe(params)
     sort, order = _resolve_sort(params)
     clauses, sql_params, queried_fields = _collect_windows(params)
+    rules, t_wave = _resolve_buildability(params)
 
     if not queried_fields:
         raise ToolParamError(
@@ -239,7 +344,7 @@ def find_glasses(db_conn, params):
     # left out covers the whole match set), ordered by the sort field (vd by default, a
     # stable key for crown/flint scanning; a null field last in either direction) with
     # catalog and name as tiebreakers for determinism.
-    cols = ", ".join(_RESULT_COLUMNS)
+    cols = ", ".join(_RESULT_COLUMNS + ("it",))   # "it": fetched, never returned
     direction = " DESC" if order == "descending" else ""
     sql = (
         f"SELECT {cols} FROM {_FROM} WHERE {where_sql} "
@@ -250,6 +355,7 @@ def find_glasses(db_conn, params):
     rows = []
     left_out_kinds = {}
     unclassified = 0
+    screened_out = unknown_kept = 0
     for r in all_rows:
         kind = material_kind(r[0], r[1])
         if kind in excluded:
@@ -257,18 +363,37 @@ def find_glasses(db_conn, params):
             continue
         if kind == "unclassified":
             unclassified += 1
+        if rules:
+            vals = [(_transmission(r[-1], t_wave) if c == "transmission"
+                     else r[_RESULT_COLUMNS.index(c)], ok) for c, ok in rules]
+            if any(v is not None and not ok(v) for v, ok in vals):
+                screened_out += 1
+                continue
+            unknown_kept += any(v is None for v, _ in vals)
         rows.append(r)
 
+    # Copy removal runs after the kind and opt-in screens and BEFORE the limit.
+    if dedupe:
+        rows, also_in, duplicates_removed = _remove_copies(rows)
+    else:
+        also_in, duplicates_removed = [[] for _ in rows], 0
     matched = len(rows)
     truncated = matched > limit
-    rows = rows[:limit]
+    rows, also_in = rows[:limit], also_in[:limit]
     candidates = [_row_to_dict(r) for r in rows]
+    for cand, r, others in zip(candidates, rows, also_in):
+        anomaly = cand.pop("pg_f_anomaly")
+        cand["also_in"] = others
+        cand["transmission"] = None if t_wave is None else _transmission(r[-1], t_wave)
+        cand["pg_f_anomaly"] = anomaly
 
     result = {
         "ok": True,
         "candidates": candidates,
         "candidate_count": len(candidates),
         "matched": matched,
+        "duplicates_removed": duplicates_removed,
+        "dedupe": dedupe,
         "truncated": truncated,
         "sort": sort,
         "order": order,
@@ -285,6 +410,10 @@ def find_glasses(db_conn, params):
         result["left_out_kinds"] = left_out_kinds
     if unclassified:
         result["unclassified"] = unclassified
+    if rules:
+        result["screened_out"] = screened_out
+    if unknown_kept:
+        result["unknown_kept"] = unknown_kept
     if "delta_pg_f" in queried_fields:
         # Flag the caveat: delta_pg_f is raw, unvalidated .agf data.
         result["delta_pg_f_unvalidated"] = True
@@ -315,10 +444,21 @@ FIND_GLASSES_SPEC = ToolSpec(
         "order=descending reverses; sort=pg_f_anomaly ranks by pg_f minus the normal line "
         "0.6438 - 0.001682*vd, null when either is null, window pg_f_anomaly_min/max; a "
         "truncated list carries truncated_note saying what is hidden and how to see it) and cut at limit; matched counts the glasses in the "
-        "window that are not left out, so truncated means only the first limit of matched are listed. Gotcha: a glass whose computed "
+        "window that are not left out, after copies are removed (left_out, screened_out and unknown_kept count before removal), so truncated means only the first limit of matched are listed. Gotcha: a glass whose computed "
         "field is out-of-band (null) never matches that window, and the delta-Pg,F "
         "bounds are raw manufacturer data (unvalidated); a stored delta-Pg,F beyond "
-        "+-0.1 reads as null. See find_glass_pair for "
+        "+-0.1 reads as null. Every candidate also carries status (standard, preferred, "
+        "obsolete, special, melt), relative_cost, climate, stain, acid, tce and transmission "
+        "(internal, 10 mm path, at transmission_wavelength in micrometres, else null). "
+        "Opt-in filters, none applied by default: status (comma list), max_relative_cost, "
+        "max_climate, max_stain, min_transmission (needs transmission_wavelength); a glass "
+        "whose value is unknown is kept and counted in unknown_kept, screened_out counts "
+        "the rest, and the thresholds are the caller's. "
+        "One glass that several catalogs carry (same name, same optics) is listed once and "
+        "the kept row names the other catalogs in also_in; a copy is removed only when "
+        "its optical values (nd, vd, pg_f and the pg_f_anomaly computed from them) match "
+        "within a small tolerance and every other listed value and the transmission data are "
+        "equal, otherwise both stay, and dedupe=false lists every copy. See find_glass_pair for "
         "matched apochromat pairs. See lookup_glass for one glass's full data."
     ),
     kind="glass",
@@ -326,6 +466,7 @@ FIND_GLASSES_SPEC = ToolSpec(
         "catalog": "string",
         "exclude": "string",
         "limit": "integer",
+        "dedupe": "boolean",
         "sort": "string",
         "order": "string",
         "vd_min": "number", "vd_max": "number",
@@ -333,6 +474,9 @@ FIND_GLASSES_SPEC = ToolSpec(
         "nd_min": "number", "nd_max": "number",
         "delta_pg_f_min": "number", "delta_pg_f_max": "number",
         "pg_f_anomaly_min": "number", "pg_f_anomaly_max": "number",
+        "status": "string", "max_relative_cost": "number", "max_climate": "number",
+        "max_stain": "number", "min_transmission": "number",
+        "transmission_wavelength": "number",
     },
 )
 

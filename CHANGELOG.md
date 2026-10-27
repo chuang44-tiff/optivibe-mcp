@@ -2,12 +2,73 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.2.0`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.2.1`). Each tag points at the merge
 commit that published that version, and every tag was verified against the version literals
 in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.1] — 2026-10-26
+
+The glass step searches until its coverage says it is done, on a measured clock, and `optimize`
+can run a timed Hammer that substitutes glass.
+
+### Added
+
+- **A glass-search clock** (`.claude/hooks/glass_clock_hook.py`, registered in
+  `.claude/settings.json`). After each `trial_glass_swaps` call it tells the agent the measured
+  elapsed time and whether another trial still fits the budget, and it blocks a stop while an owed
+  partner re-try or another trial still fits (at most twice per prompt). The budget is 60 minutes;
+  set `OPTIVIBE_GLASS_BUDGET_MIN` to change it, or to 0 to turn it off. The clock restarts on each
+  prompt and keeps its state in the temp folder, never in the project. It comes with a clone of
+  this repository; a PyPI-only install does not include it.
+- **`trial_glass_swaps` reports how far the search got.** Its `coverage` gains `sweep_done` (no slot
+  is open or untried), `never_tried` (slots no trial has run on in this search, kept across a keep)
+  and `search_wall_s` (measured seconds since the search started in this session).
+- **`find_glasses` serves catalog screen columns**: `status`, `relative_cost`, `climate`, `stain`,
+  `acid`, `tce` and `transmission` (at `transmission_wavelength`, 10 mm path), each with an opt-in
+  filter; a glass whose value is unknown is kept and counted in `unknown_kept`. `find_glass_pair`
+  gains `delta_tce`. The catalog data is built from your own OpticStudio install, so run
+  `optivibe-build-data` again to get the new columns; a catalog built by 0.2.0 still opens, with
+  them unknown.
+- **`optimize(algorithm="Hammer", hammer_mode="timed")`** runs Hammer for a set time and substitutes
+  glass on surfaces that carry a substitute solve. `catalog=` names the one catalog in use to
+  substitute from; `run_time_m` can go to 60 in this mode (10 otherwise). A mixed catalog in use with
+  no `catalog=`, or a catalog not in use, is refused as `optimize_substitute_catalog`. The result
+  reports each changed glass before and after (`glass_changes`), with `run_status` and
+  `systems_tried`. The automatic Hammer run (`hammer_mode="auto"`, the default) is unchanged.
+
+### Changed
+
+- **`find_glasses` lists a glass once** when its copies in other catalogs add nothing (same optics
+  and the same served data). The kept row names those catalogs in `also_in`, and the result gains
+  `duplicates_removed`. Pass `dedupe=false` to list every copy.
+- **The `design-glass-matching` skill** keeps searching after each keep (the kept glass's cemented
+  partner first), stops on `sweep_done` or the measured clock rather than an estimate, and prints the
+  catalog screen columns beside each kept glass.
+- **The glass-picking demo** reports three 10× and two 20× agent runs with the clock, against the
+  same Hammer runs as before.
+- **`tolerance` describes its 62 operand codes as they behave**: 36 perturb, 13 are run-state rows
+  and 13 are refused by name.
+
+### Fixed
+
+- **`tolerance` no longer deletes side files that existed before the run.** Only the files the run
+  created are removed; if the lens path cannot be read, none are.
+- **`tolerance` refuses `TEDV` by name** instead of authoring a row the engine cannot set.
+- **`set_zoom` (array mode) holds multi-configuration semi-diameter rows during the reach check.**
+  A semi-diameter row over the moved span is held at its configuration-1 value for the check and
+  restored afterwards, so a beam that walks off is refused as `array_unreached` even when another
+  configuration's row is larger; a row carrying a pickup or other solve is refused as `zoom_param`
+  before any write. `reach_apertures` gains `held_mce_rows`.
+- **The data build fails more clearly.** A probe that fails part-way still writes its capture, marked
+  as failed, and the catalog and tolerance builders refuse a failed capture. A missing operand
+  inventory names `optivibe-build-data --probe` and the folder searched; a permission error suggests a
+  writable install.
+- **`release_engine(kill_others=...)` waits only on the sessions it terminated**, and checks the rest
+  once, saying so if that check fails. A `set_zoom` array error re-floats the span once before it is
+  raised, and reports a failed re-float with the error.
 
 ## [0.2.0] — 2026-10-23
 
@@ -441,6 +502,7 @@ A housekeeping release: no new tools.
 
 - Initial public release of optivibe-mcp.
 
+[0.2.1]: ../../compare/v0.2.0...v0.2.1
 [0.2.0]: ../../compare/v0.1.18...v0.2.0
 [0.1.18]: ../../compare/v0.1.17...v0.1.18
 [0.1.17]: ../../compare/v0.1.16...v0.1.17
