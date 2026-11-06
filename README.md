@@ -37,7 +37,7 @@ install.
 
 ## Demos
 
-Each demo ships its brief and its lens files, and the agent's stage log where the run wrote one;
+Each demo ships its brief and its lens files, and the agent's stage log where one is included;
 [demos/](demos/README.md) lists them and has a script that re-measures a lens file.
 
 [An agent reworks a 60× objective into a 10× / NA 0.45 apochromat, unattended](demos/walk-in-10x/README.md)

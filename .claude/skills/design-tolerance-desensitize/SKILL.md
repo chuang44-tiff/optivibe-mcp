@@ -17,8 +17,8 @@ trial and moves by 30 % between lenses that are the same in every other measure.
 
 1. **Fix the judge before you move anything.**
    - Budget: the wizard preset for the lens type (microscope `{"vendor": "Generic", "grade": "HighPrecision",
-     "element_decenter": 0.010, "element_tilt": 0.0167}`; camera `"grade": "Precision", "element_decenter": 0.02,
-     "element_tilt": 0.017`). One push travel for the whole session (the brief gives it, for example 0.05 mm).
+     "element_decenter": 0.010, "element_tilt": 0.0167}`; camera `{"vendor": "Generic", "grade": "Precision",
+     "element_decenter": 0.02, "element_tilt": 0.017}`). One push travel for the whole session (the brief gives it, for example 0.05 mm).
    - The judge merit is the worst-field merit (per-field RWCE plus a MAXX row), separate from the merit you optimize
      on. The brief supplies it. `pick_push` and `criterion="merit"` read the LOADED merit, so swap the judge merit in
      to measure (`load_merit`) and your working merit back to optimize. The wizard's own merit is refused by the
