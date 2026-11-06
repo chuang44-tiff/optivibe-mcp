@@ -117,8 +117,10 @@ def _system_items(system, items):
         for i in range(1, int(fields.NumberOfFields) + 1)))
 
 
-def read_state(system):
-    """The full widened state, ``{key: value}``. Raises on ANY unreadable piece."""
+def read_state(system, *, allow_no_variables=False):
+    """The full widened state, ``{key: value}``. Raises on ANY unreadable piece.
+
+    ``allow_no_variables`` reads a lens with no optimizer variable as ``{}`` (a read FAULT still raises)."""
     try:
         items = {}
         lde = system.LDE
@@ -132,7 +134,7 @@ def read_state(system):
                     items["s%d.asphere.%s" % (i, name)] = _asph.read_asphere_cell(system, row, name)
         _merit_rows(system.MFE, items)
         _system_items(system, items)
-        fingerprint = _ramp._variable_fingerprint(system)
+        fingerprint = _ramp._variable_fingerprint(system, **({"allow_empty": True} if allow_no_variables else {}))
         if fingerprint is None:
             raise StateUnreadable("the optimizer-variable fingerprint is unreadable")
         items["fingerprint"] = dict(fingerprint)

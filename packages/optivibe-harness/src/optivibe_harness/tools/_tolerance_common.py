@@ -38,10 +38,14 @@ fixture-seeded fakes that write the CAPTURED UTF-16 report so the parser runs ag
 REAL engine text.
 """
 import glob
+import hashlib
+import json
 import math
 import os
 import re
 from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Optional
 
 from ..errors import ToolError
 from . import _tolerance_catalog as _cat
@@ -59,17 +63,83 @@ from . import _tolerance_catalog as _cat
 # the token identity below (back-compat: the four scalars resolve identically).
 _GLASS_TOKENS = frozenset({"TIND", "TABB"})
 
-# The run criterion (D7): RMS wavefront, field-summed, in waves. Resolved by
-# NAME off the live ``Criterions`` enum (NOT by index — index drifts on a version bump).
-_CRITERION_MEMBER = "RMSWavefront"
+@dataclass(frozen=True)
+class CriterionSpec:
+    """One run criterion: the live enum MEMBER, the report's own
+    ``Criterion :`` label (exact ``label`` or a ``label_re`` whose one group is the unit
+    word), the RSS line label, and the criterion unit (``None`` = read from the label)."""
+
+    member: str
+    rss_label: Optional[str]
+    label: Optional[str] = None
+    label_re: Optional[str] = None
+    units: Optional[str] = None
+
+
+# The run criteria. Resolved by NAME off the live ``Criterions``
+# enum (NOT by index — index drifts on a version bump). ``wavefront`` is the default and
+# the only one the pre-S2a tool knew; ``spot`` is the ``build_merit`` vocabulary.
+_CRITERIA = {
+    "wavefront": CriterionSpec(member="RMSWavefront", label="RMS Wavefront Error in waves",
+                               rss_label="Estimated RMS Wavefront", units="waves"),
+    "spot": CriterionSpec(member="RMSSpotRadius", label_re=r"RMS Spot Radius in (\w+)",
+                          rss_label="Estimated RMS Spot Radius", units=None),
+    # The loaded merit function (compensator-picker spec 3.3), monte_carlo only: the sensitivity table has
+    # no merit RSS line, so ``rss_label`` is None. The report prints EXACTLY ``Criterion           : User
+    # defined merit function`` and no Mode / Sampling line (V14); the units word is forced (V3).
+    "merit": CriterionSpec(member="MeritFunction", label="User defined merit function",
+                           rss_label=None, units="merit"),
+}
+# Aliases of the wavefront entry (≈50 test references + the bench scripts read these).
+_CRITERION_MEMBER = _CRITERIA["wavefront"].member
 # The two SetupMode members the ``mode`` switch maps to (D1): a sensitivity run
 # emits the sensitivity table + an MC section; SkipSensitivity = MC-only (probe §2/§5).
 _MODE_TO_SETUP = {"sensitivity": "Sensitivity", "monte_carlo": "SkipSensitivity"}
 
 # The criterion-label anchor (D11/G3): the report's own criterion label string
 # PROVES we parsed an RMS-wavefront report, NOT a stale default RMSSpotRadius one
-# (probe capture: ``criterion_label: "RMS Wavefront Error in waves"``).
-_CRITERION_LABEL_ANCHOR = "RMS Wavefront Error in waves"
+# (probe capture: ``criterion_label: "RMS Wavefront Error in waves"``). The
+# anchor is now LINE EQUALITY on the ``Criterion :`` line (see ``_criterion_line``).
+_CRITERION_LABEL_ANCHOR = _CRITERIA["wavefront"].label
+
+# The compensators: request value -> (live ``CriterionComps`` member, the
+# ``CriterionCompIndex`` it must read back as). NEVER compare ``str(CriterionComp)`` —
+# it aliases (r5: DLS reads ``NONSEQOptimizeAll``, paraxial ``NONSEQNone``).
+_COMPENSATORS = {"paraxial": ("ParaxialFocus", 1), "dls": ("OptimizeAll_DLS", 0),
+                 # S2b: the group alignment-tilt compensator rides the same engine setting; the CPAR
+                 # rows are what differ (tolerance_run authors them), so the member/index are DLS's.
+                 "dls_cb_tilt": ("OptimizeAll_DLS", 0),
+                 # the group decenter / tilt compensator: the same engine setting, other CPAR rows
+                 "dls_cb_group": ("OptimizeAll_DLS", 0)}
+# The compensator values that run the engine's Optimize-All (DLS) mode. Every site that used to
+# test for the plain-dls literal calls ``_is_dls`` instead, so a third DLS-family value cannot
+# miss one (S2b).
+_DLS_COMPENSATORS = ("dls", "dls_cb_tilt", "dls_cb_group")
+
+
+def _is_dls(compensator):
+    """True for ``"dls"``, ``"dls_cb_tilt"`` and ``"dls_cb_group"``: the budget requirement, the DLS pre-flight, the
+    cycle-cap read-back, the header proof and ``compensation: "dls_back_focus"`` apply to both."""
+    return compensator in _DLS_COMPENSATORS
+
+
+_DLS_CYCLE_CAP = 3
+_DEFAULT_SAMPLING = 4
+# The spread canary floor (compensator-picker spec 3.7a, OD8): per-trial relative spread under this reads as
+# a fixed offset, not tolerance scatter. Defined ONCE here (the plain ``merit`` door and the picker share it);
+# the picker re-exports it. Basis: artefact runs 2.9e-6..1.8e-3, genuine scatter >= 1.5, n = 5 per arm.
+SPREAD_FLOOR = 0.01
+# The fresh-engine CriterionField (Amendment 3): written before every run because the engine keeps the
+# previous lens's mode across LoadFile.
+_DEFAULT_FIELD_MODE = "XY_Symmetric"
+# The report line the engine prints when ``CriterionComp`` is Optimize All (DLS).
+_DLS_HEADER = "All compensators will be optimized using Damped Least Squares."
+# The wizard preset universe (probe r4: ``ZOSAPI.Wizards.ToleranceVendor/Grade``).
+_WIZARD_VENDORS = frozenset({"Asphericon", "EdmundOptics", "Generic", "LaCroix", "Optimax"})
+_WIZARD_GRADES = frozenset({"Commercial", "Precision", "HighPrecision", "CellPhoneLens"})
+# Rows that set run state rather than perturb: dropped from ``authored`` (probe r5 /
+# bench ``CONTROL_TYPES``). TWAV carries ``Nominal = inf`` BY DESIGN on every lens.
+_CONTROL_TYPES = frozenset({"COMP", "TWAV", "CPAR", "CMCO", "STAT", "SAVE", "SEED"})
 
 # The UTF-16LE byte-order mark every native engine report opens with (probe capture:
 # ``first_bytes_hex: "fffe4100"``). The BOM-magic gate (D11/G4), mirroring ``_merit_io``.
@@ -248,9 +318,12 @@ class ToleranceError(ToolError):
 
     error_family = "tolerancing"
 
-    def __init__(self, message, *, family="tolerancing"):
+    def __init__(self, message, *, family="tolerancing", reason=None):
         super().__init__(message)
         self.family = family
+        # S2b: the machine token a recipe refusal carries (``cpar_not_written`` ...); None on
+        # every pre-S2b raise, so no existing envelope gains a key.
+        self.reason = reason
 
 
 # --------------------------------------------------------------------------- #
@@ -325,32 +398,78 @@ def _tolerance_operand_enum(system):
         )
 
 
-def _tol_namespace_enum(system, name):
-    """Reach a run-mode enum TYPE by DIRECT attribute on the Tolerancing namespace (D6).
+def _zos_enum(system, namespace, name):
+    """Reach an enum TYPE by DIRECT attribute on a ZOSAPI namespace.
 
-    The ``ZOSAPI.Tools.Tolerancing`` namespace ``dir()`` is EMPTY (a proxy quirk, probe
-    §2), so the enum TYPE is reached by direct attribute (``TT.SetupModes`` /
-    ``TT.Criterions`` / ``TT.MonteCarloStatistics``). A fake system injects
+    ``namespace`` is ``"Tools.Tolerancing"`` (SetupModes / Criterions / CriterionComps)
+    or ``"Wizards"`` (ToleranceVendor / ToleranceGrade). The namespace ``dir()`` is EMPTY
+    (a proxy quirk), so the type is reached by ``getattr``. A fake system injects
     ``_tol_enum_types[name]``. A TYPE-reach failure -> ``tolerancing_unavailable``.
     """
     injected = getattr(system, "_tol_enum_types", None)
     if injected is not None and name in injected:
         return injected[name]
     try:  # pragma: no cover - live backend path
-        import ZOSAPI.Tools.Tolerancing as _tt  # type: ignore
-
+        if namespace == "Tools.Tolerancing":
+            import ZOSAPI.Tools.Tolerancing as _tt  # type: ignore
+        elif namespace == "Wizards":
+            import ZOSAPI.Wizards as _tt  # type: ignore
+        else:
+            raise ValueError(f"unknown ZOSAPI namespace {namespace!r}")
         return getattr(_tt, name)
     except Exception as exc:  # noqa: BLE001 — TYPE reach failure -> unavailable
         raise ToleranceError(
-            f"could not reach the {name!r} enum on ZOSAPI.Tools.Tolerancing "
+            f"could not reach the {name!r} enum on ZOSAPI.{namespace} "
             f"({exc!r}); tolerancing is unavailable",
             family="tolerancing_unavailable",
         )
 
 
+def _tol_namespace_enum(system, name):
+    """Reach a run-mode enum TYPE on ``ZOSAPI.Tools.Tolerancing`` (D6); see ``_zos_enum``."""
+    return _zos_enum(system, "Tools.Tolerancing", name)
+
+
 # --------------------------------------------------------------------------- #
 # The single-slot tolerancing-tool context manager (D13 — the L22 reap).
 # --------------------------------------------------------------------------- #
+def _finite_float_or_none(v):
+    """``float(v)`` for a real number that is finite as a float; ``None`` otherwise (a bool, a non-number, inf/nan, an int
+    too large for a float)."""
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except OverflowError:
+        return None
+    return f if math.isfinite(f) else None
+
+
+def rel_spread(values):
+    """``(max - min) / median`` over every FINITE raw per-trial value (spec 3.7a); ``None`` when undefined.
+
+    ``None`` / non-finite entries (and an int too large for a float, like inf) are excluded; the at-bound +inf substitution the P90* ranking uses never
+    enters here. The median is the true median (the mean of the two middle values for an even count).
+    ``None`` when fewer than 2 finite values remain or the median is <= 0. Pure; never raises.
+    """
+    finite = sorted(f for f in (_finite_float_or_none(v) for v in (values or ())) if f is not None)
+    n = len(finite)
+    if n < 2:
+        return None
+    median = finite[n // 2] if n % 2 else finite[n // 2 - 1] / 2.0 + finite[n // 2] / 2.0
+    if not median > 0:
+        return None
+    return (finite[-1] - finite[0]) / median
+
+
+def near_identical_warning(n, rel):
+    """The spec 3.7a ``trials_near_identical`` warning text (picker and plain door share it). ``rel`` prints ``%.3g``."""
+    return (f"trials_near_identical: the {n} trial values differ by only {format(rel, '.3g')} (under 1%); "
+            "suspected fixed offset, not tolerance scatter. In our probes this came from element tilt/decenter "
+            "tolerances (TEDX/TEDY/TETX/TETY) with OPDX, EFFL or MN*/MX* rows in the merit; RWCE-type rows did "
+            "not show it")
+
+
 @contextmanager
 def _tolerancing_session(system):
     """Open the tolerancing tool ONCE, yield it, ALWAYS ``Close()`` it (D13).
@@ -609,7 +728,134 @@ def _operand_error_lines(text):
     return out
 
 
-def parse_tol_report(text, *, mode, trials):
+_CRITERION_LINE_RE = re.compile(r"^\s*Criterion\s*:\s*(.+?)\s*$", re.M)
+
+
+def _criterion_line(text):
+    """The report's ``Criterion :`` line value (stripped), or ``None``.
+
+    Anchored at line start so ``Nominal Criterion :`` can never match. The anchor rule is
+    LINE EQUALITY on this value (declared change 2): a report that merely MENTIONS a label
+    elsewhere no longer satisfies it.
+    """
+    m = _CRITERION_LINE_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _check_criterion_anchor(text, spec):
+    """Prove the report's ``Criterion :`` line IS ``spec``'s label. Returns the units.
+
+    wavefront: the line must EQUAL the label. spot: the line must MATCH the regex AND the
+    captured unit word must equal the report's own ``Units are <X>.`` word. Otherwise
+    ``tolerancing_parse`` naming BOTH sides (a stale/wrong criterion was applied, or the
+    configuration did not take).
+    """
+    line = _criterion_line(text)
+    if spec.label is not None:
+        if line != spec.label:
+            raise ToleranceError(
+                f"the tolerancing report's 'Criterion :' line is {line!r}, expected "
+                f"exactly {spec.label!r} (a stale/wrong criterion was applied, or the "
+                f"config did not take); refusing to mislabel a {spec.member} report",
+                family="tolerancing_parse",
+            )
+        return spec.units
+    m = re.fullmatch(spec.label_re, line) if line is not None else None
+    unit_m = re.search(_UNITS_LINE_RE, text)
+    unit_word = unit_m.group(1) if unit_m else None
+    if m is None or unit_word is None or m.group(1).casefold() != unit_word.casefold():
+        raise ToleranceError(
+            f"the tolerancing report's 'Criterion :' line is {line!r}, expected the "
+            f"pattern {spec.label_re!r} with a unit word equal to the report's "
+            f"'Units are {unit_word}.' word (a stale/wrong criterion was applied, or "
+            f"the config did not take); refusing to mislabel a {spec.member} report",
+            family="tolerancing_parse",
+        )
+    return _LENS_UNIT_SHORT.get(unit_word.lower(), unit_word.lower())
+
+
+_COMP_HEADER_RE = re.compile(
+    r"^\s*Compensator:\s*(Thickness|Parameter\s+\d+)\s+(?:on\s+surface\s+)?(\d+)\s*,", re.M)
+
+
+def _comp_label(kind, num):
+    """The one spelling a compensator is joined by, header and statistics alike (S2b).
+
+    ``Thickness  17`` -> ``"Thickness 17"`` (the S2a spelling, unchanged); a CPAR compensator
+    ``Parameter   3 on surface   3`` / ``Parameter 3 Surf 3`` -> ``"Parameter 3 on surface 3"``.
+    """
+    kind = " ".join(kind.split())
+    if kind.startswith("Parameter"):
+        return f"{kind} on surface {int(num)}"
+    return f"{kind} {int(num)}"
+
+
+def parse_compensator_header(text):
+    """``["Thickness 4"]`` from the ``Compensator: Thickness   4, Min = ...`` lines.
+
+    S2b: a CPAR compensator line (``Compensator: Parameter   3 on surface   3, Min = ...``) is
+    kept as ``"Parameter 3 on surface 3"``. A label of any other shape is dropped, as before.
+    """
+    return [_comp_label(kind, num) for kind, num in _COMP_HEADER_RE.findall(text)]
+
+
+_COMP_STAT_LABEL_RE = re.compile(r"^\s*(Thickness|Parameter\s+\d+)\s+Surf\s+(\d+)\s*:\s*$")
+_COMP_STAT_FIELDS = (("Nominal", "nominal"), ("Mean", "mean"),
+                     ("Standard Deviation", "std_dev"))
+
+
+_COMP_STAT_EXTREMES = (("Minimum", "minimum"), ("Maximum", "maximum"))
+
+
+def parse_compensator_statistics(text, *, extremes=False):
+    """``[{label, nominal, mean, std_dev}]`` from every ``Compensator Statistics:`` block.
+
+    ``extremes=True`` (the group compensator's saturation reader) adds ``minimum`` / ``maximum`` to each
+    entry; the DEFAULT stays narrow because ``compensator_statistics`` flows into every DLS envelope.
+
+    The DLS block labels each compensator `` Thickness Surf 4:`` (normalised to
+    ``"Thickness 4"``); the paraxial block is ``Change in back focus:`` (no ``Surf`` label,
+    so it yields no entry — that block is ``_parse_back_focus``'s). A field the block lacks
+    is ``None`` (never zero-filled). The caller scopes ``text`` (a DLS sensitivity report
+    carries a SECOND block after the Monte Carlo section header).
+    """
+    out = []
+    current = None
+    in_block = False
+    for line in text.splitlines():
+        if "Compensator Statistics:" in line:
+            in_block, current = True, None
+            continue
+        if not in_block:
+            continue
+        if line.strip() == "":
+            # S2b: ONE blank line separates the per-compensator sub-blocks of a CB-tilt report
+            # (Thickness / Parameter 3 / Parameter 4); only a non-label line after it ends the
+            # block. Before S2b the block ended at the first blank line, which was the same
+            # thing whenever there was a single compensator.
+            current = None
+            continue
+        lm = _COMP_STAT_LABEL_RE.match(line)
+        if lm:
+            current = {"label": _comp_label(lm.group(1), lm.group(2)),
+                       "nominal": None, "mean": None, "std_dev": None}
+            if extremes:
+                current.update(minimum=None, maximum=None)
+            out.append(current)
+            continue
+        if current is None:
+            in_block = False
+            continue
+        for label, key in _COMP_STAT_FIELDS + (_COMP_STAT_EXTREMES if extremes else ()):
+            fm = re.match(r"^\s*" + re.escape(label) + r"\s*:\s*" + _NUM, line)
+            if fm:
+                current[key] = _to_finite_float(fm.group(1))[0]
+                break
+    return out
+
+
+def parse_tol_report(text, *, mode, trials, criterion="wavefront", compensator="paraxial",
+                     back_surface=None, cpar_surface=None, cpar_pars=(3, 4)):
     """Parse the DECODED report string into the result fields (D11). NEVER zero-fills.
 
     Pure + fixture-testable. EVERY field parses to ``(value, found)``; an
@@ -618,10 +864,19 @@ def parse_tol_report(text, *, mode, trials):
     returns:
 
       1. ``Nominal Criterion :`` parsed found=True and FINITE (else ``tolerancing_parse``).
-      2. CRITERION-LABEL anchor: the report's criterion label contains
-         ``"RMS Wavefront Error in waves"`` (G3 — proves we parsed an RMS-wavefront
-         report, not a stale RMSSpotRadius one). A mismatch -> ``tolerancing_parse``.
-      3. mode-specific minimum-yield (G5/G6):
+      2. CRITERION-LABEL anchor: the report's ``Criterion :`` LINE equals the
+         ``criterion`` table's label (spot: matches its pattern with the unit word equal to
+         ``Units are <X>.``) — proves we parsed the REQUESTED criterion, not a stale default
+         one. A mismatch -> ``tolerancing_parse`` naming both sides.
+      3. COMPENSATOR proof: ``dls`` requires the DLS header AND a
+         ``Compensator: Thickness <back_surface>`` line; ``paraxial`` refuses a report that
+         carries the DLS header (the mode did not take). S2b: ``cpar_surface`` (the CB-tilt
+         compensator's coordinate break) additionally requires every ``Parameter <p>`` of
+         ``cpar_pars`` (default 3 and 4; the group compensator passes its own set) ``on surface
+         <cpar_surface>`` header line and, in monte_carlo, every ``Parameter`` statistics block;
+         a miss refuses ``tolerancing_parse``. Nothing else is demanded of the report (the
+         authoring read-back already proves the exact set).
+      4. mode-specific minimum-yield:
          - ``sensitivity`` -> >=1 sensitivity row with finite min/max criterion AND a
            finite RSS estimate.
          - ``monte_carlo`` -> mc_mean/std/best/worst ALL finite AND the parsed per-trial
@@ -632,12 +887,38 @@ def parse_tol_report(text, *, mode, trials):
     ``ToleranceError(family="tolerancing_parse")`` — never a degraded partial.
     Returns a dict of the parsed fields (all finite / structurally validated).
     """
+    spec = _CRITERIA[criterion]
     # --- the criterion-label anchor (G3) ---
-    if _CRITERION_LABEL_ANCHOR not in text:
+    criterion_units = _check_criterion_anchor(text, spec)
+
+    # --- the compensator proof ---
+    compensators = []
+    if _is_dls(compensator):
+        # ONE source for the header match: ``compensator_participates`` reads the same
+        # ``parse_compensator_header`` result, so the proof and the flag cannot disagree.
+        dls_line = (f"Thickness {int(back_surface)}"
+                    if back_surface is not None
+                    and f"Thickness {int(back_surface)}" in parse_compensator_header(text) else None)
+        if _DLS_HEADER not in text or dls_line is None:
+            raise ToleranceError(
+                "the run did not apply the DLS compensator; refusing to label it dls "
+                f"(DLS header present: {_DLS_HEADER in text}; "
+                f"'Compensator: Thickness {back_surface}' line present: {dls_line is not None})",
+                family="tolerancing_parse",
+            )
+        compensators = parse_compensator_header(text)
+        if cpar_surface is not None:
+            missing = [lab for lab in _cpar_labels(cpar_surface, cpar_pars) if lab not in compensators]
+            if missing:
+                raise ToleranceError(
+                    "the run did not apply the CPAR compensator; refusing to label it "
+                    f"{compensator} (header lines missing: {missing}; found: {compensators})",
+                    family="tolerancing_parse",
+                )
+    elif _DLS_HEADER in text:
         raise ToleranceError(
-            "the tolerancing report's criterion label is not "
-            f"{_CRITERION_LABEL_ANCHOR!r} (a stale/wrong criterion was applied, or the "
-            "config did not take); refusing to mislabel a non-RMS-wavefront report",
+            "the report carries the DLS compensator header but compensator='paraxial' was "
+            "requested; the mode did not take (refusing to label a DLS report paraxial)",
             family="tolerancing_parse",
         )
 
@@ -652,11 +933,11 @@ def parse_tol_report(text, *, mode, trials):
             family="tolerancing_parse",
         )
     if nominal <= 0:
-        # An RMS wavefront / Strehl criterion can NEVER be <= 0 (a corrupted/garbled
+        # An RMS wavefront / spot-radius criterion can NEVER be <= 0 (a corrupted/garbled
         # report self-reporting a non-positive nominal is loud, never a verdict).
         raise ToleranceError(
-            f"the 'Nominal Criterion' is non-positive ({nominal!r}); an RMS-wavefront "
-            "criterion in waves cannot be <= 0 (the report is corrupted)",
+            f"the 'Nominal Criterion' is non-positive ({nominal!r}); an RMS criterion "
+            "cannot be <= 0 (the report is corrupted)",
             family="tolerancing_parse",
         )
 
@@ -669,13 +950,292 @@ def parse_tol_report(text, *, mode, trials):
         "lens_units": parse_lens_units(text),
         # Capture interleaved engine error lines (D11/G-PARSE-TAB) — used by reconcile.
         "operand_errors": _operand_error_lines(text),
+        "criterion_units": criterion_units,
+        "compensators": compensators,
     }
 
     if mode == "sensitivity":
-        _parse_sensitivity(text, out)
+        _parse_sensitivity(text, out, spec)
+        if _is_dls(compensator):
+            # A DLS sensitivity report has a SECOND statistics block after the Monte Carlo
+            # header (the MC pass); the sensitivity one is the text BEFORE that header.
+            head = text.split("Monte Carlo Analysis:", 1)[0]
+            out["compensator_statistics"] = parse_compensator_statistics(head)
+            out["back_focus_change"] = None  # the report has no 'Change in back focus' block
     else:
         _parse_monte_carlo(text, out, trials)
+        if _is_dls(compensator):
+            tail = text[text.index("Monte Carlo Analysis:"):]
+            out["compensator_statistics"] = parse_compensator_statistics(tail)
+            if cpar_surface is not None:
+                have = {blk["label"] for blk in out["compensator_statistics"]}
+                missing = [lab for lab in _cpar_labels(cpar_surface, cpar_pars) if lab not in have]
+                if missing:
+                    raise ToleranceError(
+                        "the run did not apply the CPAR compensator; refusing to label it "
+                        f"{compensator} (statistics blocks missing: {missing}; found: {sorted(have)})",
+                        family="tolerancing_parse",
+                    )
     return out
+
+
+def _cpar_labels(cpar_surface, pars=(3, 4)):
+    """The joined labels a CPAR report must carry: ``Parameter <p> on surface <cb1>`` for each ``p`` in ``pars``."""
+    return [f"Parameter {par} on surface {int(cpar_surface)}" for par in pars]
+
+
+_CPAR_PARS = (3, 4)
+# The CB parameters a group compensator may drive: Par# -> (axis name, units). Decenters are in LENS units.
+_CPAR_AXES = {1: ("decenter_x", "lens_units"), 2: ("decenter_y", "lens_units"),
+              3: ("tilt_x", "degrees"), 4: ("tilt_y", "degrees")}
+
+
+def verify_cpar_rows(rows, cb1, range_deg):
+    """Prove the two CPAR rows the CB-tilt compensator authored read back as written (S2b audit #5).
+
+    ``rows`` is ``read_tde_rows`` output (read AFTER the rows were added). EXACTLY two ``CPAR``
+    rows must exist, both on surface ``cb1``, one with ``Par#`` 3 and one with ``Par#`` 4, each
+    ``(Min, Max) == (-range_deg, +range_deg)`` at 15 significant digits (the engine rounds every
+    double write to 15). Returns the EFFECTIVE range (the read-back ``Max``, which is also what
+    ``budget_rule_id`` carries); anything else raises ``ToleranceError(family="tolerancing_run")``
+    with reason ``cpar_not_written``: nothing has been run yet.
+    """
+    def _fail(why):
+        raise ToleranceError(
+            f"the CPAR compensator rows did not read back as authored ({why}); nothing was run",
+            family="tolerancing_run", reason="cpar_not_written")
+
+    cpar = [r for r in rows if r.get("type") == "CPAR"]
+    if len(cpar) != 2:
+        _fail(f"expected exactly 2 CPAR rows, the editor holds {len(cpar)}")
+    want = float("%.15g" % float(range_deg))
+    pars = []
+    for r in cpar:
+        by = _row_cells_by_header(r)
+        surf, par, lo, hi = by.get("Surf"), by.get("Par#"), by.get("Min"), by.get("Max")
+        if not (_is_int(surf) and surf == int(cb1)):
+            _fail(f"a CPAR row is on surface {surf!r}, expected the coordinate break {cb1}")
+        if not _is_int(par):
+            _fail(f"a CPAR row has Par# {par!r}")
+        if not (isinstance(lo, float) and isinstance(hi, float)
+                and float("%.15g" % lo) == -want and float("%.15g" % hi) == want):
+            _fail(f"CPAR Par# {par} reads back ({lo!r}, {hi!r}), expected ({-want!r}, {want!r})")
+        pars.append(par)
+    if sorted(pars) != list(_CPAR_PARS):
+        _fail(f"the CPAR rows carry Par# {sorted(pars)}, expected {list(_CPAR_PARS)}")
+    return float(hi)
+
+
+def verify_cpar_axes(rows, cb1, ranges):
+    """Prove the CPAR rows the group compensator authored read back as written (the per-axis ``verify_cpar_rows``).
+
+    ``ranges`` is ``{par: range}`` (Par# 1 / 2 = decenter in lens units, 3 / 4 = tilt in degrees). ``rows`` is
+    ``read_tde_rows`` output. EXACTLY ``len(ranges)`` ``CPAR`` rows must exist, all on surface ``cb1``, their
+    ``Par#`` set equal to ``sorted(ranges)`` (no repeat), each ``(Min, Max) == (-ranges[par], +ranges[par])`` at
+    15 significant digits: a row that carries ANOTHER axis's bound fails. Returns ``{par: effective bound}`` (the
+    read-back ``Max``). Anything else raises ``ToleranceError(family="tolerancing_run")``, reason
+    ``cpar_not_written``: nothing has been run yet.
+    """
+    def _fail(why):
+        raise ToleranceError(
+            f"the CPAR compensator rows did not read back as authored ({why}); nothing was run",
+            family="tolerancing_run", reason="cpar_not_written")
+
+    cpar = [r for r in rows if r.get("type") == "CPAR"]
+    if len(cpar) != len(ranges):
+        _fail(f"expected exactly {len(ranges)} CPAR rows, the editor holds {len(cpar)}")
+    out = {}
+    for r in cpar:
+        by = _row_cells_by_header(r)
+        surf, par, lo, hi = by.get("Surf"), by.get("Par#"), by.get("Min"), by.get("Max")
+        if not (_is_int(surf) and surf == int(cb1)):
+            _fail(f"a CPAR row is on surface {surf!r}, expected the coordinate break {cb1}")
+        if not (_is_int(par) and par in ranges and par not in out):
+            _fail(f"a CPAR row has Par# {par!r}; expected each of {sorted(ranges)} once")
+        want = float("%.15g" % float(ranges[par]))
+        if not (isinstance(lo, float) and isinstance(hi, float)
+                and float("%.15g" % lo) == -want and float("%.15g" % hi) == want):
+            _fail(f"CPAR Par# {par} reads back ({lo!r}, {hi!r}), expected ({-want!r}, {want!r})")
+        out[par] = float(hi)
+    if sorted(out) != sorted(ranges):
+        _fail(f"the CPAR rows carry Par# {sorted(out)}, expected {sorted(ranges)}")
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Saturation of the group compensator's CPAR axes (D2) and the per-trial bound counts (Amendment B).
+# --------------------------------------------------------------------------- #
+# A CPAR value within 0.1 % of its bound counts as AT the bound (the probe's BOUND_REL): the engine overshoots the
+# bound by up to 9e-4 relative, so a strict test would miss real hits.
+SAT_REL = 1e-3
+# The statistics block prints 6 decimals: an extremum is known to within this much. A value inside this band of the
+# threshold cannot be classified, so the flag is ``None`` there (never a guess).
+_STAT_PRINT_STEP = 5e-7
+
+
+def _extremum_state(value, side_threshold):
+    """``"hit"`` / ``"inside"`` / ``None`` for one printed extremum against its signed side threshold.
+
+    ``side_threshold`` is ``-r(1-rel)`` for a minimum, ``+r(1-rel)`` for a maximum. Within ``_STAT_PRINT_STEP``
+    of the threshold the 6-decimal print cannot decide: ``None``.
+    """
+    if value is None or not math.isfinite(value):
+        return None
+    if abs(value - side_threshold) <= _STAT_PRINT_STEP:
+        return None
+    beyond = value <= side_threshold if side_threshold < 0 else value >= side_threshold
+    return "hit" if beyond else "inside"
+
+
+def cpar_saturation(stats, cb1, effective, rel=SAT_REL):
+    """Per-axis saturation of the group compensator from the MC statistics blocks (D2, fold #4).
+
+    ``stats`` is ``parse_compensator_statistics(mc_tail, extremes=True)``; ``effective`` is ``{par: bound}``
+    (the read-back bound, ``verify_cpar_axes``). Returns one dict per par, sorted by par:
+    ``{par, axis, units, range, minimum, maximum, saturated}``. ``saturated`` is
+
+    * ``None`` when an extremum is unparsed, when the rule band ``r * rel`` is below the print step, or when an
+      extremum is within one print step of its threshold (the rule is undecidable from 6 decimals);
+    * ``False`` when a printed extremum is clearly inside its threshold (not both bounds reached);
+    * ``True`` when BOTH printed extrema meet the rule: ``minimum <= -r(1-rel)`` and ``maximum >= r(1-rel)``.
+
+    Error directions: a true bound hit read ``False`` needs the engine to print an extremum short of the bound by
+    more than ``r * rel`` (it never did in the probes); a ``True`` needs both printed extrema beyond the threshold.
+    The engine overshoots a bound by up to 9e-4 relative, so overshoot counts as a hit and nothing is clamped.
+    """
+    by_label = {blk["label"]: blk for blk in stats or []}
+    out = []
+    for par in sorted(effective):
+        r = float(effective[par])
+        axis, units = _CPAR_AXES[par]
+        blk = by_label.get(f"Parameter {par} on surface {int(cb1)}") or {}
+        lo, hi = blk.get("minimum"), blk.get("maximum")
+        th = r * (1.0 - rel)
+        if lo is None or hi is None or r * rel < _STAT_PRINT_STEP:
+            saturated = None
+        else:
+            states = (_extremum_state(lo, -th), _extremum_state(hi, th))
+            if "inside" in states:
+                saturated = False
+            elif None in states:
+                saturated = None
+            else:
+                saturated = True
+        out.append({"par": par, "axis": axis, "units": units, "range": r,
+                    "minimum": lo, "maximum": hi, "saturated": saturated})
+    return out
+
+
+# A per-trial CPAR line is recognised by its PREFIX alone (case-insensitive, independent of the value), so a
+# malformed value or a lower-case ``surface`` still counts as that axis's line and cannot slip past the pairing.
+_CPAR_TRIAL_PREFIX_RE = re.compile(r"^\s*Parameter\s+(\d+)\s+on\s+Surface\s+(\d+)\s*:", re.I)
+_CPAR_TRIAL_VALUE_RE = re.compile(r"^\s*" + _NUM + r"\s*$")
+_MC_TRIAL_ROW_RE = re.compile(r"^\s*\d+\s+([0-9.E+\-]+)\s+([0-9.E+\-]+)\s*$")
+
+
+def cpar_trial_bounds(text, cb1, ranges, *, rel=SAT_REL, n_expected=None):
+    """Per-trial CPAR bound hits in a DLS Monte-Carlo report (Amendment B). Pure; ``None`` = unknown.
+
+    Scope: ``text[text.index("Monte Carlo Analysis:"):]``. A trial row (``<n> <criterion> <change>``) opens a
+    trial; each ``Parameter <p> on Surface <cb1>: <v>`` line (recognised by that prefix, case-insensitive and
+    whatever its value) with ``p`` in ``ranges`` sets that trial's value for ``p``. A value is AT_MIN when ``v <= -r(1-rel)`` and AT_MAX when
+    ``v >= r(1-rel)``, ``r = ranges[p]`` (the read-back bound). Returns::
+
+        {"n_trials": N, "axes": {p: {"n_at_min": int, "n_at_max": int}},
+         "n_trials_at_bound": int,          # trials with ANY axis at EITHER bound (union)
+         "at_bound": [bool] * N}            # report order, which is the ``per_trial`` order
+
+    or ``None`` (never zero-filled) when the pairing is not provable: no MC header, no trial, a trial without
+    exactly one finite value per requested axis (missing, duplicate, non-finite), a requested-axis line before
+    the first trial row, or ``n_trials != n_expected`` (the legacy parser's ``parsed_trial_count``).
+    """
+    start = text.find("Monte Carlo Analysis:")
+    if start < 0 or not ranges:
+        return None
+    pars = sorted(ranges)
+    trials = []
+    cur = None
+    for line in text[start:].splitlines():
+        if _MC_TRIAL_ROW_RE.match(line):
+            cur = {}
+            trials.append(cur)
+            continue
+        m = _CPAR_TRIAL_PREFIX_RE.match(line)
+        if m is None or int(m.group(2)) != int(cb1) or int(m.group(1)) not in ranges:
+            continue
+        par = int(m.group(1))
+        vm = _CPAR_TRIAL_VALUE_RE.match(line[m.end():])
+        value, found = _to_finite_float(vm.group(1)) if vm else (None, False)
+        if cur is None or par in cur or not found:
+            return None
+        cur[par] = value
+    if not trials or (n_expected is not None and len(trials) != int(n_expected)):
+        return None
+    if any(sorted(t) != pars for t in trials):
+        return None
+    axes = {p: {"n_at_min": 0, "n_at_max": 0} for p in pars}
+    at_bound = []
+    for t in trials:
+        hit = False
+        for p in pars:
+            th = float(ranges[p]) * (1.0 - rel)
+            if t[p] <= -th:
+                axes[p]["n_at_min"] += 1
+                hit = True
+            if t[p] >= th:
+                axes[p]["n_at_max"] += 1
+                hit = True
+        at_bound.append(hit)
+    return {"n_trials": len(trials), "axes": axes, "n_trials_at_bound": sum(at_bound), "at_bound": at_bound}
+
+
+def parse_comp_values(text, back_surface):
+    """Per-trial ``Thickness <back>:`` values in a DLS Monte-Carlo report (interleaved lines)."""
+    pat = re.compile(r"^\s*Thickness\s+%d\s*:\s*([-0-9.E+]+)\s*$" % int(back_surface), re.M)
+    out = []
+    for tok in pat.findall(text):
+        value, found = _to_finite_float(tok)
+        if found:
+            out.append(value)
+    return out
+
+
+def mc_dls_proof(text, back_surface, back_thickness=None, bounds=None):
+    """Did the DLS compensator actually MOVE?
+
+    Returns ``(warnings, info)``. ``compensator_did_not_move`` when the per-trial back-gap
+    values are constant (or absent); ``compensator_at_bound`` when >= 1 % of trials sit
+    within 1 % of the bound span of a COMP bound (``bounds`` = the read-back COMP row's
+    ``{min, max}`` offsets around ``back_thickness``). WARNINGS only, never a refusal.
+    """
+    vals = parse_comp_values(text, back_surface)
+    info = {"n_comp_values": len(vals), "comp_sd": None, "comp_at_bound_frac": None}
+    warnings = []
+    if not vals:
+        warnings.append(
+            "compensator_did_not_move: no per-trial 'Thickness %d:' compensator values were "
+            "found in the Monte-Carlo section, so the DLS compensator's movement is UNPROVEN"
+            % int(back_surface))
+        return warnings, info
+    mean = math.fsum(vals) / len(vals)
+    sd = math.sqrt(math.fsum((v - mean) ** 2 for v in vals) / max(1, len(vals) - 1))
+    info["comp_sd"] = sd
+    if sd == 0:
+        warnings.append(
+            "compensator_did_not_move: the per-trial back-gap compensator value is constant "
+            "across all %d trials (sd == 0); the DLS compensation did not act" % len(vals))
+    if (back_thickness is not None and bounds and bounds.get("min") is not None
+            and bounds.get("max") is not None):
+        lo, hi = back_thickness + bounds["min"], back_thickness + bounds["max"]
+        eps = 0.01 * (hi - lo)
+        frac = sum(1 for v in vals if v <= lo + eps or v >= hi - eps) / len(vals)
+        info["comp_at_bound_frac"] = frac
+        if frac >= 0.01:
+            warnings.append(
+                "compensator_at_bound: %.1f %% of trials sit at a compensator bound "
+                "[%.4g, %.4g]; the DLS result is bound-limited, widen the compensator range"
+                % (100.0 * frac, lo, hi))
+    return warnings, info
 
 
 # The columns of a tab-delimited sensitivity data row (probe ``raw_sens_block``):
@@ -706,15 +1266,19 @@ def _is_short_operand_row(cells, width):
             and _cat.meta_for(cells[0]) is not None)
 
 
-def _parse_sensitivity(text, out):
+def _parse_sensitivity(text, out, spec=None):
     """Parse the TAB-delimited sensitivity table + worst offenders + RSS + back-focus.
 
     TAB-first tokenize (D11/G-PARSE-TAB): the mechanical table is tab-delimited
     with a possibly-BLANK Surf2 column; splitting on whitespace would collapse the blank
     column and shift the numeric columns (the L28 silent-drop). The interleaved engine
     error lines are captured into ``out['operand_errors']`` (done in ``parse_tol_report``).
+    ``spec`` is the ``_CRITERIA`` entry (default wavefront) whose ``rss_label`` is the
+    RSS line to read.
     """
     import re
+
+    spec = spec or _CRITERIA["wavefront"]
 
     rows = []
     dropped_rows = 0
@@ -863,22 +1427,26 @@ def _parse_sensitivity(text, out):
         _search(text, r"Estimated change\s*:\s*" + _NUM)
     )
     rss_crit, rss_crit_ok = _to_finite_float(
-        _search(text, r"Estimated RMS Wavefront\s*:\s*" + _NUM)
+        _search(text, re.escape(spec.rss_label) + r"\s*:\s*" + _NUM)
     )
     if not rss_crit_ok:
         raise ToleranceError(
-            "the sensitivity report has no finite RSS 'Estimated RMS Wavefront' value; "
+            f"the sensitivity report has no finite RSS '{spec.rss_label}' value; "
             "refusing to report a guessed/zero RSS estimate",
             family="tolerancing_parse",
         )
     if rss_crit <= 0:
         raise ToleranceError(
-            f"the RSS 'Estimated RMS Wavefront' criterion is non-positive ({rss_crit!r}); "
-            "an RMS-wavefront criterion in waves cannot be <= 0 (the report is corrupted)",
+            f"the RSS '{spec.rss_label}' criterion is non-positive ({rss_crit!r}); "
+            "an RMS criterion cannot be <= 0 (the report is corrupted)",
             family="tolerancing_parse",
         )
     out["rss_estimated_change"] = rss_change
     out["rss_estimated_criterion"] = rss_crit
+    # The dropped-row COUNT as an int (it used to live only in the warning
+    # string). It covers the short-row and worst-offender drops that populate neither
+    # ``dropped_keys`` nor ``dropped_types`` — the hotspots withholding rule reads THIS.
+    out["dropped_row_count"] = dropped_rows
 
     # Compensator (back-focus) statistics block (D9 — paraxial back-focus compensation).
     out["back_focus_change"] = _parse_back_focus(text)
@@ -887,16 +1455,20 @@ def _parse_sensitivity(text, out):
 def _parse_back_focus(text):
     """Parse the 'Compensator Statistics: Change in back focus' min/max/mean/std block.
 
-    Best-effort (D9): the block is always emitted (probe §1), but a missing field
-    degrades to ``None`` (the back-focus stats are an adjunct, not the deliverable —
-    unlike the nominal/sensitivity/RSS fields that gate the canary).
+    Best-effort (D9): a missing FIELD degrades to ``None`` (the back-focus stats are an
+    adjunct, not the deliverable — unlike the nominal/sensitivity/RSS fields that gate the
+    canary). Parse ONLY inside a found ``Change in back focus`` block;
+    no block (a DLS report has none) -> ``None``. The old whole-text fallback read the DLS
+    report's ``Compensator Statistics`` Mean/Std as a "back focus change".
     """
     import re
 
     block = re.search(
         r"Change in back focus:?(.+?)(?:Monte Carlo|Worst offenders|$)", text, re.S
     )
-    scope = block.group(1) if block else text
+    if not block:
+        return None
+    scope = block.group(1)
 
     def _stat(label):
         return _to_finite_float(
@@ -2309,6 +2881,8 @@ def _unlink_quiet(path):
 def _tol_side_patterns(system):
     """The side-file glob patterns next to the loaded lens, or ``None`` (no lens path)."""
     lens_path = None
+    # Measured on 25.1: this accessor does not exist (AttributeError, so SystemFile below is always used);
+    # kept for other builds. See (Q2).
     try:
         lens_path = str(system.SystemData.Files.OpticStudioFile)
     except Exception:  # noqa: BLE001 — a path read throw -> no patterns
@@ -2412,4 +2986,388 @@ __all__ = [
     "_MIN_STABLE_TRIALS",
     "_RECONCILE_FAMILY",
     "_PARAXIAL_FOCUS_HEADER",
+    # S2a
+    "CriterionSpec",
+    "SPREAD_FLOOR",
+    "rel_spread",
+    "near_identical_warning",
+    "parse_compensator_header",
+    "parse_compensator_statistics",
+    "verify_cpar_rows",
+    "parse_comp_values",
+    "mc_dls_proof",
+    "read_tde_rows",
+    "tde_rows_to_authored",
+    "budget_digest",
+    "nonfinite_budget_rows",
+    "unreadable_budget_cells",
+    "apply_wizard_budget",
+    "check_wizard_rows",
+    "budget_rule_id",
+    "topology_digest",
 ]
+
+
+# --------------------------------------------------------------------------- #
+# S2a: the tolerance WIZARD budget, the TDE read-back, and the budget/topology keys.
+# (Ports of the bench's ``probe_tol_presets.dump_tde`` / ``to_entries`` +
+# ``tolbench_common.adapt_authored`` / ``apply_budget`` / ``budget_digest`` — the
+# bench had no matcher of its own, so the production reconciler is reused unchanged.)
+# --------------------------------------------------------------------------- #
+def read_tde_rows(tde):
+    """Dump the TDE as ``[{i, type, cells: {col: [Header, value]}}]`` (cols 2..8).
+
+    Port of ``probe_tol_presets.dump_tde``: each cell reads by its own ``DataType``
+    (Integer -> ``int``, Double -> ``float``, anything else -> ``str``); a cell that THROWS
+    is recorded ``["<err>", "<ExcType: msg>"]`` (never skipped, never zero-filled).
+    """
+    rows = []
+    n = int(tde.NumberOfOperands)
+    for i in range(1, n + 1):
+        op = tde.GetOperandAt(i)
+        row = {"i": i, "type": str(op.Type), "cells": {}}
+        for c in range(2, 9):
+            try:
+                cell = op.GetCellAt(c)
+                hdr = str(cell.Header) if hasattr(cell, "Header") else ""
+                dt = str(cell.DataType) if hasattr(cell, "DataType") else ""
+                if dt.endswith("Integer"):
+                    val = int(cell.IntegerValue)
+                elif dt.endswith("Double"):
+                    val = float(cell.DoubleValue)
+                else:
+                    val = str(cell.Value)
+                row["cells"][c] = [hdr, val]
+            except Exception as exc:  # noqa: BLE001 — a bad cell is DATA, not a crash
+                row["cells"][c] = ["<err>", f"{type(exc).__name__}: {exc}"]
+        rows.append(row)
+    return rows
+
+
+def _row_cells_by_header(row):
+    return {hdr: val for (hdr, val) in row["cells"].values()}
+
+
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def tde_rows_to_authored(rows, *, vendor=None):
+    """Translate read-back TDE rows to the production ``authored`` entries -> ``(authored, skipped)``.
+
+    CONTROL rows (COMP / TWAV / ...)
+    are dropped from ``authored``. A TTHI whose ``Adjust`` cell is non-zero (the wizard sets
+    it to the compensated surface) prints that surface as the report's Surf2 column, so the
+    production reconciler keys it as a RANGE row: the entry gets ``surface2 = Adjust``.
+    EVERY entry gets ``tier``, ``family`` AND ``units`` from the catalog (A's departure from
+    the bench, which set the tier only and so left ``authored_operands[].units`` null);
+    ``vendor == "Asphericon"`` sets ``units=None`` on TRAD rows (the unit is unverified).
+    ``skipped`` = rows the catalog cannot express (a type not in the catalog, or a non-zero
+    ``other`` int cell that is not the TTHI Adjust): a FAILING channel when non-empty.
+    """
+    authored, skipped = [], []
+    for r in rows:
+        t = r["type"]
+        meta = _cat.meta_for(t)
+        if meta is None:
+            skipped.append({"type": t, "why": "not in catalog"})
+            continue
+        e = {"type": t}
+        byhdr = _row_cells_by_header(r)
+        for cs in meta.int_cells:
+            if cs.role in ("surface", "surface2", "roll_surf", "code", "param",
+                           "max_term", "min_term", "mce_row", "mce_config"):
+                v = byhdr.get(cs.header)
+                if _is_int(v):
+                    e[cs.role] = v
+        lost = {cs.header: byhdr.get(cs.header) for cs in meta.int_cells
+                if cs.role == "other" and byhdr.get(cs.header) not in (None, 0)}
+        if t == "TTHI" and set(lost) == {"Adjust"} and _is_int(lost["Adjust"]):
+            e["surface2"] = lost["Adjust"]  # the report's Surf2 column (reconcile keys it)
+            lost = {}
+        if lost:
+            skipped.append({"type": t, "surface": e.get("surface"),
+                            "why": "non-zero 'other' int cell not expressible in our entry "
+                                   "format (authored as 0)", "cells": lost})
+        if meta.has_minmax:
+            mn, mx = byhdr.get("Min"), byhdr.get("Max")
+            if isinstance(mn, float) and isinstance(mx, float):
+                e["min"], e["max"] = mn, mx
+        if t in _CONTROL_TYPES:
+            continue
+        e["tier"] = meta.tier
+        e["family"] = meta.family
+        e["units"] = None if (vendor == "Asphericon" and t == "TRAD") else meta.units
+        authored.append(e)
+    return authored, skipped
+
+
+def _round_tree(o, nd=10):
+    if isinstance(o, float):
+        return round(o, nd)
+    if isinstance(o, (list, tuple)):
+        return [_round_tree(x, nd) for x in o]
+    return o
+
+
+def budget_digest(rows):
+    """sha256 over the SORTED ``(type, integer cells, Min, Max)`` of the read-back rows.
+
+    The bench's formula 2, byte for byte (``_round_tree`` nd=10, sorted json). It does NOT
+    hash row order, the COMP nominal cell (the lens's own back gap, legitimately different
+    per variant), TWAV's ``Wave`` cell or any comment — equal digests mean "the same
+    perturbation set and bounds", not "byte-identical editors".
+    """
+    tuples = []
+    for r in rows:
+        by = _row_cells_by_header(r)
+        ints = [v for (_h, v) in r["cells"].values() if _is_int(v)]
+        tuples.append((r["type"], tuple(ints), by.get("Min"), by.get("Max")))
+    blob = json.dumps(sorted(json.dumps(_round_tree(t), default=str) for t in tuples)).encode()
+    return hashlib.sha256(blob).hexdigest()
+
+
+def nonfinite_budget_rows(rows):
+    """Read-back rows (control rows skipped) carrying an INFINITY / non-finite value.
+
+    Port of ``tolbench_analyze.infinity_rows``. TWAV's ``Nominal = inf`` is by design and a
+    control row, so it is skipped. A ``Comment`` cell is free text, never a number, so a
+    comment that merely contains "inf" is not a finding.
+    """
+    bad = []
+    for r in rows:
+        if r.get("type") in _CONTROL_TYPES:
+            continue
+        for _c, hv in (r.get("cells") or {}).items():
+            hdr, val = (hv[0], hv[1]) if isinstance(hv, (list, tuple)) and len(hv) > 1 else ("", hv)
+            if hdr in ("Comment", "<err>"):   # free text / an unreadable cell (see unreadable_budget_cells)
+                continue
+            if isinstance(val, str):
+                try:
+                    val = float(val)          # an explicit parse: "Infinity", "-inf", "nan" ...
+                except ValueError:
+                    continue                  # non-numeric text is not a number
+            if isinstance(val, float) and not math.isfinite(val):
+                bad.append({"type": r.get("type"), "i": r.get("i")})
+                break
+    return bad
+
+
+def unreadable_budget_cells(rows):
+    """``[{i, type, col, error}]`` for every ``<err>`` cell on a NON-control row.
+
+    ``read_tde_rows`` records a cell that threw as ``["<err>", "<Exc>: <msg>"]``. On a perturbation
+    row that means the Min / Max / Surf was not read, so the run would proceed with a missing bound
+    or surface (a wrong digest, or a late reconcile with the wrong diagnosis).
+    """
+    out = []
+    for r in rows:
+        if r.get("type") in _CONTROL_TYPES:
+            continue
+        for c, hv in (r.get("cells") or {}).items():
+            if isinstance(hv, (list, tuple)) and len(hv) > 1 and hv[0] == "<err>":
+                out.append({"i": r.get("i"), "type": r.get("type"), "col": c, "error": hv[1]})
+    return out
+
+
+def _comp_bounds(rows):
+    """``{surface, min, max}`` of the wizard's COMP row (the back-gap compensator), or None."""
+    for r in rows:
+        if r["type"] == "COMP":
+            by = _row_cells_by_header(r)
+            surf = next((v for (_h, v) in r["cells"].values() if _is_int(v)), None)
+            return {"surface": surf, "min": by.get("Min"), "max": by.get("Max")}
+    return None
+
+
+def apply_wizard_budget(system, budget):
+    """Drive the engine tolerance WIZARD with element decenter/tilt on.
+
+    The bench's ``apply_budget``, in this order: resolve the vendor/grade enum members ->
+    ``ResetSettings`` -> ``SelectTolerancePreset`` -> the four element flags + values ->
+    ``IsFocusCompensationUsed`` + ``StopAtSurface = n - 2`` -> clear the TDE -> ``OK()`` ->
+    read every row back. Returns ``{rows, authored, skipped, back_surface, comp}``; the
+    caller runs ``check_wizard_rows`` before ANY tolerancing tool is opened.
+    """
+    from . import tolerance_run as _tr  # lazy: tolerance_run imports THIS module
+
+    vend_enum = _zos_enum(system, "Wizards", "ToleranceVendor")
+    grade_enum = _zos_enum(system, "Wizards", "ToleranceGrade")
+    vendor_member = _resolve_tol_enum(vend_enum, budget["vendor"])
+    grade_member = _resolve_tol_enum(grade_enum, budget["grade"])
+    ts = system.TDE.SEQToleranceWizard.ToleranceSettings
+    ts.CommonSettings.ResetSettings()
+    ts.SelectTolerancePreset(vendor_member, grade_member)
+    ts.IsElementDecenterXUsed = True
+    ts.IsElementDecenterYUsed = True
+    ts.IsElementTiltXUsed = True
+    ts.IsElementTiltYUsed = True
+    ts.ElementDecenterX = budget["element_decenter"]
+    ts.ElementDecenterY = budget["element_decenter"]
+    ts.ElementTiltXDegrees = budget["element_tilt"]
+    ts.ElementTiltYDegrees = budget["element_tilt"]
+    ts.IsFocusCompensationUsed = True
+    n = int(system.LDE.NumberOfSurfaces)
+    ts.StopAtSurface = n - 2
+    _tr._clear_tde(system.TDE)
+    ts.CommonSettings.OK()
+    rows = read_tde_rows(system.TDE)
+    authored, skipped = tde_rows_to_authored(rows, vendor=budget["vendor"])
+    return {"rows": rows, "authored": authored, "skipped": skipped,
+            "back_surface": n - 2, "comp": _comp_bounds(rows)}
+
+
+# The engine WRITES element rows rounded (probe: tilt property 0.0167 -> rows +-0.017), so the
+# row value may differ from the request by up to this much (Amendment 1).
+_ELEMENT_ROUND_TOL = 5e-4
+# Amendment 2: the absolute leg alone admits a sixfold budget on a tiny request (0.0001 -> 0.0006),
+# so the gap must ALSO be within this fraction of the request; the 1e-12 epsilon on the absolute
+# leg removes the float-noise verdict at the exact half step (0.0165 vs 0.017).
+_ELEMENT_ROUND_REL = 0.05
+
+
+def _is_element_range(row):
+    """TEDX/TEDY/TETX/TETY row spanning an element (``Surf1 < Surf2``); a ``Surf1 == Surf2`` row is
+    the preset's SURFACE tilt/decenter, not the element budget (Amendment 1)."""
+    by = _row_cells_by_header(row)
+    s1, s2 = by.get("Surf1"), by.get("Surf2")
+    return _is_int(s1) and _is_int(s2) and s1 < s2
+
+
+def check_wizard_rows(rows, back_surface, budget):
+    """Refuse a wizard row set the tool cannot honestly run. ``tolerancing_run``.
+
+    Runs AFTER ``OK()`` and BEFORE ``OpenTolerancing``; every problem found is named in
+    ONE message (the TDE is cleared by the caller's ``finally``):
+
+    - a perturbation row with ``Min == Max`` (a 0-width row: Optimax/HighPrecision TIND/TABB);
+    - a non-finite cell on a non-control row (TWAV's ``Nominal = inf`` is by design);
+    - a row the catalog cannot express (``skipped`` non-empty — the bench's failing channel);
+    - COMP rows != 1, or the COMP not on ``back_surface`` with ``Code 0``;
+    - the requested element budget is not what the wizard wrote (audit r2 #3; Amendment 1):
+      among the TEDX / TEDY / TETX / TETY rows with ``Surf1 < Surf2`` (the ``Surf1 == Surf2``
+      rows are the preset's SURFACE tilt/decenter and are ignored) there must be at least one
+      of EACH, every row on one axis must carry the same symmetric ``(-v, +v)``, and ``v`` must
+      be within 5e-4 of the request (the engine writes the rows ROUNDED: 0.0167 -> 0.017). A
+      clamped setter or a flag that did not take would otherwise run a different budget under
+      the requested ``budget_rule_id``.
+
+    Returns the EFFECTIVE ``{element_decenter, element_tilt}`` read from the rows (the caller
+    records those in ``budget_rule_id`` and warns ``element_value_rounded`` when they differ).
+    """
+    problems = []
+    for r in rows:
+        meta = _cat.meta_for(r["type"])
+        if meta is None or r["type"] in _CONTROL_TYPES or not meta.has_minmax:
+            continue
+        by = _row_cells_by_header(r)
+        mn, mx = by.get("Min"), by.get("Max")
+        if isinstance(mn, float) and isinstance(mx, float) and mn == mx:
+            problems.append(f"row {r['i']} {r['type']} has a 0-width perturbation "
+                            f"(Min == Max == {mn!r})")
+    for bad in nonfinite_budget_rows(rows):
+        problems.append(f"row {bad['i']} {bad['type']} carries a non-finite cell")
+    for bad in unreadable_budget_cells(rows):
+        problems.append(f"row {bad['i']} {bad['type']} has an unreadable cell at column "
+                        f"{bad['col']} ({bad['error']})")
+    _authored, skipped = tde_rows_to_authored(rows, vendor=budget.get("vendor"))
+    for sk in skipped:
+        problems.append(f"row type {sk.get('type')} (surface {sk.get('surface')}) cannot be "
+                        f"expressed as an authored operand ({sk.get('why')})")
+    comps = [r for r in rows if r["type"] == "COMP"]
+    if len(comps) != 1:
+        problems.append(f"expected exactly 1 COMP row, the wizard wrote {len(comps)}")
+    else:
+        by = _row_cells_by_header(comps[0])
+        surf = next((v for (_h, v) in comps[0]["cells"].values() if _is_int(v)), None)
+        if surf != back_surface or by.get("Code") != 0:
+            problems.append(f"the COMP row is on surface {surf!r} with Code {by.get('Code')!r}; "
+                            f"expected surface {back_surface} with Code 0")
+    effective = {}
+    for axis, toks in (("element_decenter", ("TEDX", "TEDY")), ("element_tilt", ("TETX", "TETY"))):
+        v = float(budget[axis])
+        values = []
+        for tok in toks:
+            rel = [r for r in rows if r["type"] == tok and _is_element_range(r)]
+            if not rel:
+                problems.append(f"no {tok} element row (Surf1 < Surf2): the {axis} was not written")
+            for r in rel:
+                by = _row_cells_by_header(r)
+                mn, mx = by.get("Min"), by.get("Max")
+                if not (isinstance(mn, float) and isinstance(mx, float)
+                        and math.isclose(-mn, mx, rel_tol=1e-9, abs_tol=1e-12) and mx > 0):
+                    problems.append(f"row {r['i']} {tok} is ({mn!r}, {mx!r}), not a symmetric "
+                                    f"(-v, +v) pair for the requested {axis} {v!r}")
+                    continue
+                values.append((r["i"], tok, mx))
+        for i, tok, mx in values:
+            gap = abs(mx - v)
+            if gap > _ELEMENT_ROUND_TOL + 1e-12 or gap > _ELEMENT_ROUND_REL * v:
+                problems.append(f"row {i} {tok} is ({-mx!r}, {mx!r}), expected ({-v!r}, {v!r}) "
+                                f"within {_ELEMENT_ROUND_TOL} and {100 * _ELEMENT_ROUND_REL:g} % "
+                                f"for the requested {axis}")
+        if values:
+            first = values[0][2]
+            for i, tok, mx in values:
+                if not math.isclose(mx, first, rel_tol=1e-9, abs_tol=1e-12):
+                    problems.append(f"row {i} {tok} carries {mx!r} but other {axis} rows carry "
+                                    f"{first!r}: the element rows disagree on one axis")
+                    break
+            effective[axis] = first
+    if problems:
+        raise ToleranceError(
+            "the tolerance wizard's row set is not the requested budget; nothing was run: "
+            + "; ".join(problems),
+            family="tolerancing_run",
+        )
+    return effective
+
+
+def budget_rule_id(budget, supplied, include_mechanical):
+    """The SAME-JUDGE key: stable across a glass swap (TABB bounds follow Vd).
+
+    ``wizard:<Vendor>/<Grade>:ed=<g>:et=<g>`` | ``explicit:<sha8 of the canonical request
+    list>`` | ``default+mechanical`` | ``default``. The two floats render with ``.12g``
+    (``0.02`` -> ``0.02``) so a value that differs only past the 6th digit is a different
+    rule. ``budget_digest`` is the EFFECTIVE-budget key; the two are deliberately separate.
+    """
+    if budget is not None:
+        return (f"wizard:{budget['vendor']}/{budget['grade']}"
+                f":ed={format(float(budget['element_decenter']), '.12g')}"
+                f":et={format(float(budget['element_tilt']), '.12g')}")
+    if supplied is not None:
+        blob = json.dumps(supplied, sort_keys=True, default=str, separators=(",", ":"))
+        return "explicit:" + hashlib.sha256(blob.encode()).hexdigest()[:8]
+    return "default+mechanical" if include_mechanical else "default"
+
+
+def topology_digest(system):
+    """sha256 over ``[(i, class)]``, ``class`` in {glass, air, mirror, cb, other}, ``i`` in 0..n-1.
+
+    A glass-NAME change does not move it (the class is the same); a surface insert/remove or a
+    glass<->air change does. The classes use the layout predicates (CB first: its material
+    reads ``"-"``); surface 0 is forced to air (the object medium is not a lens element); an
+    unreadable surface is ``other`` so the digest never silently equals a readable one.
+    """
+    from . import _layout_geometry as _geom  # lazy: keep this module's import graph flat
+
+    n = int(system.LDE.NumberOfSurfaces)
+    classes = []
+    for i in range(n):
+        try:
+            row = system.LDE.GetSurfaceAt(i)
+            material = "" if i == 0 else str(row.Material)
+            type_name = str(getattr(row, "Type", ""))
+        except Exception:  # noqa: BLE001 — unreadable -> a distinct class
+            classes.append((i, "other"))
+            continue
+        if _geom._is_coordinate_break(type_name):
+            cls = "cb"
+        elif _geom._is_mirror(material):
+            cls = "mirror"
+        elif _geom._is_air_material(material):
+            cls = "air"
+        else:
+            cls = "glass"
+        classes.append((i, cls))
+    return hashlib.sha256(json.dumps(classes).encode()).hexdigest()

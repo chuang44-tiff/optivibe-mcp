@@ -185,7 +185,7 @@ def _variable_key(item):
     )
 
 
-def _variable_fingerprint(system):
+def _variable_fingerprint(system, *, allow_empty=False):
     """A ``dict`` of ``{dof_key: value}`` over EVERY optimizer DOF, or ``None`` (fail-closed).
 
     Fingerprints the ACTUAL optimizer variables (the ONLY values a DLS run can move) via the
@@ -200,7 +200,8 @@ def _variable_fingerprint(system):
     - any per-source DISCOVERY ``faults`` were recorded -> a source's coverage was silently
       dropped, so a genuinely-Variable cell behind the fault is invisible to the proof;
     - an EMPTY inventory -> the ramp precondition guarantees >=1 variable, so an empty
-      snapshot is anomalous (a proof over nothing is vacuous);
+      snapshot is anomalous (a proof over nothing is vacuous); ``allow_empty`` reads it as ``{}``
+      (the throw and ``faults`` returns stay first, so a faulted read is still ``None``);
     - any DOF value is None / non-finite / non-numeric -> unreadable, cannot be compared.
     """
     # COVERAGE NOTE: the restore proof is exactly as COMPLETE as ``_variable_inventory``,
@@ -220,7 +221,7 @@ def _variable_fingerprint(system):
     if faults:
         return None                            # a source's coverage was silently dropped
     if not inventory:
-        return None                            # anomalous: precondition guarantees >=1 var
+        return {} if allow_empty else None     # anomalous: precondition guarantees >=1 var
     fp = {}
     for item in inventory:
         value = item.get("value")

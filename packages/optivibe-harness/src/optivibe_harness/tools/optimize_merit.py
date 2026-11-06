@@ -31,6 +31,7 @@ from ..server import ToolSpec
 from . import _config_common as _ccfg
 from . import _grin_index_common as _gic
 from . import _lens_common as _lc
+from . import _mce_merit_guard as _guard
 from . import _merit_cells as _mc
 from . import _optimize_common as _oc
 from . import _structural_common as _sc
@@ -444,6 +445,11 @@ _CRITERION_TOKENS = ("spot", "wavefront")
 # index is RESOLVED by enumeration (never hardcoded ``Data=1``), so a wizard reorder /
 # limit stays correct + a PERMUTED-order fake can falsify a hardcode.
 _CRITERION_DATA_NAME = {"spot": "Spot Radius", "wavefront": "Wavefront"}
+# The image-quality operand family the wizard authors for each criterion when Reference is
+# Centroid (Q1-Q3): spot -> TRAC, wavefront -> OPDX. The other members of
+# ``_IQ_OPERAND_FAMILIES`` are what a persisted Chief Ray / Unreferenced Reference writes.
+_CRITERION_EXPECTED_FAMILY = {"spot": "TRAC", "wavefront": "OPDX"}
+_IQ_OPERAND_FAMILIES = ("TRAC", "TRAR", "OPDX", "OPDM", "OPDC")
 
 # The ETGT true-edge restoring-floor constants (§4).
 _ETGT_EDGE_SAFETY_MARGIN = 0.2   # relative; target = min_glass * (1 + margin). FORCE-CALIBRATION,
@@ -1850,6 +1856,32 @@ def _record_declared_budget(session, system, min_air, min_glass, max_air, max_gl
         return None
 
 
+def _conf_guard_refusal(guard):
+    """The ``mce_merit_guard`` refusal ``build_merit`` returns BEFORE its own evaluation.
+
+    The wizard rebuild already committed (``Apply()``/``OK()``); the evaluation that would
+    follow deletes the merit's last row on this lens, so it is not run.
+    """
+    status = guard["status"]
+    if status == _guard.READBACK_MISMATCH:
+        message = (
+            "the leading-CONF insert changed the merit function unexpectedly "
+            f"({guard['n_operands_before']} -> {guard['n_operands_after']} rows; "
+            f"{guard.get('detail')}). The wizard rebuild already committed and was not "
+            "evaluated. Inspect the merit with dump_merit_function before trusting it"
+        )
+    else:
+        message = (
+            "the wizard rebuild landed but was NOT evaluated: the leading CONF could not be "
+            f"confirmed ({status}), and a merit evaluation on this multi-config lens with a "
+            "per-config MCE row would delete the merit's last row. Run set_config_variable "
+            "or save the lens, then call build_merit again"
+        )
+    return _oc.error_envelope(
+        "build_merit", _guard.MCE_MERIT_GUARD, message, merit_conf_guard=guard,
+    )
+
+
 def build_merit(session, params):
     """Build the default RMS-spot merit via the SEQ wizard (Apply + OK).
 
@@ -1951,14 +1983,25 @@ def build_merit(session, params):
     # (§3.1 write order — Type + Data BEFORE the floors + Apply). ``build_merit`` set
     # NEITHER before, inheriting the wizard's persisted last-used value (non-deterministic).
     # criterion='spot' -> Data=Spot Radius (TRAC family); 'wavefront' -> Data=Wavefront
-    # (OPDX family). Type is PINNED to RMS (Reference is left at the Centroid default —
-    # probe observed no drift). The index is resolved by name-enumeration, so an
-    # unavailable name -> optimize_param naming the live set (never a hardcoded Data=1).
+    # (OPDX family). Type is PINNED to RMS, and Reference is PINNED to Centroid. The wizard
+    # Reference persists for the life of the engine process (across LoadFile and New), so
+    # an earlier Apply left on Chief Ray / Unreferenced silently turned this build into
+    # TRAR / OPDM / OPDC rows with every parameter identical (measured,
+    # Q1-Q4 under
+    # ticket-spot-reference-persistence/). The three writes MUST land on this one ``wizard``
+    # handle with no ``mfe.SEQOptimizationWizard`` access before ``Apply()``: a fresh fetch
+    # discards un-applied writes (H). The index is resolved by name-enumeration,
+    # so an unavailable name -> optimize_param naming the live set (never a hardcoded index).
     try:
         wizard.Data = _resolve_data_index(wizard, _CRITERION_DATA_NAME[criterion])
         wizard.Type = _resolve_data_index(
             wizard, "RMS",
             count_attr="NumberOfTypes", getter_name="GetTypeAt", label="type",
+        )
+        wizard.Reference = _resolve_data_index(
+            wizard, "Centroid",
+            count_attr="NumberOfReferences", getter_name="GetReferenceAt",
+            label="reference",
         )
     except ToolParamError as exc:
         return _oc.error_envelope("build_merit", "optimize_param", str(exc))
@@ -2006,7 +2049,21 @@ def build_merit(session, params):
     wizard.Apply()
     wizard.OK()
 
+    # Multi-config: the next statement evaluates the merit, which on a lens with an MCE row
+    # and no leading CONF inserts CONF 1 at row 1 and DELETES the last wizard row
+    #. Insert the CONF cleanly FIRST, before the row
+    # counts below, so they and the stored boundary count it. A single-config build makes no
+    # call (byte-identical path).
+    conf_guard = None
+    if n_configs > 1:
+        conf_guard = _guard.ensure_leading_conf(system)
+        if conf_guard["status"] in _guard.UNSAFE_STATUSES:
+            return _conf_guard_refusal(conf_guard)
+
     number_of_operands = int(mfe.NumberOfOperands)
+    # The wizard-authored row count, snapshotted BEFORE the ETGT / GRIN / re-reads below
+    # reassign ``number_of_operands`` (the ``criterion_operands`` read-back scans only these).
+    wizard_row_count = number_of_operands
     merit = mfe.CalculateMeritFunction()
     if number_of_operands <= 1:
         return _oc.error_envelope(
@@ -2186,6 +2243,19 @@ def build_merit(session, params):
         int.__index__(_a) if isinstance(_a := wizard.GetArmAt(int(wizard.Arm)), int)
         and not isinstance(_a, bool) else int(_a)))
 
+    def _read_criterion_operands():
+        found = set()
+        for i in range(1, wizard_row_count + 1):
+            token = _oc._base_token(mfe.GetOperandAt(i).TypeName)
+            if token in _IQ_OPERAND_FAMILIES:
+                found.add(token)
+        return sorted(found)
+
+    # D2: the image-quality operand families the wizard ACTUALLY wrote (rows 1..the count
+    # read right after OK()), read off the MFE rows -- never echoed from ``wizard.Reference``
+    # (an Unreferenced-under-wavefront Apply read back Centroid while TRAR rows were written).
+    criterion_operands = _echo("criterion_operands", _read_criterion_operands)
+
     # Echo the APPLIED settings (read-back-as-proof). The resolved ring/arm COUNTS are
     # read back off the wizard index via GetRingAt/GetArmAt (proves the index landed).
     result = {
@@ -2208,6 +2278,10 @@ def build_merit(session, params):
         "criterion": criterion,
         "criterion_data": criterion_data,
         "criterion_type": criterion_type,
+        # Sorted DISTINCT image-quality operand types among the wizard-authored rows
+        # (``["TRAC"]`` spot / ``["OPDX"]`` wavefront when Reference is Centroid); ``None``
+        # when the row read faulted (see ``criterion_readback_faults``).
+        "criterion_operands": criterion_operands,
         # MCE additive keys (byte-compatible add — a 1-config system echoes
         # span_configs:false, configs_covered:[], spans_all_configs:true).
         "span_configs": span_configs,
@@ -2254,6 +2328,19 @@ def build_merit(session, params):
         result["note"] = note
     elif warn_extra is not None:
         result["warning"] = warn_extra
+
+    # D2 warning (never flips ok): anything other than exactly the expected one-element
+    # family means the wizard wrote a different operand family than the criterion asks for.
+    # A faulted read (None) is disclosed by ``criterion_readback_faults``, not warned here.
+    _expected_family = [_CRITERION_EXPECTED_FAMILY[criterion]]
+    if criterion_operands is not None and criterion_operands != _expected_family:
+        _family_warn = (
+            f"the wizard wrote image-quality operand types {criterion_operands}, "
+            f"expected {_expected_family} for criterion={criterion!r} (Reference "
+            "Centroid); the merit is built and committed but is not the requested family"
+        )
+        existing = result.get("warning")
+        result["warning"] = f"{existing}; {_family_warn}" if existing else _family_warn
 
     # The widened glass-floor advisory (non-blocking, additive key, never
     # flips ok). Called UNCONDITIONALLY — it reads the LIVE MFE, so the floored
@@ -2340,6 +2427,9 @@ def build_merit(session, params):
     grin_warning = _grin_floor_warning(system)
     if grin_warning:
         result["grin_floor_warning"] = grin_warning
+
+    if conf_guard is not None:
+        result["merit_conf_guard"] = conf_guard
 
     # preserve_custom (§2.2): fingerprint the wizard-ONLY block on the session so a
     # LATER build_merit(preserve_custom=True) can find + preserve the hand-authored

@@ -176,10 +176,11 @@ _STRUCTURAL = "supported — authors and runs, but has no degree of freedom on a
     "multi-config / extra-data)"
 _CONTROL = "a control / utility operand — it sets run state, it is not a ±delta " \
     "perturbation; authored for .zmx fidelity, no perturbation channel"
-_COMP = "a user compensator — INERT through the headless OpenTolerancing() path " \
-    "(PROBE-2: the engine does paraxial back-focus compensation only; an authored " \
-    "COMP/CPAR changes nothing). Authored for .zmx fidelity; compensator_participates " \
-    "is always false headless — never claim a user compensator recovered performance"
+_COMP = "a user compensator — INERT under Paraxial Focus (the default compensator: the " \
+    "engine refocuses back focus paraxially and an authored COMP/CPAR changes nothing; " \
+    "compensator_participates is false) and PARTICIPATING under Optimize All (DLS) " \
+    "(probe r5; compensator='dls' with the wizard budget). Under Paraxial Focus never " \
+    "claim a user compensator recovered performance"
 _CB_GAP = "needs a coordinate-break surface; the engine refuses on a plain " \
     "sequential surface ('Surface N must be a Coordinate break'). Supported after " \
     "the reflective/coordinate-break cycle lands. Use TETX/TEDX (surface tilt/" \

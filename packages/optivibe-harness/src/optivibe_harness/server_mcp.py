@@ -6,8 +6,9 @@ top-level ``import mcp`` — so the module loads anywhere; the dependency is nee
 only when an MCP server is actually built.
 
 The adapter is intentionally thin: it mirrors ``Dispatcher.list_tools()`` as the
-MCP tool list and routes every ``call_tool`` straight to ``Dispatcher.dispatch``,
-whose never-raise envelope becomes the tool result.
+MCP tool list and routes every ``call_tool`` to ``Dispatcher.dispatch`` on the one
+engine thread and sends MCP progress notifications while it runs; the dispatch's
+never-raise envelope becomes the tool result.
 
 Live ZOS-API integration: N/A this tier (the adapter wraps the dispatcher; the
 dispatcher is what touches the backend).
@@ -550,6 +551,104 @@ def compose_instructions(manifest_names):
     return instructions
 
 
+#: Seconds between MCP progress notifications while a tool call runs
+#:. Claude Code aborts a stdio call that is silent
+#: for 30 min by default; 60 s is a 30x margin. Read at CALL time (tests monkeypatch it). Not an
+#: operator knob.
+PROGRESS_INTERVAL_S = 60.0
+
+
+def _progress_target(server):
+    """``(token, session)`` for the current request, or ``(None, None)``. TOTAL on ``Exception``.
+
+    Real mcp outside a request raises ``LookupError`` (``Server.request_context``); the fake
+    ``Server`` the offline suites install has no ``request_context`` at all (``AttributeError``).
+    Both mean "no token" -> no notifications. ``token is None`` is the test, never truthiness:
+    a client may send ``progressToken: 0``."""
+    try:
+        ctx = server.request_context
+        meta = ctx.meta
+        token = getattr(meta, "progressToken", None) if meta is not None else None
+        if token is None:
+            return None, None
+        return token, ctx.session
+    except Exception:  # noqa: BLE001 — no request context, or a fake Server: no token
+        return None, None
+
+
+async def _await_with_progress(cf, done, token, rsession, interval_s):
+    """Await ``done`` (``asyncio.wrap_future(cf)``, the engine thread's dispatch) and return its result.
+
+    With a ``token``, send progress ``k * interval_s`` (k = 1, 2, ...) every ``interval_s`` until the
+    dispatch completes; nothing is sent before the first interval and nothing after the result. A
+    failed send logs ONE warning and stops the ticks for this call; the call is unaffected
+    (invariant 2). Without a token nothing is sent and nothing is logged (invariant 3).
+
+    On cancellation (client ``notifications/cancelled``, or transport close) the CONCURRENT future
+    ``cf`` is cancelled directly and the cancellation re-raised. ``cf.cancel()`` and the worker's
+    ``set_running_or_notify_cancel()`` share the future's condition, so a dispatch still PENDING at
+    that instant never starts; one the worker has already marked RUNNING finishes on the engine
+    thread and its result is dropped (invariant 1: the one worker is busy until that dispatch
+    returns, so the next call cannot start before it). Cancelling only the asyncio wrapper would
+    NOT do: its callbacks are merely scheduled (``call_soon``) and the worker can start the item
+    before they run."""
+    import asyncio
+
+    k = 0
+    try:
+        while True:
+            finished, _ = await asyncio.wait(
+                {done}, timeout=None if token is None else interval_s)
+            if finished:
+                return done.result()
+            k += 1
+            try:
+                await rsession.send_progress_notification(token, k * interval_s, None)
+            except Exception:  # noqa: BLE001 — a notifier must never fail the call
+                logging.getLogger("optivibe_harness.server_mcp").warning(
+                    "optivibe: progress notification failed; the call continues without "
+                    "further progress", exc_info=True)
+                token = None
+    except BaseException:
+        cf.cancel()  # PENDING -> never runs (atomic with the worker's start check); RUNNING -> unaffected
+        done.cancel()  # then drop the wrapper, so a RUNNING dispatch's late result/exception is discarded
+        raise
+
+
+def _register_call_tool(server, dispatcher, string_params, mcp_types):
+    """Register THE ``tools/call`` handler (both builders call this: invariant 4).
+
+    Every ``dispatch`` runs on ONE engine thread (``optivibe-engine_0``), a one-worker executor
+    whose FIFO queue is the serialization: no lock is added here. The thread is created on the
+    first call, never at build. The request's contextvars are copied onto the engine thread so
+    the interaction log still reads the live client identity (``interaction_log._read_client``).
+    The served text is ``repr(envelope)``, byte-identical to the pre-ticket adapter (invariant 5).
+
+    validate_input=False: the typed schema would otherwise make mcp 1.28 HARD-REJECT a stringified
+    arg before the handler, regressing 's string straggler path. With
+    validation off, native args pass straight through and a stringified straggler is un-coerced
+    by the shim; the strict handlers are the re-validation net either way."""
+    import asyncio
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    engine = ThreadPoolExecutor(max_workers=1, thread_name_prefix="optivibe-engine")
+
+    @server.call_tool(validate_input=False)
+    async def _call_tool(name, arguments):
+        # No ``await`` before ``submit``: the request is on the engine queue by the time this
+        # coroutine first suspends (the offline rows rely on it to know a call was submitted).
+        reparsed = _reparse_arguments(arguments, string_params.get(name, frozenset()))
+        token, rsession = _progress_target(server)
+        cf = engine.submit(
+            contextvars.copy_context().run, dispatcher.dispatch, name, reparsed)
+        done = asyncio.wrap_future(cf, loop=asyncio.get_running_loop())
+        envelope = await _await_with_progress(cf, done, token, rsession, PROGRESS_INTERVAL_S)
+        return [mcp_types.TextContent(type="text", text=repr(envelope))]
+
+    return _call_tool
+
+
 def build_mcp_server(session):
     """Build an MCP ``Server`` exposing the dispatcher's tools (LAZY mcp import).
 
@@ -595,16 +694,7 @@ def build_mcp_server(session):
             )
         return tools
 
-    # validate_input=False: the typed schema would otherwise make mcp 1.28
-    # HARD-REJECT a stringified arg before the handler, regressing
-    # the string straggler path. With validation off, native args pass
-    # straight through and a stringified straggler is un-coerced by the shim;
-    # the strict handlers are the re-validation net either way.
-    @server.call_tool(validate_input=False)
-    async def _call_tool(name, arguments):
-        reparsed = _reparse_arguments(arguments, _string_params.get(name, frozenset()))
-        envelope = dispatcher.dispatch(name, reparsed)
-        return [mcp_types.TextContent(type="text", text=repr(envelope))]
+    _register_call_tool(server, dispatcher, _string_params, mcp_types)
 
     return server
 
@@ -617,8 +707,9 @@ def build_composite_mcp_server(dispatcher):
     so a third MCP adapter module is avoided; the composite is fronted directly).
     Server name is ``"optivibe"`` (one MCP, one name). LAZY
     ``mcp`` import inside the body (never at module top). Wires
-    ``@server.list_tools()`` / ``@server.call_tool()`` straight to the dispatcher's
-    ``list_tools()`` / ``dispatch()`` never-raise envelope.
+    ``@server.list_tools()`` to the dispatcher's ``list_tools()``; ``tools/call`` goes through the
+    shared ``_register_call_tool`` helper, which runs the never-raise ``dispatch()`` on the one
+    engine thread.
 
     Addendum selection is MANIFEST-DRIVEN (the absent-tool hazard,
     on the path that SHIPS). ``__main__.main`` ALWAYS calls this
@@ -687,13 +778,6 @@ def build_composite_mcp_server(dispatcher):
             )
         return tools
 
-    # validate_input=False — see build_mcp_server: keep the typed
-    # schema non-regressive against a stringified straggler; the shim + the strict
-    # handlers are the net.
-    @server.call_tool(validate_input=False)
-    async def _call_tool(name, arguments):
-        reparsed = _reparse_arguments(arguments, _string_params.get(name, frozenset()))
-        envelope = dispatcher.dispatch(name, reparsed)
-        return [mcp_types.TextContent(type="text", text=repr(envelope))]
+    _register_call_tool(server, dispatcher, _string_params, mcp_types)
 
     return server

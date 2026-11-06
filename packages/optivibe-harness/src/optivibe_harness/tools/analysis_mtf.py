@@ -365,23 +365,186 @@ def _get_mtf_at(session, params):
             max_frequency = extended
             max_frequency_auto_extended = True
 
+    sample_size = _validate_sample_size_param(params.get("sample_size"))
+
+    ctx = {"series_sel": series_sel, "at_frequencies": at_frequencies,
+           "max_frequency": max_frequency, "auto_extended": max_frequency_auto_extended}
+    first = _mtf_run(system, ctx, sample_size)
+    if first[0] == "envelope":
+        return first[1]
+    res, meta = first[1], first[2]
+    sampling = {"requested": sample_size, "default_read_back": meta["default_token"],
+                "applied": meta["size"], "escalation": [_escalation_entry(meta)]}
+    default_size = meta["default_size"]
+    notes, failure = [], None
+    escalated = False
+    # The engine's own 'Sampling too low' is the observed trigger on these lenses; the response is
+    # bounded (64 -> 128 -> 256 -> 512), never a convergence guarantee. An explicit size is never changed.
+    while sample_size is None and meta["too_low"] is True:
+        nxt = _SAMPLE_LADDER.get(meta["size"])
+        if nxt is None:
+            break
+        try:
+            retry = _mtf_run(system, ctx, nxt)
+        except Exception as exc:  # noqa: BLE001 -- a retry fault returns the last completed run
+            if isinstance(exc, SessionClosedError) or isinstance(map_dotnet_exception(exc), SessionClosedError):
+                raise
+            failure = f"the run at sample_size {nxt} raised {safe_exc(exc, repr_form=True)}"
+            break
+        if retry[0] == "envelope":
+            failure = (f"the run at sample_size {nxt} returned "
+                       f"{retry[1].get('error_family')}: {retry[1].get('error')}")
+            break
+        res, meta = retry[1], retry[2]
+        escalated = True
+        sampling["applied"] = meta["size"]
+        sampling["escalation"].append(_escalation_entry(meta))
+    if failure is not None:
+        notes.append(f"the engine's default sampling was reported too low; escalation stopped: {failure}; "
+                     f"the returned values are from the previous run (sample_size {meta['size']}), "
+                     "for which the engine still reports 'Sampling too low'")
+    elif escalated:
+        notes.append(f"the engine's default sampling ({sampling['default_read_back']}) was reported too low; "
+                     f"re-run at sample_size {meta['size']}; the default-sampling values were discarded as "
+                     "inaccurate")
+    if failure is None and meta["too_low"] is True:
+        nxt = _SAMPLE_LADDER.get(meta["size"])
+        if sample_size is not None and nxt is not None:
+            notes.append(f"the engine reports 'Sampling too low' at the explicit sample_size {sample_size} "
+                         f"(kept as asked); pass sample_size={nxt} for more samples")
+        elif meta["size"] == _SAMPLE_LARGEST:
+            notes.append("the engine still reports 'Sampling too low' at sample_size 512, the largest size")
+    elif failure is None and meta["too_low"] is False and escalated:
+        notes.append("the engine no longer reports the sampling as too low at this size "
+                     "(not a guarantee of accuracy)")
+    elif failure is None and meta["too_low"] is None and sample_size is None:
+        notes.append("the engine messages of the returned run could not be read, so whether the sampling "
+                     "is too low is unknown; no further escalation")
+    if sample_size is None and default_size is None:
+        notes.append(f"the engine's default sampling could not be read back as one of 64/128/256/512 "
+                     f"(read {sampling['default_read_back']!r}); not escalated")
+    if notes:
+        sampling["note"] = "; ".join(notes)
+    res["sampling"] = sampling
+    # A collimated (afocal) output: flag it and redirect to the angular tools. The detector
+    # traces rays through the tool slot, so it is skipped (and said so) while that slot is
+    # latched; the MTF answer itself is never refused or nulled for this. Adds keys ONLY when
+    # it fires, so a normal imager's key set is unchanged.
+    if _wedge_recorded(session):
+        res["flags"] = [_COLLIMATED_CHECK_SKIPPED_MSG]
+    else:
+        collimated_flags = _col.collimated_flags(system)
+        if collimated_flags:
+            res["collimated_output"] = True
+            res["flags"] = collimated_flags
+    return res
+
+
+#: The bounded response to the engine's 'Sampling too low': double the size, up to the largest the
+#: enum offers. Local on purpose: ``render_mtf_vs_field`` has a different policy (its own ladder).
+_SAMPLE_LADDER = {64: 128, 128: 256, 256: 512}
+_SAMPLE_LARGEST = 512
+_SAMPLE_TOKEN_RE = re.compile(r"^S_(\d+)x(\d+)$")
+_SAMPLING_TOO_LOW = "Sampling too low"
+
+
+def _validate_sample_size_param(value):
+    """``None`` or 64/128/256/512 (the shared validator; function-local import: the field tool
+    imports this module at its top level)."""
+    from .analysis_mtf_field import _validate_sample_size
+    return _validate_sample_size(value)
+
+
+def _token_size(token):
+    """``S_<n>x<n>`` -> ``n`` when ``n`` is one of the four offered sizes, else ``None``."""
+    m = _SAMPLE_TOKEN_RE.match(token) if isinstance(token, str) else None
+    if m is None or m.group(1) != m.group(2):
+        return None
+    n = int(m.group(1))
+    return n if n in (64, 128, 256, 512) else None
+
+
+def _sample_token(typed):
+    """The SampleSize token of the concrete view, read through the base slot."""
+    return _base_token(typed.SampleSize)
+
+
+def _sample_ok(got, token):
+    """The read-back proof for a SampleSize write."""
+    return got == token
+
+
+def _close_quietly(analysis):
+    """Close a window that never reached ``_run_analysis``; teardown never masks the real outcome."""
+    try:
+        analysis.Close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _is_transport_loss(exc):
+    return isinstance(exc, SessionClosedError) or isinstance(map_dotnet_exception(exc), SessionClosedError)
+
+
+def _escalation_entry(meta):
+    return {"size": meta["size"], "sampling_too_low": meta["too_low"]}
+
+
+def _sampling_setup(system, analysis, size):
+    """``(typed, default_token, failure)``. ``size`` None: leave the engine's size alone and READ it
+    (an unreadable one is ``None``, not a refusal). ``size`` int: write ``typed.SampleSize`` on the
+    CONCRETE view (``__implementation__``; a write on the bare base is a phantom that reads back
+    what was written) and read it back. A transport loss propagates."""
+    try:
+        typed = getattr(analysis.GetSettings(), "__implementation__", None)
+        if size is None:
+            return typed, _sample_token(typed), None
+        token = f"S_{size}x{size}"
+        from .analysis_mtf_field import _sample_sizes_enum
+        members = _sample_sizes_enum(system)
+        typed.SampleSize = {64: members.S_64x64, 128: members.S_128x128,
+                            256: members.S_256x256, 512: members.S_512x512}[size]
+        got = _sample_token(typed)
+        if not _sample_ok(got, token):
+            return typed, None, f"sample_size {size} was written but reads back {got!r} (the write did not take)"
+        return typed, None, None
+    except Exception as exc:  # noqa: BLE001 -- an unreadable / unwritable size is disclosed below
+        if _is_transport_loss(exc):
+            raise
+        if size is None:
+            return None, None, None
+        return None, None, f"sample_size {size} could not be written and read back: {safe_exc(exc, repr_form=True)}"
+
+
+def _mtf_run(system, ctx, size):
+    """ONE FFT-MTF window: ``("ok", result, meta)`` or ``("envelope", envelope)``.
+
+    ``size`` None leaves the engine's own sampling (its token is READ); an int writes it and reads it
+    back before Apply and again after the run. The window is closed on every path. ``meta`` carries
+    ``size`` (the size verified for this run, or None), ``default_token`` / ``default_size`` (omitted
+    case), and ``too_low`` (True / False; None when the engine messages were not readable)."""
+    series_sel, at_frequencies = ctx["series_sel"], ctx["at_frequencies"]
+    max_frequency, max_frequency_auto_extended = ctx["max_frequency"], ctx["auto_extended"]
     try:
         analysis = system.Analyses.New_FftMtf()
     except Exception as exc:  # noqa: BLE001 -- a window that will not open is a family, not `internal`
-        if isinstance(map_dotnet_exception(exc), SessionClosedError):
+        if _is_transport_loss(exc):
             raise
-        return _ac.error_envelope(
+        return ("envelope", _ac.error_envelope(
             "get_mtf", "analysis_malformed",
             "the FFT MTF window could not be opened: " + safe_exc(exc, repr_form=True),
-        )
+        ))
     try:
         dl_turned_on = _show_diffraction_limit(analysis)
+        typed_view, default_token, sample_failure = _sampling_setup(system, analysis, size)
     except BaseException:  # a transport loss here would otherwise skip the window's Close()
-        try:
-            analysis.Close()
-        except Exception:  # noqa: BLE001 -- teardown must never mask the real error
-            pass
+        _close_quietly(analysis)
         raise
+    if sample_failure is not None:
+        _close_quietly(analysis)
+        return ("envelope", _ac.error_envelope(
+            "get_mtf", "sampling_not_applied", "pre-run: " + sample_failure,
+            requested=size))
     max_frequency_applied = None
     if max_frequency is not None:
         max_frequency_applied = False
@@ -407,17 +570,29 @@ def _get_mtf_at(session, params):
         n = int(results.NumberOfDataSeries)
         # The engine says WHY a result is empty or inaccurate; read it before any early return.
         messages, messages_unread = _read_engine_messages(results)
+        if size is not None:  # the size is proved again AFTER the run, as the field tool does
+            try:
+                got = _sample_token(typed_view)
+            except Exception as exc:  # noqa: BLE001
+                if _is_transport_loss(exc):
+                    raise
+                got = f"<read-back raised: {safe_exc(exc, repr_form=True)}>"
+            if not _sample_ok(got, f"S_{size}x{size}"):
+                return ("envelope", _ac.error_envelope(
+                    "get_mtf", "sampling_not_applied",
+                    f"post-run: sample_size {size} was requested but reads back {got!r}",
+                    requested=size))
         # Completion canary (§d): zero series is a void result.
         if n <= 0:
             extra = {"messages": messages}
             if messages_unread:
                 extra["engine_messages_unread"] = True
-            return _ac.error_envelope(
+            return ("envelope", _ac.error_envelope(
                 "get_mtf", "analysis_empty",
                 f"FFT MTF produced {n} data series"
                 + (f"; engine messages: {messages}" if messages else ""),
                 **extra,
-            )
+            ))
 
         dl_series, dl_shown, dl_note = _diffraction_limit_binding(results, dl_turned_on)
 
@@ -449,16 +624,16 @@ def _get_mtf_at(session, params):
                 freq, tangential, sagittal, mismatch = _series_xy(
                     ds, i, " (X/Y arrays misaligned)")
             except AnalysisResultError as exc:
-                return _ac.error_envelope(
+                return ("envelope", _ac.error_envelope(
                     "get_mtf", exc.family, str(exc), series_index=i,
-                )
+                ))
             if mismatch is not None:
                 # Frequency count != modulation row count: frequency[i] no longer
                 # pairs with tangential[i]. A wrong-number-as-success the canary
                 # must intercept (BUG2/BUG3).
-                return _ac.error_envelope(
+                return ("envelope", _ac.error_envelope(
                     "get_mtf", "analysis_malformed", mismatch, series_index=i,
-                )
+                ))
             if at_frequencies is not None:
                 # SUMMARY MODE: interpolate T/S at each requested frequency and OMIT
                 # the full freq/tangential/sagittal arrays (the ~300-point overflow).
@@ -533,18 +708,11 @@ def _get_mtf_at(session, params):
     # false is the honest "tried to extend, engine didn't accept it" disclosure.
     if max_frequency_auto_extended:
         result["max_frequency_auto_extended"] = True
-    # A collimated (afocal) output: flag it and redirect to the angular tools. The detector
-    # traces rays through the tool slot, so it is skipped (and said so) while that slot is
-    # latched; the MTF answer itself is never refused or nulled for this. Adds keys ONLY when
-    # it fires, so a normal imager's key set is unchanged.
-    if _wedge_recorded(session):
-        result["flags"] = [_COLLIMATED_CHECK_SKIPPED_MSG]
-    else:
-        collimated_flags = _col.collimated_flags(system)
-        if collimated_flags:
-            result["collimated_output"] = True
-            result["flags"] = collimated_flags
-    return result
+    default_size = _token_size(default_token)
+    meta = {"size": size if size is not None else default_size,
+            "default_token": default_token, "default_size": default_size,
+            "too_low": None if messages_unread else any(_SAMPLING_TOO_LOW in m for m in messages)}
+    return ("ok", result, meta)
 
 
 GET_MTF_SPEC = ToolSpec(
@@ -555,6 +723,8 @@ GET_MTF_SPEC = ToolSpec(
         "series": "integer",
         "max_frequency": "number",
         "at_frequencies": "array",
+        # one of 64/128/256/512 (the ToolSpec has no enum field; named in the description)
+        "sample_size": "integer",
         # config is SINGLE-config only (None|int); 'all' is refused. Advertised "number".
         "config": "number",
     },
@@ -577,7 +747,9 @@ GET_MTF_SPEC = ToolSpec(
         "obscured pupil, not the full circle (a central CircularObscuration "
         "min_radius=0, max_radius=R plus an outer CircularAperture forms the "
         "annulus). On a collimated (afocal) output the result carries collimated_output + a flag. "
-        "messages holds the engine's own messages verbatim (e.g. 'Sampling too low, data inaccurate!')."
+        "messages holds the engine's own messages verbatim (e.g. 'Sampling too low, data inaccurate!'). "
+        "sample_size (64/128/256/512): FFT sampling; omitted, the engine default is used and raised "
+        "automatically when the engine reports 'Sampling too low'; sampling reports what was used."
     ),
 )
 

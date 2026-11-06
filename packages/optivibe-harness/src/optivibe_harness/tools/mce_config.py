@@ -40,6 +40,7 @@ from ..errors import SurfaceWriteError, ToolParamError
 from ..server import ToolSpec
 from . import _mce_catalog as _cat
 from . import _mce_cells as _mc
+from . import _mce_merit_guard as _guard
 from ._analysis_common import error_envelope
 
 # Family tokens (§6, D11) — STRING constants attached via error_envelope (D10).
@@ -50,6 +51,39 @@ _MCE_CELL = "mce_cell"                            # _mce_cells DataType/accessor
 _CONFIG_RECONCILE = "config_reconcile"            # INVARIANT-1: the fresh-handle re-read drop
 _MCE_VARIABLE = "mce_variable"                    # a phantom DOF (Variable but count unchanged)
 _MCE_VARIABLE_INT = "mce_variable_integer_cell"   # a Variable solve on an Integer/String cell
+_MCE_MERIT_GUARD = _guard.MCE_MERIT_GUARD         # the leading-CONF insert corrupted the merit
+
+
+def _apply_merit_guard(system, result, tool, landed):
+    """Run the leading-CONF guard after a successful MCE authoring step; stamp the result.
+
+    A multi-config merit with an MCE row and no leading ``CONF`` loses its LAST row on the
+    next evaluation. The two MCE tools do not
+    evaluate the merit themselves, so they refuse only on a CONFIRMED corrupting change
+    (``readback_mismatch``); every other non-clean status stays ``ok: true`` with a warning.
+    ``landed`` is the tool's own landed state, carried on the refusal so a caller does not
+    retry a change that is NOT rolled back.
+    """
+    guard = _guard.ensure_leading_conf(system)
+    status = guard["status"]
+    if status == _guard.READBACK_MISMATCH:
+        return error_envelope(
+            tool, _MCE_MERIT_GUARD,
+            f"the leading-CONF insert changed the merit function unexpectedly "
+            f"({guard['n_operands_before']} -> {guard['n_operands_after']} rows; "
+            f"{guard.get('detail')}). This tool's own change already landed and is NOT "
+            "rolled back; do not retry it. Inspect the merit with dump_merit_function "
+            "before trusting it",
+            merit_conf_guard=guard, **landed,
+        )
+    result["merit_conf_guard"] = guard
+    if status in (_guard.SAVE_FAILED, _guard.INSERT_NO_EFFECT, _guard.UNREADABLE):
+        result["warning"] = (
+            "a merit evaluation on this lens can delete the merit's last row (the leading "
+            f"CONF could not be confirmed: {status}); run set_config_variable or save the "
+            "lens before evaluating"
+        )
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -168,13 +202,17 @@ def _add_configuration_impl(session, params):
             "a config that was not added)",
             field="number_of_configurations", intended=before + 1, actual=after,
         )
-    return {
+    result = {
         "ok": True,
         "configuration_index": after,        # the new (1-based) config index
         "number_of_configurations": after,
         "seeded_from_prior": bool(seed),
         "current_configuration": _mc.current_configuration(system),
     }
+    return _apply_merit_guard(
+        system, result, "add_configuration",
+        {"configuration_index": after, "number_of_configurations": after},
+    )
 
 
 # =========================================================================== #
@@ -366,7 +404,7 @@ def _set_config_operand_impl(session, params):
         _remove_orphan(system, op)
         raise
 
-    return {
+    result = {
         "ok": True,
         "operand": operand,
         "row": row,
@@ -379,6 +417,7 @@ def _set_config_operand_impl(session, params):
         "n_configs": _mc.number_of_configurations(system),
         "type_readback": type_readback,
     }
+    return _apply_merit_guard(system, result, "set_config_operand", {"row": row})
 
 
 def _remove_orphan(system, op):
