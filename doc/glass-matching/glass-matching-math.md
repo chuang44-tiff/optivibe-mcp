@@ -162,7 +162,8 @@ Catalogue values of $\Delta P$ cannot be mixed between manufacturers, because ea
 line through different reference glasses: Schott through K7 and F2,<sup>3</sup> HOYA through C7 and
 F2,<sup>7</sup> and OHARA through NSL7 and PBM2.<sup>8</sup> The tools therefore compute $P$ and $\Delta P$
 from each glass's dispersion formula against one stated line. A catalogue's own $\Delta P$ is served
-beside them (`delta_pg_f`, read verbatim from the `.agf`) for reference, and no computation uses it.
+beside them (`delta_pg_f`, from the `.agf`, stored as null where its magnitude exceeds 0.1) for reference;
+`find_glasses` can filter and sort on that stored value, and no $P$ or $\Delta P$ the tools compute uses it.
 
 ### 3.4 Worked example
 

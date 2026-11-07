@@ -547,7 +547,8 @@ def _compose_efl_family(session, plan):
         tol = _zs._DEFAULT_TOL[mode]
 
     # Author the per-config THIC row ONCE (S1 handler — INVARIANT-1 on writes, D6).
-    row = _author_thic_row(session, gap_surface)
+    guard_notes = []   # the conjugate object-gap row's leading-CONF warning (non-mismatch)
+    row = _author_thic_row(session, gap_surface, guard_notes)
 
     per_config = []
     independent_values = []
@@ -673,7 +674,7 @@ def _compose_efl_family(session, plan):
     # check on each authored distance.
     is_focus_back_dist = (mode == "focus" and plan.get("back_distances") is not None)
 
-    warnings = []
+    warnings = list(guard_notes)
     if is_focus_back_dist:
         # DIRECT-AUTHORING read-back — no independent gate (it would read the driven THIC).
         ind_status = "direct_authoring_readback"
@@ -1055,15 +1056,16 @@ def _compose_array_body(session, plan):
     positions = plan["positions"]
 
     authored = []
+    guard_notes = []   # the leading-CONF guard's non-mismatch warnings from the row authoring
     row_dx = row_dy = row_z = None
     if plan["wants_dx"]:
-        row_dx = _author_element_row(session, "CADX", first - 1)
+        row_dx = _author_element_row(session, "CADX", first - 1, guard_notes)
         authored.append("CADX")
     if plan["wants_dy"]:
-        row_dy = _author_element_row(session, "CADY", first - 1)
+        row_dy = _author_element_row(session, "CADY", first - 1, guard_notes)
         authored.append("CADY")
     if plan["wants_z"]:
-        row_z = _author_element_row(session, "THIC", plan["z_gap"])
+        row_z = _author_element_row(session, "THIC", plan["z_gap"], guard_notes)
         authored.append("THIC")
 
     # Author the per-config placement values (DIRECT — no solve).
@@ -1208,6 +1210,7 @@ def _compose_array_body(session, plan):
         "index_shift": None,
         "checkpoint": None,
         "rolled_back": False,
+        "warnings": list(guard_notes),
         "warning": (
             "each channel images at a DIFFERENT plane unless you ALSO author a per-config "
             "back-focus (mode=focus) — the placement relocates the element but does NOT "
@@ -1248,7 +1251,7 @@ def _image_shift(image_landing_vec):
 # --------------------------------------------------------------------------- #
 # S1-handler delegation helpers (every cell write goes through the S1 primitive, D6).
 # --------------------------------------------------------------------------- #
-def _author_thic_row(session, gap_surface):
+def _author_thic_row(session, gap_surface, notes=None):
     """Author the per-config THIC row for the EFL family -> the row handle (raise on refusal).
 
     Delegates to S1 ``set_config_operand`` (D6) for an interior gap. The CONJUGATE object
@@ -1261,11 +1264,11 @@ def _author_thic_row(session, gap_surface):
     surface-firewall vs the §3.5 OBJECT-0-for-conjugate allowance.
     """
     if gap_surface == 0:
-        return _author_object_gap_thic_row(session)
-    return _author_row(session, "THIC", gap_surface)
+        return _author_object_gap_thic_row(session, notes)
+    return _author_row(session, "THIC", gap_surface, notes)
 
 
-def _author_object_gap_thic_row(session):
+def _author_object_gap_thic_row(session, notes=None):
     """Author a THIC MCE row on the OBJECT gap (surface 0) directly (conjugate only).
 
     The S1 ``set_config_operand`` refuses OBJECT 0; the conjugate object-distance gap IS
@@ -1296,15 +1299,40 @@ def _author_object_gap_thic_row(session):
         except Exception:  # noqa: BLE001 — best-effort orphan removal
             pass
         raise
+    # This direct authoring bypasses set_config_operand, so run the leading-CONF guard here
+    #. A confirmed corrupting insert rolls the
+    # compose back. Any other non-clean status appends the section 3 warning to ``notes``
+    # (the caller folds it into the compose result's ``warnings``).
+    from . import _mce_merit_guard as _guard
+    guard = _guard.ensure_leading_conf(system)
+    if notes is not None and guard["status"] in (
+            _guard.SAVE_FAILED, _guard.INSERT_NO_EFFECT, _guard.UNREADABLE):
+        notes.append(
+            "a merit evaluation on this lens can delete the merit's last row (the leading "
+            f"CONF could not be confirmed: {guard['status']}); run set_config_variable or "
+            "save the lens before evaluating"
+        )
+    if guard["status"] == _guard.READBACK_MISMATCH:
+        raise SurfaceWriteError(
+            "the leading-CONF insert after authoring the object-gap THIC row changed the "
+            f"merit function unexpectedly ({guard['n_operands_before']} -> "
+            f"{guard['n_operands_after']} rows; {guard.get('detail')}); rolling back rather "
+            "than shipping a corrupted merit",
+            field="merit_conf_guard", intended="CONF insert", actual=guard["status"],
+            surface=0,
+        )
     return row
 
 
-def _author_element_row(session, operand, surface):
-    """S1 set_config_operand(operand, surface=...) -> the row handle (raise on refusal)."""
-    return _author_row(session, operand, surface)
+def _author_element_row(session, operand, surface, notes=None):
+    """S1 set_config_operand(operand, surface=...) -> the row handle (raise on refusal).
+
+    ``notes`` collects the leading-CONF guard's non-mismatch warning (array mode).
+    """
+    return _author_row(session, operand, surface, notes)
 
 
-def _author_row(session, operand, surface):
+def _author_row(session, operand, surface, notes=None):
     res = _mce.set_config_operand(session, {"operand": operand, "surface": surface})
     if not (isinstance(res, dict) and res.get("ok") is True):
         fam = res.get("error_family") if isinstance(res, dict) else None
@@ -1315,6 +1343,8 @@ def _author_row(session, operand, surface):
             "half-compose",
             field="set_config_operand", intended=operand, actual=fam, surface=surface,
         )
+    if notes is not None and res.get("warning"):
+        notes.append(res["warning"])  # the leading-CONF guard's warning (non-mismatch)
     return res["row"]
 
 

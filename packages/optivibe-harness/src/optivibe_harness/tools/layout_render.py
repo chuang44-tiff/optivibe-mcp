@@ -1002,44 +1002,9 @@ def _read_all_geometry(lde, n, system=None):
     return rows, degraded
 
 
-def _glass_groups(rows, n, optical_indices):
-    """Walk consecutive glass surfaces into cemented GROUPS.
-
-    Returns a list of groups; each group is a list of consecutive surface indices
-    that draw as ONE connected body. A singlet is its own one-element group. A
-    surface ``i+1`` joins the running group iff ``is_cemented_interface(rows, i+1)``
-    (both bounding media real glass) — so the doublet (surf 2/3/4)
-    is ONE group while air-separated elements are separate groups.
-
-    A glass element spans surface ``i`` (front cap) to ``i+1`` (back cap); the group
-    therefore extends one surface PAST the last glass surface to close the body.
-    """
-    groups = []
-    i = 0
-    optical_set = set(optical_indices)
-    while i < n:
-        r = rows[i]
-        is_glass = (
-            not _geom._is_mirror(r["material"])
-            and not _geom._is_coordinate_break(r["type_name"])
-            and not _geom._is_air_material(r["material"])
-        )
-        if not is_glass:
-            i += 1
-            continue
-        # Start a group at the first glass surface; absorb cemented continuations.
-        group = [i]
-        j = i + 1
-        while j < n and rows[j] is not None and _geom.is_cemented_interface(rows, j):
-            group.append(j)
-            j += 1
-        # The back cap is the surface AFTER the last glass surface in the group.
-        back = j
-        if back < n:
-            group.append(back)
-        groups.append([g for g in group])
-        i = j  # the next element starts at the back cap (which may be air or glass)
-    return groups
+# Promoted VERBATIM into ``_layout_geometry.glass_groups`` (tolerance hotspots share it);
+# the alias keeps every call site and every test that names ``_glass_groups`` unchanged.
+_glass_groups = _geom.glass_groups
 
 
 def _edge_sag(np, rows, i, half_height):

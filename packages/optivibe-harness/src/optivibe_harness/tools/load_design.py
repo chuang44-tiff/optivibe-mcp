@@ -503,6 +503,20 @@ def load_design(session, params):
                     )
                 load_verified = "geometry"
 
+        # SETTLE the freshly loaded system. Some legacy-format files load with
+        # a stale Automatic image semi-diameter that the engine's FIRST recompute rewrites
+        # (measured on 25.1), which a later tolerance run would then be blamed for. Done
+        # AFTER the verification above (so those proofs compare the raw load against the
+        # file) and BEFORE every later read-back. Guarded: a throw never fails a verified load.
+        settle_warning = None
+        try:
+            system.UpdateStatus()
+        except Exception as exc:  # noqa: BLE001 — the load is the deliverable
+            settle_warning = (
+                f"UpdateStatus() after the load faulted ({safe_exc(exc, repr_form=True)}); "
+                "the load itself succeeded but the system may not be settled"
+            )
+
         blessed_hint, _warn = _tc.classify_system_file(loaded_file)
 
         # (MCE) disclose the active config + the config count AFTER the
@@ -535,6 +549,8 @@ def load_design(session, params):
             "inherited_variables": inherited,
             "n_inherited_variables": n_inherited,
         }
+        if settle_warning is not None:
+            result["settle_warning"] = settle_warning
         if n_inherited is None:
             result["inherited_variables_warning"] = (
                 "could not enumerate the inherited optimizer variables after the load "

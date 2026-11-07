@@ -37,8 +37,8 @@ install.
 
 ## Demos
 
-Each demo ships its brief, the agent's stage log, the starting lens and the result lens, with a
-script that re-measures them: see [demos/](demos/README.md).
+Each demo ships its brief and its lens files, and the agent's stage log where one is included;
+[demos/](demos/README.md) lists them and has a script that re-measures a lens file.
 
 [An agent reworks a 60× objective into a 10× / NA 0.45 apochromat, unattended](demos/walk-in-10x/README.md)
 One run with no human in the loop produced a 10× / NA 0.45 objective with a polychromatic Strehl ratio of 0.935 or
@@ -63,6 +63,11 @@ On the 10× / NA 0.45 apochromat all three agent runs reached a lower merit than
 better at every field, changing 3 to 5 of 14 glasses to Hammer's 10. On the 20× / NA 0.70 objective both agent
 runs kept the on-axis target that Hammer's lens fails; one also beat Hammer's merit and every field, with its last
 glass change made by hand. The page lists the limits.
+
+[An agent desensitizes a finished 10× objective so more built lenses pass](demos/tolerance-desensitize/README.md)
+On a 10× / NA 0.45 apochromat with every glass locked, three unattended runs raised the share of simulated builds
+that are diffraction-limited at every field from 57.50 % to 63.65–65.05 %. All three found the same lever, an
+angle-of-incidence ceiling on one surface, and paid up to 0.0018 waves of nominal wavefront for it.
 
 ## Prerequisites
 
@@ -186,7 +191,7 @@ claude mcp add optivibe -- C:/path/to/venv/Scripts/optivibe-mcp.exe
 
 ## Glass tools
 
-Once the optimizer has settled a lens, two tools help with the glass step. `explain_glass_swaps`
+Once the optimizer has settled a lens, three tools help with the glass step. `explain_glass_swaps`
 is read-only: it lists which glass elements carry the colour and Petzval terms. `trial_glass_swaps`
 tries up to four swap sets, each re-optimized beside an unchanged control, and judges them on
 measured image quality; it edits the open lens while it runs and restores it at the end.
@@ -260,6 +265,7 @@ The repository includes a few Claude Code skills for common tasks:
 | `design-aberration-review` | Read the ray fan and field curvature / distortion plots and report how the aberrations are balanced (advisory) |
 | `optimize-loop` | Run optimization with monitoring |
 | `design-glass-matching` | Choose glass for a settled lens: find the elements that carry the colour or field-curvature terms, trial swaps against a control, and keep a swap only when overall image quality improves |
+| `design-tolerance-desensitize` | The last finishing stage: pick the push compensator, find the tolerance hotspots, and keep a change only when the as-built yield improves |
 | `bench-catalog` | Benchmark and rank a folder of lens designs against a target spec or each other |
 | `zos-api-debug` | Troubleshoot OpticStudio connection / license errors |
 

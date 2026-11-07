@@ -380,6 +380,7 @@ def _from_rays_over_configs(session, params, config, taper):
     taper_passes = {}
     taper_restored = []
     restore_failed_any = False
+    guard_warnings = []
 
     for entry in entries:
         cfg = entry.get("config")
@@ -403,6 +404,9 @@ def _from_rays_over_configs(session, params, config, taper):
         fv_rows_authored.extend(entry.get("fv_rows") or [])
         fv_cells_skipped.extend(entry.get("fv_cells_skipped") or [])
         duplicate_fv_rows.extend(entry.get("duplicate_fv_rows") or [])
+        for gw in entry.get("guard_warnings") or []:
+            if gw not in guard_warnings:
+                guard_warnings.append(gw)
         tblock = entry.get("taper") or {}
         if tblock.get("applied"):
             for fld, p in (tblock.get("passes") or {}).items():
@@ -469,6 +473,7 @@ def _from_rays_over_configs(session, params, config, taper):
         # FIX 1: surface the config=int silent-switch no-op (the requested config was not
         # reached — the grade ran at the active config instead).
         warnings.append(switch_warning)
+    warnings.extend(guard_warnings)  # the leading-CONF guard's non-clean status
     if restore_failed_any:
         warnings.append(
             "taper_restore_failed: a cap-fail field's baseline restore did not read back; "
@@ -501,13 +506,15 @@ def _grade_one_config(session, system, k, n_configs, taper):
     fv_rows = []
     fv_cells_skipped = []
     duplicate_fv_rows = []
+    guard_notes = []   # the leading-CONF guard's non-clean warnings from FV row authoring
     single_config = n_configs <= 1
 
     # 2. author the NON-ZERO factors into config k's per-config FV MCE cells (multi-config
     # only — a single-config system's global IField factors suffice, no MCE rows, Axis 2).
     if not single_config:
         for row in factors:
-            fr, sk, du = _author_config_factors(session, system, k, row, row["field"])
+            fr, sk, du = _author_config_factors(
+                session, system, k, row, row["field"], guard_notes)
             fv_rows.extend(fr)
             fv_cells_skipped.extend(sk)
             duplicate_fv_rows.extend(du)
@@ -533,7 +540,7 @@ def _grade_one_config(session, system, k, n_configs, taper):
             and f["traced_fraction"] < 1.0
         ]
         for field in clipped:
-            tr = _taper_config(session, system, k, field)
+            tr = _taper_config(session, system, k, field, guard_notes)
             taper_block["passes"][field] = tr["passes"]
             if tr["skipped"]:
                 taper_block["skipped"].append(field)
@@ -572,12 +579,13 @@ def _grade_one_config(session, system, k, n_configs, taper):
         "validation": validation,
         "taper": taper_block,
         "single_config": single_config,
+        "guard_warnings": guard_notes,
         "_residual_reasons": residual_reasons,
         "_residual_final_factors": residual_final_factors,
     }
 
 
-def _author_config_factors(session, system, k, factors_row, field):
+def _author_config_factors(session, system, k, factors_row, field, notes=None):
     """Author the NON-ZERO FV factors of one field into config ``k`` (dedup + solve-skip).
 
     Returns ``(fv_rows, fv_cells_skipped, duplicate_fv_rows)``. For each factor with
@@ -595,10 +603,11 @@ def _author_config_factors(session, system, k, factors_row, field):
         if abs(float(value)) <= _FV_AUTHOR_TOL:
             continue  # the non-zero footprint gate (a clean control authors nothing)
         token = _FACTOR_TOKEN[key]
-        op, row, dup_rows = _find_or_author_fv_row(session, system, token, field)
+        op, row, dup_rows = _find_or_author_fv_row(session, system, token, field, notes)
         if dup_rows:
-            # Write-first + DISCLOSE, never auto-delete (adjudicated by-design).
-            # Auto-remove/merge is deferred.
+            # Write-first + DISCLOSE, never auto-delete (locked Axis 6-iv;
+            # adjudicated by-design). Auto-remove/merge is deferred — see
+
             dups.append({"token": token, "field": field, "rows": [row] + dup_rows})
         cell = _mc.operand_cell(system, op, k)
         solve = _mc.solve_type_name(cell)
@@ -620,7 +629,7 @@ def _author_config_factors(session, system, k, factors_row, field):
     return fv_rows, skipped, dups
 
 
-def _find_or_author_fv_row(session, system, token, field):
+def _find_or_author_fv_row(session, system, token, field, notes=None):
     """Find the existing FV ``(token, field)`` row, else author it ONCE (Axis 6).
 
     Enumerate ``range(1, MCE.NumberOfOperands+1)``; a row matches iff ``_operand_code(op)
@@ -629,7 +638,9 @@ def _find_or_author_fv_row(session, system, token, field):
     ``(op, row, duplicate_rows)`` (the FIRST match; extra matches are DISCLOSED, never
     auto-deleted). NOT found -> author via the shipped ``set_config_operand(operand=token,
     field=field)`` (``field -> Param1=field-1``, ``selects_field``-gated, transactional).
-    An author refusal -> ``_VIG_FAMILY`` (fail-closed).
+    An author refusal -> ``_VIG_FAMILY`` (fail-closed). ``notes`` (a list) collects the
+    leading-CONF guard's non-clean ``warning`` that ``set_config_operand`` returns on a
+    successful authoring (the envelope's ``warning`` surfaces it; it was dropped before).
     """
     matches = []
     n = int(system.MCE.NumberOfOperands)
@@ -648,6 +659,8 @@ def _find_or_author_fv_row(session, system, token, field):
             "shipping an unverified per-config vignetting factor",
             field=f"{token}_field_{field}",
         )
+    if notes is not None and res.get("warning"):
+        notes.append(res["warning"])  # the leading-CONF guard's warning (non-mismatch)
     row = res["row"]
     op = system.MCE.GetOperandAt(row)
     return op, row, []
@@ -703,7 +716,7 @@ def _read_cell_safe(system, op, k):
         return None
 
 
-def _taper_config(session, system, k, field):
+def _taper_config(session, system, k, field, notes=None):
     """Symmetric VCX+VCY monotone compression for ONE clipped ``(config, field)`` (Axis 1/4).
 
     Direction-agnostic (the validator returns only aggregate ``n/9``, so a symmetric tighten
@@ -719,9 +732,10 @@ def _taper_config(session, system, k, field):
     # FVCX/FVCY row CREATED here on-demand by the taper — that taper-authored row is NOT
     # merged into the envelope's fv_rows_authored (which lists only non-zero-from_rays rows).
     # Left as-is: threading + de-duping the taper's rows against _author_config_factors' rows
-    # materially complicates the taper for a LOW nicety.
-    op_x, row_x, _dx = _find_or_author_fv_row(session, system, "FVCX", field)
-    op_y, row_y, _dy = _find_or_author_fv_row(session, system, "FVCY", field)
+    # materially complicates the taper for a LOW nicety. See
+    # (Related gap).
+    op_x, row_x, _dx = _find_or_author_fv_row(session, system, "FVCX", field, notes)
+    op_y, row_y, _dy = _find_or_author_fv_row(session, system, "FVCY", field, notes)
     cell_x = _mc.operand_cell(system, op_x, k)
     cell_y = _mc.operand_cell(system, op_y, k)
     if _mc.solve_type_name(cell_x) != "Fixed" or _mc.solve_type_name(cell_y) != "Fixed":

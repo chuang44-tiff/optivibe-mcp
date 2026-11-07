@@ -2,12 +2,79 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.2.1`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.2.2`). Each tag points at the merge
 commit that published that version, and every tag was verified against the version literals
 in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.2] — 2026-11-06
+
+`tolerance` grows into a tolerancing family: it drives the engine's tolerance wizard, says which
+parts of the lens the error budget comes from, picks a lateral-push compensator, scores yield, and
+can desensitize a design. The tool count is unchanged.
+
+### Added
+
+- **The `design-tolerance-desensitize` skill**, the last finishing stage after `optimize-loop` and
+  `design-glass-matching`. It fixes an as-built judge, picks the push compensator with
+  `pick_push`, works through the tolerance hotspots one lever at a time, and keeps a change only
+  when a 200-trial Monte Carlo against the start lens shows the yield improved.
+- **A desensitize demo.** [demos/tolerance-desensitize](demos/tolerance-desensitize/README.md):
+  on a finished 10× / NA 0.45 apochromat with every glass locked, three unattended runs of the
+  skill raised the share of builds diffraction-limited at every field from 57.50 % to
+  63.65–65.05 % (2000-trial Monte Carlo), for up to 0.0018 waves of nominal wavefront.
+- **`tolerance(budget=...)` drives the engine's tolerance wizard** with element decenter and tilt
+  (`vendor`, `grade`, `element_decenter`, `element_tilt`). `criterion` picks `"wavefront"`,
+  `"spot"` or `"merit"`; `compensator` picks `"paraxial"` (back focus) or `"dls"` (a back-focus
+  compensator optimized for up to 3 cycles). Every successful result carries a `run_summary`.
+- **Sensitivity results name the hotspots** (`hotspots[]`): elements, cemented groups and air
+  gaps, keyed by surface range, with each one's share of the error budget from the engine's own
+  root-sum-square. The list is withheld, with the reason, whenever the coverage is not provably
+  complete.
+- **Group compensators for Monte Carlo.** `compensator="dls_cb_group"` with
+  `cb_group={group, decenter_mm, tilt_deg}` lets a lens group decenter (and tilt) to compensate;
+  `compensator="dls_cb_tilt"` with `cb_tilt={group, range_deg}` lets it tilt. `run_summary.cb_group`
+  reports how many trials ended at a push limit, per axis.
+- **`tolerance(mode="pick_push")` picks the group to push.** It runs a sensitivity, shortlists up
+  to three groups, judges each with a time-capped 200-trial Monte Carlo, ranks them by yield (by the
+  90th percentile when no `threshold` is given), and returns the call for a 2000-trial judge of the winner. Each candidate carries its numbers, or
+  the reason it was not judged.
+- **Plain `monte_carlo` scores yield against a `threshold`** you pass: a `yield` block with the
+  pass count, the 90th percentile and the failure rule used (with a group compensator, a trial at
+  a push limit counts as a fail).
+- **`tolerance(mode="desensitize")`** reruns the design's own optimization against perturbed
+  copies of its worst hotspot, then reruns the sensitivity, so the result can be compared with
+  the start. It changes the prescription by design and refuses a lens with no variables.
+- **`get_mtf(sample_size=...)`** sets the FFT MTF sampling (64 to 512). When it is omitted and
+  the engine reports that the sampling is too low, the tool reruns at the next size until the
+  message stops, and the `sampling` block says what was used.
+- **Progress notifications during long calls.** Tool calls run on one engine thread, and while a
+  call runs the server sends a progress notification every 60 s to a client that asked for them,
+  so a long optimization or tolerancing run is not dropped for being silent.
+
+### Changed
+
+- **Plain `monte_carlo` runs under a time cap**: 10 s per trial plus 60 s, or `cap_s` if you
+  give one. A run that hits the cap is refused as capped, with no statistics, and the lens is left
+  as it was.
+- **The default tolerance sampling is 4** (was 2), and the field mode is reset to the engine
+  default on each call.
+- **`load_design` settles the system after loading**, so the first analysis after a load reads
+  the same as later ones. A fault there adds `settle_warning`; the load still succeeds.
+
+### Fixed
+
+- **A merit-criterion tolerancing run refuses a merit with DMFS when the tolerances move
+  elements** (`merit_dmfs_with_element_tolerances`). With that combination the engine adds a fixed
+  block to every trial, so the result was inflated or flattered.
+- **On a multi-configuration lens, evaluating the merit no longer deletes its last row.** The
+  configuration tools, `build_merit` and `set_zoom` insert the leading configuration row first
+  and check it took.
+- **`build_merit` writes the reference it reports** (centroid) for spot and wavefront merits,
+  instead of keeping a reference left over from an earlier build; `criterion_operands` lists the
+  image-quality rows it wrote.
 
 ## [0.2.1] — 2026-10-26
 
@@ -502,6 +569,7 @@ A housekeeping release: no new tools.
 
 - Initial public release of optivibe-mcp.
 
+[0.2.2]: ../../compare/v0.2.1...v0.2.2
 [0.2.1]: ../../compare/v0.2.0...v0.2.1
 [0.2.0]: ../../compare/v0.1.18...v0.2.0
 [0.1.18]: ../../compare/v0.1.17...v0.1.18

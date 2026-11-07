@@ -14,6 +14,7 @@ lenses and the script that measures a lens file the way the pages do.
 | [vision-ab](vision-ab/README.md) | [brief-vision.md](vision-ab/brief-vision.md), [brief-numbers-only.md](vision-ab/brief-numbers-only.md) | none was written | 60× seed | `vision-ab/result_lens-a.zmx` to `result_lens-f.zmx` |
 | [glass-picking](glass-picking/README.md), 10× | [brief-glass-ab.md](glass-picking/10x/brief-glass-ab.md) | not included | `glass-picking/10x/result_10x-form-step.zmx` | `glass-picking/10x/result_10x-agent-run1.zmx`, `result_10x-agent-run2.zmx`, `result_10x-agent-run3.zmx`; Hammer: `result_10x-hammer.zmx` |
 | [glass-picking](glass-picking/README.md), 20× | [brief-glass-ab.md](glass-picking/20x/brief-glass-ab.md) | not included | `glass-picking/20x/result_20x-start.zmx` | `glass-picking/20x/result_20x-agent-run1.zmx`, `result_20x-agent-run2.zmx`; Hammer: `result_20x-hammer.zmx` |
+| [tolerance-desensitize](tolerance-desensitize/README.md), 10× | [brief.md](tolerance-desensitize/10x/brief.md) | not included | `tolerance-desensitize/10x/result_10x-start.zmx` | `tolerance-desensitize/10x/result_10x-agent-run1.zmx`, `result_10x-agent-run2.zmx`, `result_10x-agent-run3.zmx`; judge merit: `judge_worstfield.MF` |
 
 The 60× seed is `seeds/seed_BEST_apo60x.zmx`. The zoom seed is `seeds/seed_BEST_zoom20x_pana5g.zmx`.
 
@@ -21,6 +22,7 @@ The 60× seed is `seeds/seed_BEST_apo60x.zmx`. The zoom seed is `seeds/seed_BEST
 
 Each brief is the text the agent received, with one difference: the line that named the lens file
 reads `{SEED}` here. In each run it was the full path of that run's own copy of the starting lens.
+The tolerance-desensitize brief has two further edits, which its page lists.
 
 ## The stage logs
 
