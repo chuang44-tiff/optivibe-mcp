@@ -56,7 +56,7 @@ skill and its demo move to it. Refusals now say what to do next. The tool count 
   references with the rows, so they were never at risk.
 - **A very large integer argument** is refused in the tool's own error family instead of raising.
 - **A thickness scan** reports a negative gap it cannot convert, instead of passing it.
-- **`check_clearance`** does not apply the minimum glass thickness to flat plates.
+- **`check_clearance`** does not apply the minimum glass thickness to flat plates in an unfolded lens.
 - **Teardown:** the desensitize optimizer's time cap now proves the optimizer stopped before it edits the lens, and a
   group-compensator run retries clearing its tolerance rows before it removes the group.
 - **A licence that reads invalid** names a missing `WINDIR` in the server's environment as the likely cause.
