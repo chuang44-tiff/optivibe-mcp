@@ -37,7 +37,7 @@ from ..errors import OptimizeError, ToolParamError
 from ..server import ToolSpec
 from . import _config_common as _ccfg
 from . import _fold_gaps as _fg
-from . import _hammer_timed as _ht  # timed Hammer run (cycle-safe: imports optimize_run only late)
+from . import _disclosure_tails as _dt, _hammer_timed as _ht  # _ht: timed Hammer run (cycle-safe: imports optimize_run only late); _dt: disclosures on failing tails (imports this module lazily)
 from . import _grin_index_common as _gic  # GRIN — cycle-safe (never imports optimize_run)
 from . import _optimize_common as _oc
 from . import _run_budget as _rb  # cycle-safe (never imports optimize_run)
@@ -89,20 +89,16 @@ def dry_run(session, params):
     too (the caller learns the problem WITHOUT opening the optimizer);
     ``require_free_stop`` (default True) gates it.
 
-    **"THE KEY IS PRESENT, NEVER OMITTED" WAS TOO WIDE AND IS NARROWED (round 5, P-2).**
-    It holds ON THE ``ok:True`` TAIL ONLY. If the scan faults and a LATER dry_run gate
-    then refuses, the key is ABSENT — measured, with a transient MFE fault arriving after
-    the preflight's ``NumberOfOperands`` read:
-
-    - per-config-thin (:150): ``ok False``, ``optimize_per_config_thin``, no ``ready``,
-      **no ``negative_weight_scan_fault``**;
-    - inert-DOF (:157): ``ok False``, ``optimize_inert_dof``, same silence;
-    - a bad param (``require_free_stop`` non-bool) raises ``OptimizeError`` out of this
-      handler BEFORE the scan runs, so there is nothing to disclose and nothing is.
-
-    This is the same scope as its sibling ``_negative_weight_disclosure``, whose docstring
-    WAS narrowed in round 4 while this one was left — the leave-the-sibling pattern. The
-    two now say the same thing.
+    **THE FAULT KEY RIDES THE REFUSALS TOO (0.2.3 batch 2, lane C).** It was narrowed in round 5
+    (P-2) to the ``ok:True`` tail because a LATER gate's refusal returned without it. That scope
+    is closed: every ``dry_run`` refusal that follows the preflight -- stop vertex,
+    ``merit_uncomputable``, ``no_variables`` / ``no_merit``, negative weight, per-config-thin,
+    inert-DOF -- now goes through ``_disclosure_tails.ride``, which adds
+    ``negative_weight_scan_fault`` / ``unestablished_weight_rows`` and the malformed-range lint
+    (``malformed_ranges``) WITHOUT overwriting a key the refusal already carries. Cost: a
+    refusal that precedes the negative-weight scan pays its scans there. Still outside it: a bad
+    param (``require_free_stop`` non-bool) raises ``OptimizeError`` out of this handler BEFORE any
+    scan runs, so there is nothing to disclose and nothing is.
 
     BREAKING CHANGE: ``dry_run`` REFUSES a stop on a glass vertex by
     DEFAULT (``require_free_stop=True``) — it returns the
@@ -140,12 +136,12 @@ def dry_run(session, params):
     )
     if not ok:
         if family == "stop_on_glass_vertex":
-            return _stop_vertex_envelope("dry_run", stop_idx, stop_material)
+            return _dt.ride(_stop_vertex_envelope("dry_run", stop_idx, stop_material), system)
         if family == "merit_uncomputable":
             # Agent-facing consistency (§2a): dry_run reports the SAME full name as
             # optimize (`optimize_merit_uncomputable`), mirroring the stop-vertex
             # special-case. NON-MUTATING — no optimizer opened, no `ready` key.
-            return _oc.error_envelope(
+            return _dt.ride(_oc.error_envelope(
                 "dry_run",
                 "optimize_merit_uncomputable",
                 _gate_message("merit_uncomputable", variables, number_of_operands, merit),
@@ -156,15 +152,15 @@ def dry_run(session, params):
                 # all rows read cleanly WHILE 9e9, optimizer NOT open). Spread as
                 # ONE additive key (or {} on any fault -> today's payload; never collides).
                 **_oc._uncomputable_row_diagnostics(system),
-            )
-        return _oc.error_envelope(
+            ), system)
+        return _dt.ride(_oc.error_envelope(
             "dry_run",
             family,
             _gate_message(family, variables, number_of_operands, merit),
             variables=variables,
             number_of_operands=number_of_operands,
             merit=safe_float(merit),
-        )
+        ), system)
     # The negative-weight gate, FIRST of the post-preflight gates. dry_run's own thin
     # block does NOT mutate -- it only scans and refuses; the nudge exists solely in
     # optimize, and the ordering here mirrors it so the two doors refuse in the same
@@ -175,20 +171,20 @@ def dry_run(session, params):
     # less. Ordering here is about the mutation boundary, never about cost.
     nw = _oc._scan_negative_weights(system)
     if nw["offenders"]:
-        return _negative_weight_envelope("dry_run", nw)
+        return _dt.ride(_negative_weight_envelope("dry_run", nw), system, nw)
     # the per-config THIC<=0 gate (DISJOINT family optimize_per_config_thin),
     # AFTER the _preflight ok-pass, via the ONE shared predicate. Runs even under
     # require_free_stop=False (independent of the stop gate). NON-MUTATING.
     thin = _oc._scan_per_config_thin(system)
     if thin:
-        return _per_config_thin_envelope("dry_run", thin)
+        return _dt.ride(_per_config_thin_envelope("dry_run", thin), system, nw)
     # the inert-DOF gate (DISJOINT family optimize_inert_dof), AFTER the
     # per-config-thin block via the ONE shared predicate. An air<->air radius/conic Variable
     # is a zero-merit-sensitivity DOF (the curved-stop silent-wrong) — refuse so the agent
     # learns the problem WITHOUT opening the optimizer. Runs even under require_free_stop=False.
     inert = _oc._scan_inert_dofs(system)
     if inert:
-        return _inert_dof_envelope("dry_run", inert)
+        return _dt.ride(_inert_dof_envelope("dry_run", inert), system, nw)
     # MCE: disclose the merit's config span so the agent preflights it
     # BEFORE running (NEVER a refusal). A single-config merit over a multi-config
     # system gets the merit_single_config WARN.
@@ -423,7 +419,9 @@ def _per_config_thin_envelope(tool, offenders, nudged=None, un_nudgeable=None):
     neither).
     """
     parts = ", ".join(
-        f"surface {o.get('surface')} config {o.get('config')} = {o.get('value')!r}"
+        f"surface {o.get('surface')} config {o.get('config')} = "
+        # 0.2.3: a negative integer too large for a float has no float to print (value None).
+        f"{'a negative integer too large for a float' if o.get('value') is None else repr(o.get('value'))}"
         for o in offenders
     )
     extra = {}
@@ -552,40 +550,26 @@ def _negative_weight_envelope(tool, scan):
 def _negative_weight_disclosure(scan, warning):
     """``(merged_warning, additive_keys)`` for the NON-refusing halves of the gate.
 
-    REACHED ONLY ON A SUCCESS TAIL, and that bounds what the fail-open guarantee can
-    claim. If the scan faults and a LATER gate then refuses -- per-config-thin, inert
-    DOF, a bad parameter -- the returned envelope carries neither the fault record nor
-    the unestablished count, and reads exactly like a merit with nothing to disclose.
-    Measured, not inferred.
+    REACHED ON THE SUCCESS TAILS DIRECTLY AND ON THE FAILING TAILS THROUGH
+    ``_disclosure_tails.ride`` (0.2.3 batch 2, lane C, owner decision row 3).
 
-    **THE "BOUNDED, NOT A HOLE" DISPOSITION WAS WRONG, AND IS WITHDRAWN (round 5, P-1).**
-    This paragraph used to argue that the loss was bounded because *"on those paths a
-    LATER gate refused, so nothing ran unmeasured -- the optimizer is never opened"*, and
-    concluded that the honest claim was *"never silent on a path that PROCEEDS"*. Both
-    halves are false, measured on ``optimize`` with a transient MFE fault arriving AFTER
-    the preflight's ``NumberOfOperands`` read (so the scan faults) :
+    History, kept because the first version of this paragraph was wrong twice. It argued the
+    loss was bounded because *"on those paths a LATER gate refused, so nothing ran unmeasured --
+    the optimizer is never opened"*; that was withdrawn in round 5 (P-1), measured on
+    ``optimize`` with a transient MFE fault arriving AFTER the preflight's ``NumberOfOperands``
+    read: the ``optimize_run_failed`` tail had ``open_count`` 1 / ``run_count`` 1 (the optimizer
+    OPENED and cycles EXECUTED with the weight check unrun) and the envelope was silent, and the
+    ``opt.IsValid``-False tail was silent with the optimizer opened. The behaviour is now fixed:
 
-    - ``optimize_run_failed`` tail (``Succeeded`` False): ``ok`` False, ``open_count``
-      **1**, ``run_count`` **1** -- the optimizer was OPENED and cycles EXECUTED with the
-      weight check unrun -- and ``negative_weight_scan_fault`` is ABSENT, with
-      ``warning`` ``None``. No key, no sentence.
-    - ``optimize_merit_uncomputable`` tail (``opt.IsValid`` False): ``ok`` False,
-      ``open_count`` **1**, ``run_count`` 0 -- so no cycles here, but the optimizer WAS
-      opened, which is the clause the old text leaned on. Same silence.
+    - the two post-open failure tails (DLS and Hammer: ``optimize_run_failed`` and
+      ``optimize_merit_uncomputable``) carry THIS scan's result, captured before the run, on the
+      same key names as the success tails. They run NO fresh scan (post-open MFE readability is
+      unproven);
+    - the earlier refusals (preflight gates, stop vertex, negative weight, per-config-thin,
+      inert-DOF) carry it too, plus the malformed-range lint.
 
-    So the loss is not confined to paths that refused before opening. What is true, and
-    all that is true, is the SCOPE: **the disclosure rides the SUCCESS tails only.** The
-    ``optimize_run_failed`` and ``opt.IsValid``-False tails return their error envelope
-    without ever calling this helper, and are silent about the unrun check even though
-    the run reached the engine. Fixing that means threading the scan into those two tails;
-    this module is at its locked size budget (948/948 statements) and the fix needs more,
-    so it is FILED (see ticket) rather than done here. A caller who needs the
-    guarantee on a failing run must read ``dry_run`` first.
-
-    (An earlier version of this paragraph argued from the fault sentence's old wording,
-    "the run was allowed to proceed unchecked". That wording was itself corrected --
-    ``dry_run`` opens no optimizer, so no run proceeds there either -- and a rationale
-    quoting a deleted sentence is worth less than no rationale.)
+    NOT covered: an ``OptimizeError`` raised after the scans (a bad ``cycles`` value) leaves
+    through ``optimize()``'s outer catch, where the scan result is out of reach.
 
     Both keys are ABSENT when the scan completed with nothing to say, so a clean call's
     payload is byte-identical to today's. On a TOTAL scan fault the fault RECORD rides
@@ -639,6 +623,7 @@ def _malformed_range_finding(system, warning):
     """``(merged_warning, additive_keys)`` for the malformed-range linter.
 
     ONE call shape for all three preflight/tail sites (no drifting copy). The
+    tails reach it through ``_disclosure_tails.ride`` as well as the success tails. The
     human sentence merges into the existing ``warning`` channel; the structured finding
     gets its OWN key, because ``_merge_warning``'s ``"; "`` join is LOSSY and a finding
     carrying row numbers, surfaces and tiers does not survive an unsplittable string.
@@ -662,7 +647,7 @@ def _malformed_range_finding(system, warning):
     The bare SENTENCE also rides its own key,
     ``malformed_range_warning`` -- the key ``build_merit`` has served since an earlier release -- on all
     three doors here, so the four doors agree on the KEY; the merge into ``warning`` is
-    KEPT (the three preflight doors own that channel). Present exactly when
+    KEPT (the preflight doors, and 0.2.3's failing tails via ``ride``, share that channel). Present exactly when
     ``malformed_ranges`` is: the scanner's sentence is non-None iff its record is
     (measured at the sentence builder's three append sites and the fault shape).
 
@@ -1072,12 +1057,12 @@ def _optimize_impl(session, params):
         # else refuse, opening NOTHING (the §6.4 envelope; consistent with the
         # no_variables/no_merit short-circuit — ZERO optimizers opened, no reap).
         if not auto_normalize:
-            return _stop_vertex_envelope("optimize", stop_idx, stop_material)
+            return _dt.ride(_stop_vertex_envelope("optimize", stop_idx, stop_material), system)
         normalize_result = _auto_normalize(session, params)
         if not normalize_result.get("ok", False):
             # The refactor failed-closed (e.g. normalize_no_airspace) -> re-tag as
             # optimize_stop_unfixable, still opening NOTHING.
-            return _oc.error_envelope(
+            return _dt.ride(_oc.error_envelope(
                 "optimize",
                 "optimize_stop_unfixable",
                 "auto_normalize could not make the stop free-standing: "
@@ -1085,7 +1070,7 @@ def _optimize_impl(session, params):
                 stop_surface=stop_idx,
                 stop_material=stop_material,
                 normalize_error_family=normalize_result.get("error_family"),
-            )
+            ), system)
         guard_warning = (
             f"auto_normalize refactored the stop ({normalize_result.get('action')}) "
             "before optimizing"
@@ -1106,13 +1091,15 @@ def _optimize_impl(session, params):
     if not ok:
         # the failing-row enumeration rides ONLY the merit_uncomputable gate
         # (CONFIRMED readable — same offline pre-open state as dry_run). GATED on the family
-        # so the bare no_variables/no_merit gates stay bare (never a stray key on a healthy
-        # structural refusal). {} on any fault -> today's payload.
+        # so the diagnostic key is never stray on a no_variables/no_merit refusal. 0.2.3: ANY
+        # refusal here can still gain the scan-disclosure keys through ``_dt.ride`` below
+        # (a no_merit refusal over a malformed merit now carries ``malformed_ranges``).
+        # {} on any fault -> today's payload.
         extra = (
             _oc._uncomputable_row_diagnostics(system)
             if family == "merit_uncomputable" else {}
         )
-        return _oc.error_envelope(
+        return _dt.ride(_oc.error_envelope(
             "optimize",
             f"optimize_{family}",
             _gate_message(family, variables, number_of_operands, merit_pre),
@@ -1120,7 +1107,7 @@ def _optimize_impl(session, params):
             number_of_operands=number_of_operands,
             merit=safe_float(merit_pre),
             **extra,
-        )
+        ), system)
 
     # (1b) the per-config THIC<=0 gate (DISJOINT optimize_per_config_thin),
     # AFTER the preflight ok-pass and BEFORE opening (or reaping) anything — the ONE
@@ -1147,18 +1134,18 @@ def _optimize_impl(session, params):
     # the qualifier is false and a reader would rely on it.
     nw = _oc._scan_negative_weights(system)
     if nw["offenders"]:
-        return _negative_weight_envelope("optimize", nw)
+        return _dt.ride(_negative_weight_envelope("optimize", nw), system, nw)
     nudge_disclosure = None
     thin = _oc._scan_per_config_thin(system)
     if thin:
         if not recover_thin:
-            return _per_config_thin_envelope("optimize", thin)
+            return _dt.ride(_per_config_thin_envelope("optimize", thin), system, nw)
         nudged, un_nudgeable = _oc._nudge_per_config_thin(system, thin)
         thin2 = _oc._scan_per_config_thin(system)
         if thin2:
-            return _per_config_thin_envelope(
+            return _dt.ride(_per_config_thin_envelope(
                 "optimize", thin2, nudged=nudged, un_nudgeable=un_nudgeable
-            )
+            ), system, nw)
         nudge_disclosure = (nudged, un_nudgeable)
 
     # (1c) the inert-DOF gate (DISJOINT optimize_inert_dof), AFTER the
@@ -1168,7 +1155,7 @@ def _optimize_impl(session, params):
     # curved-stop silent-wrong) rather than open and drift it. optimize opens NOTHING here.
     inert = _oc._scan_inert_dofs(system)
     if inert:
-        return _inert_dof_envelope("optimize", inert)
+        return _dt.ride(_inert_dof_envelope("optimize", inert), system, nw)
 
     # (2) validate the run params (before opening) — bad value -> optimize_param.
     cycles = _require_pos_int(params, "cycles", _DEFAULT_CYCLES)
@@ -1322,7 +1309,7 @@ def _optimize_impl(session, params):
             # family to opaque `internal`. _safe_error_message owns EVERY failure mode ->
             # a non-empty str (no trailing `or` to re-expose a __bool__-raising proxy).
             err_msg = _safe_error_message(opt, "the merit function cannot be evaluated")
-            return _oc.error_envelope(
+            return _dt.ride(_oc.error_envelope(
                 "optimize",
                 "optimize_merit_uncomputable",
                 _merit_uncomputable_run_message(err_msg),
@@ -1334,7 +1321,7 @@ def _optimize_impl(session, params):
                 # envelope ships without it. Non-mutating; the optimizer is still reaped by
                 # _optimizer_session's finally (return-inside-with).
                 **_oc._uncomputable_row_diagnostics(system),
-            )
+            ), None, nw)
 
         # The optimizer's OWN starting merit — the consistent-source baseline for the
         # verdict. Cross-check it against the MFE before-read (equal). If they
@@ -1365,14 +1352,14 @@ def _optimize_impl(session, params):
                 err_msg = (run_detail if run_state == "failed"
                            else _safe_error_message(opt, "run failed"))
                 # The finally in _optimizer_session still Close()s the optimizer.
-                return _oc.error_envelope(
+                return _dt.ride(_oc.error_envelope(
                     "optimize",
                     "optimize_run_failed",
                     str(err_msg),
                     run_id=run_id,
                     passes=passes_run,
                     artifacts=artifact_trail,
-                )
+                ), None, nw)
 
             opt_current = opt.CurrentMeritFunction
             after_row = _snapshot(
@@ -1679,7 +1666,7 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
                     err_msg = _safe_error_message(
                         ham, "the merit function cannot be evaluated"
                     )
-                    return _oc.error_envelope(
+                    return _dt.ride(_oc.error_envelope(
                         "optimize", "optimize_merit_uncomputable",
                         _merit_uncomputable_run_message(err_msg),
                         run_id=run_id, passes=0, artifacts=artifact_trail,
@@ -1687,7 +1674,7 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
                         # yet called). Attach the enumeration if readable, else {}; reaped by
                         # the outer finally either way.
                         **_oc._uncomputable_row_diagnostics(system),
-                    )
+                    ), None, negative_weight_scan)
                 ok = (ham.RunAndWaitForCompletion() if timed is None   # -> True commits to the live LDE
                       else timed.run(ham, run_time_m))
                 # A timed run reads Succeeded True after a Cancel, so it is not a gate there.
@@ -1731,10 +1718,10 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
                     "mutated — reload your last saved .zmx"
                 )
             msg = run_failed_msg or "hammer run failed"
-            return _oc.error_envelope(
+            return _dt.ride(_oc.error_envelope(
                 "optimize", "optimize_run_failed", f"{msg} ({restore_note})",
                 run_id=run_id, passes=0, artifacts=artifact_trail,
-            )
+            ), None, negative_weight_scan)
         # NEVER return worse than entry. Restore on a WORSE result EVEN when
         # classify_verdict bins it "stable" (within tol), OR on a NON-FINITE result — NOT
         # merely verdict=="diverged" (which misses a marginally-worse-but-stable result).

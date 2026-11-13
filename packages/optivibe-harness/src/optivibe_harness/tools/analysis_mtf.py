@@ -749,7 +749,11 @@ GET_MTF_SPEC = ToolSpec(
         "annulus). On a collimated (afocal) output the result carries collimated_output + a flag. "
         "messages holds the engine's own messages verbatim (e.g. 'Sampling too low, data inaccurate!'). "
         "sample_size (64/128/256/512): FFT sampling; omitted, the engine default is used and raised "
-        "automatically when the engine reports 'Sampling too low'; sampling reports what was used."
+        "automatically when the engine reports 'Sampling too low'; sampling reports what was used. "
+        "series: one series index (default all). config: one config index ('all' refused); the "
+        "result has config_evaluated (+ mutation_warning if the restore is unverified). "
+        "at_frequencies above the default grid with no max_frequency auto-raise the ceiling (cap "
+        "2000 cyc/mm; max_frequency_auto_extended); max_frequency_applied says whether a ceiling took."
     ),
 )
 

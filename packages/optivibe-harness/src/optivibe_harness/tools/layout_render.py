@@ -5672,8 +5672,7 @@ RENDER_LAYOUT_SPEC = ToolSpec(
                  "renderer": "string"},
     description=(
         "Draws the lens layout PNG: a SCRATCH drawing, NOT the reviewable figure "
-        "(record_findings refuses it as finding_figure_unbound); review ITS paired PNG "
-        "from save_candidate, the one png_sha256 binds. No path: a new numbered scratch "
+        "(record_findings refuses this digest as finding_figure_unbound); review save_candidate's paired PNG, whose png_sha256 binds. No path: a new numbered scratch "
         "file each call (minted:true). "
         "renderer picks who draws the picture: 'native' (OpticStudio's own "
         "cross-section, axial systems only; it cannot draw any coordinate break, even "

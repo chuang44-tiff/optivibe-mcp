@@ -196,6 +196,28 @@ class SolveRefsRefusalError(ToolParamError):
     error_family = "solve_refs_refused"
 
 
+class SolveEnumUnresolvedError(ToolParamError):
+    """The ``SolveType`` enum could not be imported from ``ZOSAPI.Editors`` (0.2.3).
+
+    An ENVIRONMENT fault: the caller's parameters may be perfectly valid, and the remedy
+    is to repair or escalate the OpticStudio / ZOS-API environment, not to rewrite the
+    call. ``tool_param`` means *your parameters are malformed*, which an automated caller
+    answers by retrying with different parameters, so this fault wears its own family.
+
+    **IT SUBCLASSES ``ToolParamError`` DELIBERATELY** (owner decision, 0.2.3 batch 2,
+    row 2), the same shape as ``SolveRefsRefusalError``: only ``error_family`` is
+    overridden, there is no ``__init__``, and ``except ToolParamError`` sites keep
+    catching it. ``freeze_semi``'s inner ``except ToolParamError: raise`` therefore keeps
+    this family on the ``set_solve`` / ``clear_solve`` doors. SolveType only: the ~15
+    sibling enum-import sites keep ``tool_param``.
+
+    As with ``SolveRefsRefusalError``, there is no registry of error families to update;
+    the family is the string on the wire.
+    """
+
+    error_family = "engine_enum_unresolved"
+
+
 class SurfaceWriteError(ToolError):
     """A typed LDE/SystemData write did NOT take effect (read-back mismatch).
 

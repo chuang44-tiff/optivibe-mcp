@@ -197,6 +197,13 @@ def _completeness_score(row):
     )
 
 
+# The ONE pair-eligibility predicate (SQL over the glass table). find_glass_pair's pool, its anchor
+# resolution, _glass_common.pairable_catalogs and the harness doctor's anchor probe all read THIS.
+# Consumed BY NAME by the harness doctor (optivibe_doctor/_worker.py); renaming it makes the
+# doctor's find_glass_pair probe UNKNOWN.
+PAIR_ELIGIBLE_SQL = "vd IS NOT NULL AND pg_f IS NOT NULL AND nd_valid = 1 AND pg_f_valid = 1"
+
+
 def assert_glass_provenance_invariants(rows):
     """Assert the §6 value<->flag parity over the catalog rows (never disagree).
 

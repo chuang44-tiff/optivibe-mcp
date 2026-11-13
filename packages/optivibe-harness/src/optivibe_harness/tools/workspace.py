@@ -1648,12 +1648,138 @@ def _figure_scoreable(render_keys):
         return None
 
 
+class _FormUnreadable(Exception):
+    """A form read that cannot be trusted; its text becomes ``form_error``."""
+
+
+def _form_number(value, what):
+    """``value`` as a plain finite ``float`` (a bool, a non-number or a non-finite -> refuse)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _FormUnreadable(f"{what} is not a number")
+    out = float(value)
+    if not math.isfinite(out):
+        raise _FormUnreadable(f"{what} is not finite")
+    return out
+
+
+def _form_glass_surfaces(system):
+    """``[(surface, thickness_mm)]`` for every glass surface of the ACTIVE configuration.
+
+    Glass is a surface whose material is neither air (``""`` / the CB placeholder ``"-"``)
+    nor MIRROR; surfaces ``1..N-2`` (object and image excluded), numbered as the LDE.
+    """
+    from ._layout_geometry import _is_air_material, _is_mirror
+    from ._merit_cells import _base_token
+
+    lde = system.LDE
+    out = []
+    for i in range(1, int(lde.NumberOfSurfaces) - 1):
+        row = lde.GetSurfaceAt(i)
+        token = _base_token(row.Material or "").strip()
+        if _is_air_material(token) or _is_mirror(token):
+            continue
+        out.append((i, _form_number(row.Thickness, f"surface {i} thickness")))
+    return out
+
+
+def _read_lens_form(session):
+    """The lens form of the live system -> ``(form_or_None, error_or_None)``. NEVER raises.
+
+    Worst (largest) TOTR and the thickest single glass over EVERY configuration, each with
+    the configuration it came from. The current configuration is restored and the restore
+    verified (an unverified restore, or a switch that did not take, refuses the whole read:
+    a number attributed to the wrong configuration is worse than none). Lens units must be
+    mm. A ``None`` TOTR in any configuration refuses the whole read rather than taking the
+    worst of the readable subset.
+    """
+    try:
+        from . import _config_common as _cc
+        from ._analysis_common import _lens_units_string
+        from .scale_lens import _read_scalar
+
+        system = session.system
+        units = _lens_units_string(system)
+        if units != "mm":
+            raise _FormUnreadable(f"lens units are {units}, not mm")
+        n = _cc._strict_count_or_one(system)
+        track = None
+        track_cfg = None
+        thick = None
+        for k in range(1, n + 1):
+            with _cc.with_configuration(system, k) as ctx:
+                switched_ok = ctx["switched"] or k == ctx["config_entry"]
+                if switched_ok:
+                    totr = _read_scalar(system, "TOTR")
+                    glass = _form_glass_surfaces(system)
+            if not ctx["restore_verified"]:
+                raise _FormUnreadable(
+                    f"the active configuration was not restored after reading config {k}")
+            if not switched_ok:
+                raise _FormUnreadable(f"could not switch to configuration {k}")
+            if totr is None:
+                raise _FormUnreadable(f"TOTR unreadable in configuration {k}")
+            if track is None or totr > track:
+                track, track_cfg = totr, k
+            for surface, thickness in glass:
+                if thick is None or thickness > thick["thickness_mm"]:
+                    thick = {"surface": surface, "thickness_mm": thickness, "config": k}
+        if thick is None:
+            raise _FormUnreadable("no glass surface found")
+        return {
+            "total_track_mm": float(track),
+            "total_track_config": int(track_cfg),
+            "thickest_glass": thick,
+        }, None
+    except Exception as exc:  # noqa: BLE001 - the form read must never sink a save
+        return None, _exc_text(exc)
+
+
+def _form_vs_seq_001(zmx_dir, design_name, seq, form):
+    """``(vs_seq_001_or_None, reason_or_None)`` for ``form`` against this design's seq 001 row.
+
+    The baseline is read from the manifest on disk (survives a restart), never from this
+    process. NEVER raises.
+    """
+    try:
+        if seq == 1:
+            return None, "this is seq 001"
+        rows, _state = _read_audit_records_design(zmx_dir, design_names=[design_name])
+        first = [r for r in rows if _exact_int(r.get("seq")) and r.get("seq") == 1]
+        if len(first) != 1:
+            return None, "seq 001 record unreadable"
+        base = first[0].get("form")
+        if not isinstance(base, dict):
+            return None, "seq 001 has no form record (saved before this change)"
+        base_track = _form_number(base.get("total_track_mm"), "seq 001 total_track_mm")
+        base_thick = _form_number(
+            (base.get("thickest_glass") or {}).get("thickness_mm"),
+            "seq 001 thickest glass")
+        return {
+            "total_track_delta_mm": form["total_track_mm"] - base_track,
+            "thickest_glass_delta_mm": form["thickest_glass"]["thickness_mm"] - base_thick,
+        }, None
+    except Exception:  # noqa: BLE001 - a baseline fault is a disclosure, never a failure
+        return None, "seq 001 record unreadable"
+
+
+def _form_block(session, zmx_dir, design_name, seq):
+    """``(form_or_None, form_error_or_None)``: the whole ``form`` block. NEVER raises."""
+    form, error = _read_lens_form(session)
+    if form is None:
+        return None, error
+    vs, reason = _form_vs_seq_001(zmx_dir, design_name, seq, form)
+    form["vs_seq_001"] = vs
+    if vs is None:
+        form["vs_seq_001_reason"] = reason
+    return form, None
+
+
 def _write_audit_record(zmx_dir, *, seq, design_name, filename, zmx_sha256,
                         png_filename, png_sha256, active_configuration,
                         verdict, scope, summary, min_air, min_glass,
                         scorecard=None, scorecard_failure=None,
                         parent=None, parent_source="undeclared",
-                        figure_scoreable=None):
+                        figure_scoreable=None, form=None):
     """Append ONE ``candidate_audit`` row to ``<zmx_dir>/manifest.jsonl``.
 
     Returns ``"written"`` or ``"not_written:<reason>"``. NEVER raises.
@@ -1685,6 +1811,9 @@ def _write_audit_record(zmx_dir, *, seq, design_name, filename, zmx_sha256,
             # established it, so a row from a caller that did not stays as it was.
             **({} if figure_scoreable is None
                else {"figure_scoreable": figure_scoreable}),
+            # 0.2.3 item 9: the lens form beside the bytes it measured; written only
+            # when the read succeeded, so a failed read leaves the row as it was.
+            **({} if form is None else {"form": form}),
             # DECLARED lineage, written UNCONDITIONALLY: both keys are written on
             # EVERY row from this release onward, contracted or not, so an uncontracted
             # design gets lineage too and there is no second sidecar file to keep
@@ -4851,6 +4980,11 @@ def save_candidate(session, params):
             read_active_config=lambda: _active_configuration(session),
             n_configs=_configuration_count(session),
         )
+    # 0.2.3 item 9: the lens FORM (track + thickest glass, worst over configurations, and
+    # its change since this design's seq 001). Read AFTER the png digest, the restore
+    # proof and the scorecard are taken, so a failed or slow read cannot change any of
+    # them; it is NEVER load-bearing (``form: null`` + ``form_error`` on any fault).
+    form, form_error = _form_block(session, _audit_dir, design_name, seq)
     # CONTRACTED is the disjunction of the two non-trivial outcomes: a card, or a
     # failure. The not-applicable triple is all-None, and on it nothing below fires —
     # which is what keeps an uncontracted save byte-identical to today.
@@ -4921,6 +5055,7 @@ def save_candidate(session, params):
             parent=parent,
             parent_source=parent_source,
             figure_scoreable=_figure_scoreable(_render_keys),
+            form=form,
         )
 
     # V-INT Part 2 — the JUDGMENT row, beside the exact bytes it judges.
@@ -5201,6 +5336,9 @@ def save_candidate(session, params):
         # trusts it by presence alone.
         **_render_keys,
         "audit_record": audit_record,        # "written" | "not_written:<reason>"
+        # 0.2.3 item 9: the lens form, or null with ``form_error`` (never fails the save).
+        "form": form,
+        **({"form_error": form_error} if form is None else {}),
         # V-INT Part 2 — ABSENT ENTIRELY when no judgment was requested, so a call that
         # records nothing gains no key and stays byte-identical to today. That is the
         # same construction ``_scorecard_key`` and ``_lineage_key`` use below, and it is
@@ -6391,9 +6529,7 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "also starts at 001; the envelope key seq carries that per-design index and "
         "name_scheme reads 'v2'. label defaults to the literal 'candidate' and is "
         "sanitized for the filesystem — label_sanitized:true says yours was changed. "
-        "The workspace root is set ONCE at MCP launch from OPTIVIBE_WORKSPACE_ROOT "
-        "(else the launch cwd; a relative value is made absolute against the launch "
-        "cwd) and is echoed as workspace_root; no tool takes a path "
+        "workspace_root echoes where files go (fixed at launch); no tool takes a path "
         "argument. SaveAs also writes a .ZDA companion beside the .zmx — the engine's "
         "own state file, not part of the design: it is deleted after a successful save, "
         "zda_present reads the state afterwards, only a companion this save produced is deleted "
@@ -6409,14 +6545,17 @@ SAVE_CANDIDATE_SPEC = ToolSpec(
         "false + clearance_warning, tunable via min_air/min_glass), or clearance_ok:null "
         "when the gate could not CERTIFY clearance (a FOLDED system is one such cause; "
         "clearance_summary.coverage_reason names WHICH), or when no figure was "
-        "rendered (visual_check_warning) — review before promoting. Records that verdict "
+        "rendered (visual_check_warning) — review before promoting. "
+        "form: total_track_mm and the thickest glass, worst over configurations, with the change since this design's seq 001 (vs_seq_001). "
+        "Records that verdict "
         "beside the bytes it measured (artifact_sha256 / png_sha256 / audit_record) so a "
         "later promote_best of THIS seq can report a verdict about THESE bytes instead of "
         "about whatever is loaded then. Returns the saved Zemax file path under zmx_path; "
         "use that value for persistence/read-back. "
         "png_sha256 names the REVIEWABLE figure: a vision judgement is recorded "
-        "against it via record_findings, and a render_layout PNG is NOT reviewable on "
-        "the record — that picture is scratch and its digest is refused there "
+        "against it via record_findings, which binds a finding to the digest you pass "
+        "and cannot check which picture you looked at; a render_layout PNG is scratch, "
+        "its digest is never on a candidate's row, so passing it is refused "
         "(finding_figure_unbound). When a figure was rendered the envelope also carries "
         "that render's own facts about THESE bytes — surface_labels, n_surfaces, "
         "stop_label, figure_disclosures, disclosures_truncated (how many disclosure boxes the canvas could not fit: "

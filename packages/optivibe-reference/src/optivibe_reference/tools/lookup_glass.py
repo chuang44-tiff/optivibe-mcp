@@ -37,7 +37,7 @@ from ..errors import ToolParamError
 from ..glass_build import in_band
 from ..glass_dispersion import index_at
 from ..server import ToolSpec
-from ._glass_common import normalize_catalog
+from ._glass_common import ambiguous_message, candidate_entry, normalize_catalog
 
 _TOOL = "lookup_glass"
 
@@ -187,12 +187,14 @@ def lookup_glass(db_conn, params):
     # Multi-catalog collision with no catalog disambiguation -> NEVER a silent
     # vendor pick; return the candidate list (§7 / D).
     if catalog is None and len(rows) > 1:
+        ds = [_row_to_dict(r) for r in rows]
         candidates = [
-            {"catalog": r[0], "name": r[1]} for r in rows
+            candidate_entry(d["catalog"], d["name"], d["vd"], d["pg_f_valid"], d["nd_valid"])
+            for d in ds
         ]
         return error_envelope(
             _TOOL, "ambiguous_glass",
-            "name resolves in multiple catalogs; pass a catalog",
+            ambiguous_message("name", len(candidates), "catalog"),
             name=name, candidates=candidates, candidate_count=len(candidates),
         )
 

@@ -32,7 +32,7 @@ in-band value are returned.
 THE ΔPg,F CAVEAT: ``delta_pg_f`` comes from the ``.agf`` (ED token 4) and is
 UNVALIDATED vendor data. ``build_glass_db`` stores a value whose magnitude is beyond
 ``glass_build.DELTA_PG_F_LIMIT`` (0.1) as NULL (the probe saw values down to -81.0),
-so such a row cannot match a ``delta_pg_f`` window and sorts last. A window matches on
+so such a row cannot match a ``delta_pg_f`` window, and it is never a sort key (``sort=delta_pg_f`` is refused). A window matches on
 the stored value, and the result carries
 ``delta_pg_f_unvalidated: True`` so the caller knows the trustworthy
 partial-dispersion quantity is the COMPUTED ``pg_f`` (with its ``pg_f_valid``
@@ -130,7 +130,12 @@ _WINDOW_FIELDS = (
 
 # The caller may order the matches by any window field.
 # The SQL column comes from this fixed tuple, never from the caller's text.
-_SORT_FIELDS = ("vd", "nd", "pg_f", "delta_pg_f", "pg_f_anomaly")
+_SORT_FIELDS = ("vd", "nd", "pg_f", "pg_f_anomaly")
+_REFUSED_SORT_MSG = (
+    "sort=delta_pg_f is refused: delta_pg_f is unvalidated .agf vendor data. "
+    "sort=pg_f_anomaly ranks on the computed pg_f minus the normal line; "
+    "a delta_pg_f_min/delta_pg_f_max window still filters"
+)
 _DEFAULT_SORT = "vd"
 _ORDERS = ("ascending", "descending")
 
@@ -138,6 +143,8 @@ _ORDERS = ("ascending", "descending")
 def _resolve_sort(params):
     """Resolve ``(sort, order)``; default ``("vd", "ascending")``, the order of a call without ``sort``."""
     sort = params.get("sort", _DEFAULT_SORT)
+    if sort == "delta_pg_f":
+        raise ToolParamError(_REFUSED_SORT_MSG)
     if not isinstance(sort, str) or sort not in _SORT_FIELDS:
         raise ToolParamError(
             f"'sort' must be one of {', '.join(_SORT_FIELDS)}; got {sort!r}"
@@ -440,8 +447,8 @@ FIND_GLASSES_SPEC = ToolSpec(
         "known non-lens kinds are left out: exclude lists the kinds to leave out "
         "(liquid, adhesive, plastic, gas, birefringent, other), the result counts "
         "them in left_out, and exclude=\"\" searches every row. "
-        "Matches are ordered by sort (vd, nd, pg_f or delta_pg_f; default vd, "
-        "order=descending reverses; sort=pg_f_anomaly ranks by pg_f minus the normal line "
+        "Matches are ordered by sort (vd, nd, pg_f or pg_f_anomaly; default vd, "
+        "order=descending reverses; delta_pg_f is a window, never a sort; pg_f_anomaly ranks by pg_f minus the normal line "
         "0.6438 - 0.001682*vd, null when either is null, window pg_f_anomaly_min/max; a "
         "truncated list carries truncated_note saying what is hidden and how to see it) and cut at limit; matched counts the glasses in the "
         "window that are not left out, after copies are removed (left_out, screened_out and unknown_kept count before removal), so truncated means only the first limit of matched are listed. Gotcha: a glass whose computed "

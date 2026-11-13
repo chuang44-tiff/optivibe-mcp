@@ -187,11 +187,12 @@ def add_math_constraint(session, params):
         # a phrase is not a live enum member, so a query can never resolve here.
         try:
             _resolve_enum(enum_type, code)
-        except ToolParamError as exc:
+        except ToolParamError:
+            # No enum member dump; lookup_operand named only when the
+            # reference is importable.
             return _oc.error_envelope(
                 "add_math_constraint", "merit_math_unresolved",
-                f"operand[{index}] code {code!r} is not a known MeritOperandType: "
-                f"{exc}",
+                _grounding.unknown_operand_message(code, prefix=f"operand[{index}] code "),
                 index=index, code=code,
             )
 
@@ -204,21 +205,6 @@ def add_math_constraint(session, params):
                 index=index, code=code,
             )
 
-        # The sign_convention MUST be present (the agent READ it from lookup_operand —
-        # the tool cannot re-fetch it, §0). A null/missing convention -> unresolved (the
-        # §3 grid would REFUSE it anyway, but a MISSING convention is an unresolved
-        # intent, not a cross-family mismatch — distinguish the families, §7).
-        if "sign_convention" not in spec or _is_null_convention(spec.get("sign_convention")):
-            return _oc.error_envelope(
-                "add_math_constraint", "merit_math_unresolved",
-                f"operand[{index}] ({code}) has no usable 'sign_convention'; the agent "
-                "must supply the value it read from lookup_operand (a null/unknown "
-                "convention is refused — qualify the operand)",
-                index=index, code=code,
-            )
-
-        sign_convention = spec.get("sign_convention")
-
         # S-REF-3: the handler's OWN read of the reference, instead of believing the
         # relayed value. Fires ONLY when the catalog states a convention AND is
         # trustworthy; every other case is ``unavailable`` and leaves the pre-S-REF-3
@@ -230,11 +216,44 @@ def add_math_constraint(session, params):
         # step as guarded — leaving the one new call bare would make that promise false
         # about this cycle's own edit, which is the defect class S-REF-3 exists to fix.
         # A breached belt degrades to "no grounding", never to a broken dispatch.
+        # Read ONCE, BEFORE the missing-convention refusal, so that refusal
+        # can carry the value the handler already holds.
         try:
             g_status, reference_convention = _grounding.sign_convention_for(
                 code, engine_version)
         except Exception:  # noqa: BLE001 — see above; a grounding fault is never fatal
             g_status, reference_convention = _grounding.GROUNDING_UNAVAILABLE, None
+
+        # The sign_convention MUST be stated by the agent: the refusal stays so the
+        # cross-check grid still sees a RELAYED value and the S-REF-3 mismatch guard
+        # still fires on a wrong one. The handler CAN read the catalog in-process
+        #, so when the accessor answers OK the refusal NAMES that value
+        # (message + ``reference_sign_convention``) and the driver resubmits without a
+        # lookup_operand round trip; otherwise the message is the unchanged one. A
+        # null/missing convention -> unresolved (the cross-check grid would REFUSE it anyway, but
+        # a MISSING convention is an unresolved intent, not a cross-family mismatch —
+        # distinguish the families).
+        if "sign_convention" not in spec or _is_null_convention(spec.get("sign_convention")):
+            if (g_status == _grounding.GROUNDING_OK
+                    and isinstance(reference_convention, str) and reference_convention):
+                return _oc.error_envelope(
+                    "add_math_constraint", "merit_math_unresolved",
+                    f"operand[{index}] ({code}) has no 'sign_convention'; the "
+                    f"reference catalog states {reference_convention!r} for {code} "
+                    "— resubmit with it.",
+                    index=index, code=code,
+                    reference_sign_convention=reference_convention,
+                )
+            return _oc.error_envelope(
+                "add_math_constraint", "merit_math_unresolved",
+                f"operand[{index}] ({code}) has no usable 'sign_convention'; the agent "
+                "must supply the value it read from lookup_operand (a null/unknown "
+                "convention is refused — qualify the operand)",
+                index=index, code=code,
+            )
+
+        sign_convention = spec.get("sign_convention")
+
         if (g_status == _grounding.GROUNDING_OK
                 and reference_convention != sign_convention):
             return _oc.error_envelope(

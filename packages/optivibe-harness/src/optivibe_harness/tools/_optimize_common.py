@@ -1310,6 +1310,7 @@ def _scan_per_config_thin(system):
                 continue
             if not _cell_is_double(cell):
                 continue
+            raw = None   # per-iteration re-init: a stale ``raw`` must never fabricate an offender
             try:
                 # ROUND-7 -- THROUGH THE BASE SLOT. ``float(x)`` DISPATCHES
                 # ``__float__``, so a ``float`` SUBCLASS decided this GATE's own input.
@@ -1325,6 +1326,18 @@ def _scan_per_config_thin(system):
                 value = (float.__float__(raw) if isinstance(raw := cell.DoubleValue, float)
                          else float(int.__index__(raw)) if isinstance(raw, int)
                          and not isinstance(raw, bool) else float(raw))
+            except OverflowError:
+                # 0.2.3:
+                # an EXACT int too large for a float. Its sign reads fine off the base slot and
+                # the refusal predicate (<= 0) is decidable on the int, so a negative one is an
+                # OFFENDER (doubt = offender, like ``_safe_cell_value``'s fail-closed degrade),
+                # published as ``value: None`` -- never a fabricated float or a 401-digit int.
+                # A positive one, or any other shape (a getter that itself overflowed leaves
+                # ``raw`` None), keeps the skip. Must precede ``except Exception``.
+                if isinstance(raw, int) and not isinstance(raw, bool) and int.__index__(raw) <= 0:
+                    offenders.append({"row": row, "surface": surface, "config": cfg,
+                                      "value": None, "value_unrepresentable": True})
+                continue
             except Exception:  # noqa: BLE001 — an unreadable value contributes nothing
                 continue
             if not math.isfinite(value):
@@ -3725,6 +3738,13 @@ def _scan_malformed_ranges(system, last_surface=_UNSET_LAST_SURFACE):
     counters would invite the reader to treat one of them as clean. The docstring, the
     served sentence and this counter move together; a fork between them is the vocabulary
     defect this change has already paid for once.
+
+    0.2.3: the counter stays ONE aggregate, but the rows are no longer anonymous.
+    ``unclassified_rows`` (first 20; ``unclassified`` is the full count, so "and N more" is
+    ``unclassified - 20``) lists ``{"number", "reason"}`` with ``reason`` one of
+    ``range_state`` (the range cells did not classify), ``target_unreadable`` (SD-8) or
+    ``row_unreadable`` (the row itself threw). The reason is coarse: it does not say WHICH
+    header or cell failed.
     """
     stage = _SCAN_STAGE_MFE
     try:
@@ -3735,7 +3755,7 @@ def _scan_malformed_ranges(system, last_surface=_UNSET_LAST_SURFACE):
         if last_surface is _UNSET_LAST_SURFACE:
             last_surface = _resolve_last_surface(system)
         rows = []
-        unclassified = 0
+        unclassified_rows = []   # 0.2.3: {number, reason}; the count is len()
         structural_rows = 0
         # The tokens whose row answered NOT_APPLICABLE on THIS scan. Created here and
         # dead when the scan returns: never module-level, never on ``system``, never
@@ -3810,14 +3830,14 @@ def _scan_malformed_ranges(system, last_surface=_UNSET_LAST_SURFACE):
                 if state == RANGE_WELL_FORMED:
                     continue
                 if state == RANGE_UNCLASSIFIED:
-                    unclassified += 1
+                    unclassified_rows.append({"number": i, "reason": "range_state"})
                     continue
                 target, tstatus = _row_target_state(op)
                 if tstatus == TARGET_UNREADABLE:
                     # The row IS malformed, but the flag condition includes a
                     # strictly-positive Target and this read did not establish
                     # one. DISCLOSE it; do NOT flag on a partially-read row.
-                    unclassified += 1
+                    unclassified_rows.append({"number": i, "reason": "target_unreadable"})
                     continue
                 if tstatus == TARGET_NOT_POSITIVE:
                     continue          # a supported target-0 opt-out, not a finding
@@ -3834,7 +3854,7 @@ def _scan_malformed_ranges(system, last_surface=_UNSET_LAST_SURFACE):
                     ),
                 })
             except Exception:  # noqa: BLE001 — an unreadable row is DISCLOSED, never dropped
-                unclassified += 1
+                unclassified_rows.append({"number": i, "reason": "row_unreadable"})
                 continue
         # A scan whose DOMAIN could not be established is never
         # reported clean, INDEPENDENTLY of whether any row happened to be range-shaped.
@@ -3863,7 +3883,7 @@ def _scan_malformed_ranges(system, last_surface=_UNSET_LAST_SURFACE):
         # a heuristic for finding defects, not a defect.
         domain_established = isinstance(last_surface, int) and not isinstance(
             last_surface, bool)
-        if not rows and not unclassified and domain_established:
+        if not rows and not unclassified_rows and domain_established:
             return (None, None)        # clean AND fully read -> both keys ABSENT
         stage = _SCAN_STAGE_REPORT
         groups = _group_by_operand(rows)
@@ -3873,7 +3893,11 @@ def _scan_malformed_ranges(system, last_surface=_UNSET_LAST_SURFACE):
             "scan_completed": True,
             "by_operand": groups,      # the OVERVIEW — strong tier first, then count
             "rows": rows,              # the per-row detail, unchanged
-            "unclassified": unclassified,
+            "unclassified": len(unclassified_rows),
+            # 0.2.3 (...): WHICH rows and WHY, coarse reason
+            # (range_state | target_unreadable | row_unreadable), capped at 20; the full count
+            # above says how many the cap left out.
+            "unclassified_rows": unclassified_rows[:20],
             "structural_rows": structural_rows,
             "n_operands": n_ops,
             # NOTE THE HONESTY BOUNDARY: this says the DOMAIN was not established.
@@ -3883,7 +3907,7 @@ def _scan_malformed_ranges(system, last_surface=_UNSET_LAST_SURFACE):
             "domain_established": domain_established,
         }
         return (
-            _malformed_range_sentence(groups, rows, unclassified, domain_established),
+            _malformed_range_sentence(groups, rows, unclassified_rows, domain_established),
             structured,
         )
     except Exception as exc:  # noqa: BLE001 — advisory only; never break a successful call
@@ -3920,7 +3944,7 @@ def _group_by_operand(rows):
     )
 
 
-def _malformed_range_sentence(groups, rows, unclassified, domain_established):
+def _malformed_range_sentence(groups, rows, unclassified_rows, domain_established):
     """The one human sentence -- an OVERVIEW BY OPERAND, strongest claim first.
 
     The claim is STRUCTURAL and the wording is load-bearing: it says the cells cannot
@@ -4090,18 +4114,16 @@ def _malformed_range_sentence(groups, rows, unclassified, domain_established):
                 "what the operand does with an unaddressable range was NOT measured "
                 "here — treat the consequence as unestablished."
             )
-    if unclassified:
+    if unclassified_rows:
         # EXPLICITLY NON-EXHAUSTIVE. The old wording enumerated
-        # three causes and read as complete, but the per-row `except` also counts a row
-        # whose `GetOperandAt` or `TypeName` threw — a FOURTH cause the sentence claimed
-        # did not exist. An audit injected that fault and got the three-cause sentence back.
-        # Distinguishing the causes honestly would mean SPLITTING the counter, which the
-        # scanner's own docstring argues against ("splitting them into two counters would
-        # invite the reader to treat one of them as clean") — so the counter stays
-        # aggregated and the sentence stops pretending to enumerate.
+        # now NAMED (first 20, then "and N more") and each carries a coarse reason in the
+        # structured ``unclassified_rows``; the COUNTER stays one aggregate (splitting it would
+        # invite reading one cause as clean), and the sentence still does not enumerate causes.
         parts.append(
-            f"{unclassified} merit row(s) could not be established in a load-bearing "
-            "field (e.g. the range cells, the Target, the surface count, or the row "
+            f"{len(unclassified_rows)} merit row(s) could not be established in a load-bearing "
+            f"field (rows {', '.join(format(r['number'], 'd') for r in unclassified_rows[:20])}"
+            f"{f', and {len(unclassified_rows) - 20} more' if len(unclassified_rows) > 20 else ''}"
+            "; e.g. the range cells, the Target, the surface count, or the row "
             "itself failed to read) — they are reported as UNKNOWN, never as clean."
         )
     if not domain_established:

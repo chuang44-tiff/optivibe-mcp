@@ -61,7 +61,8 @@ DEGENERACY GUARDS:
   unordered pair of PHYSICAL glasses (both endpoints share identity) — a pair
   differing in either physical endpoint stays distinct.
 
-An anchored-but-no-partner or a global-but-none search is ``ok: True`` with an
+An anchor that can pair with nothing is refused ``anchor_no_dispersion``; an eligible anchor
+with no partner inside the windows, or a global-but-none search, is ``ok: True`` with an
 empty ``pairs`` list (a legitimately empty result, not an error).
 """
 import math
@@ -69,11 +70,15 @@ import math
 from .._envelope import error_envelope
 from ..errors import ToolParamError
 from ..server import ToolSpec
+from ..glass_build import PAIR_ELIGIBLE_SQL
 from ._glass_common import (
     _same_physical_glass,
+    ambiguous_message,
+    candidate_entry,
     check_catalogs_exist,
     normalize_catalog,
     normalize_catalogs,
+    pairable_catalogs,
 )
 from ._glass_kind import material_kind, parse_exclude
 
@@ -174,10 +179,7 @@ def _load_pair_eligible(db_conn, catalogs):
     gate, surfaced here so an out-of-band row never enters a pairing). Returns a
     list of ``(catalog, name, vd, pg_f, nd)`` tuples sorted ascending by pg_f.
     """
-    where = (
-        "vd IS NOT NULL AND pg_f IS NOT NULL "
-        "AND nd_valid = 1 AND pg_f_valid = 1"
-    )
+    where = PAIR_ELIGIBLE_SQL
     sql_params = []
     if catalogs is not None:
         marks = ", ".join("?" for _ in catalogs)
@@ -193,9 +195,10 @@ def _load_pair_eligible(db_conn, catalogs):
 def _resolve_anchor(db_conn, anchor, anchor_catalog, catalogs):
     """Resolve the anchor glass (returns ``(row, None)`` or ``(None, envelope)``).
 
-    The row is ``(catalog, name, vd, pg_f, nd, pg_f_valid, vd_present, nd_valid)``;
-    a resolved-but-not-pair-eligible anchor is handled by the caller (it yields an
-    empty pairs list, since it can pair with nothing).
+    The row is ``(catalog, name, vd, pg_f, nd, pg_f_valid, vd_present, nd_valid, tce,
+    pair_eligible)``; a resolved-but-not-pair-eligible anchor is handled by the caller
+    (an anchor that can pair with nothing is refused ``anchor_no_dispersion``; an eligible
+    anchor with no partner inside the windows is ``ok: True`` with empty ``pairs``).
 
     With ``anchor_catalog``: that catalogue. Without it, over every row whose name
     equals ``anchor``: none -> ``glass_unknown``; one -> that row, whatever
@@ -226,7 +229,7 @@ def _resolve_anchor(db_conn, anchor, anchor_catalog, catalogs):
         sql_params.append(anchor_catalog)
     rows = db_conn.execute(
         "SELECT catalog, name, vd, pg_f, nd, pg_f_valid, "
-        "(vd IS NOT NULL), nd_valid, tce FROM glass "
+        f"(vd IS NOT NULL), nd_valid, tce, ({PAIR_ELIGIBLE_SQL}) AS pair_eligible FROM glass "
         f"WHERE {where} ORDER BY catalog",
         sql_params,
     ).fetchall()
@@ -245,10 +248,10 @@ def _resolve_anchor(db_conn, anchor, anchor_catalog, catalogs):
             inside = [r for r in rows if r[0].lower() in wanted]
         if len(inside) == 1:
             return inside[0], None
-        candidates = [{"catalog": r[0], "name": r[1]} for r in rows]
+        candidates = [candidate_entry(r[0], r[1], r[2], r[5], r[7]) for r in rows]
         return None, error_envelope(
             _TOOL, "ambiguous_glass",
-            "anchor name resolves in multiple catalogs; pass anchor_catalog",
+            ambiguous_message("anchor name", len(candidates), "anchor_catalog"),
             anchor=anchor, candidates=candidates, candidate_count=len(candidates),
         )
     return rows[0], None
@@ -468,34 +471,31 @@ def find_glass_pair(db_conn, params):
         )
         if envelope is not None:
             return envelope
-        # resolved is (catalog, name, vd, pg_f, nd, pg_f_valid, vd_present,
-        # nd_valid). A resolved-but-not-pair-eligible anchor (null vd/pg_f or
-        # invalid flags) can pair with nothing -> empty pairs (ok:True), NOT an error.
-        a_vd, a_pgf, a_pgf_valid, a_vd_present, a_nd_valid = (
-            resolved[2], resolved[3], resolved[5], resolved[6], resolved[7]
-        )
-        if (
-            a_vd is None or a_pgf is None or not a_pgf_valid or not a_vd_present
-            or not a_nd_valid
-        ):
-            return {
-                "ok": True,
-                "pairs": [],
-                "pair_count": 0,
-                "truncated": False,
-                "criterion": "matched_pgf_max_dvd",
-                "match_kind": "pair",
-                "anchor": {"catalog": resolved[0], "name": resolved[1]},
-                "left_out": 0,
-                "caveat": _PAIR_CAVEAT,
-                "note": (
-                    "anchor has no valid index nd (out-of-band) - no pairs"
-                    if (a_vd is not None and a_pgf is not None and a_pgf_valid
-                        and a_vd_present)
-                    else "anchor has no computed Vd/Pg,F (out-of-band or flat "
-                    "dispersion) - no pairs"
-                ),
-            }
+        if not resolved[9]:
+            a_vd, a_pgf, a_pgf_valid, a_vd_present, a_nd_valid = (
+                resolved[2], resolved[3], resolved[5], resolved[6], resolved[7]
+            )
+            bad_nd_only = (
+                a_vd is not None and a_pgf is not None and a_pgf_valid and a_vd_present
+            )  # message choice only
+            why = (
+                "no valid index nd (out-of-band)" if bad_nd_only
+                else "no computed Vd/Pg,F (out-of-band or flat dispersion)"
+            )
+            pairable = pairable_catalogs(db_conn, resolved[1], resolved[0])
+            same_name = (
+                f"anchor on the same name in {', '.join(pairable)}, whose row carries it; or "
+                if pairable else ""
+            )
+            return error_envelope(
+                _TOOL, "anchor_no_dispersion",
+                f"anchor has {why}, so it can pair with nothing. {same_name}pick a partner "
+                "by window: find_glasses with vd_min/vd_max and pg_f_min/pg_f_max around "
+                "the values you want to match",
+                anchor={"catalog": resolved[0], "name": resolved[1]},
+                vd=a_vd, pg_f=a_pgf, pg_f_valid=bool(a_pgf_valid), nd_valid=bool(a_nd_valid),
+                pairable_in=pairable,
+            )
         anchor_row = (resolved[0], resolved[1], resolved[2], resolved[3], resolved[4], resolved[8])
 
     eligible, left_out_kinds, unclassified = _build_pool(
@@ -561,7 +561,8 @@ FIND_GLASS_PAIR_SPEC = ToolSpec(
         "secondary_per_focal, power_sum and petzval_per_power for a thin cemented "
         "doublet of the pair, and delta_tce (thermal expansion of the second glass minus "
         "the first, the anchor first; null when either is unknown); read caveat in the result. Gotcha: an ambiguous bare anchor name returns an "
-        "ambiguous_glass candidate list - qualify the catalog. See find_glasses to "
+        "ambiguous_glass candidate list - qualify the catalog; an anchor whose row has no "
+        "computed Vd/Pg,F or valid nd is refused (anchor_no_dispersion). See find_glasses to "
         "window-search single glasses. See lookup_glass for one glass's full data."
     ),
     kind="glass",

@@ -84,11 +84,12 @@ _CRITERIA = {
                                rss_label="Estimated RMS Wavefront", units="waves"),
     "spot": CriterionSpec(member="RMSSpotRadius", label_re=r"RMS Spot Radius in (\w+)",
                           rss_label="Estimated RMS Spot Radius", units=None),
-    # The loaded merit function (compensator-picker spec 3.3), monte_carlo only: the sensitivity table has
-    # no merit RSS line, so ``rss_label`` is None. The report prints EXACTLY ``Criterion           : User
-    # defined merit function`` and no Mode / Sampling line (V14); the units word is forced (V3).
+    # The loaded merit function (compensator-picker spec 3.3). The report prints EXACTLY ``Criterion           : User
+    # defined merit function`` and no Sampling line (V14); the units word is forced (V3).: a sensitivity
+    # run prints the RSS block ``Estimated Merit Function    :`` (measured); the nominal is read from the
+    # ``Nominal Criterion`` line as for every criterion (the ``Nominal Merit Function`` line repeats it, unused).
     "merit": CriterionSpec(member="MeritFunction", label="User defined merit function",
-                           rss_label=None, units="merit"),
+                           rss_label="Estimated Merit Function", units="merit"),
 }
 # Aliases of the wavefront entry (≈50 test references + the bench scripts read these).
 _CRITERION_MEMBER = _CRITERIA["wavefront"].member
@@ -304,14 +305,16 @@ _UNITS_LINE_RE = r"Units are\s+([A-Za-z]+)\s*\."
 class ToleranceError(ToolError):
     """A tolerance-tier failure carrying a structured ``family``.
 
-    The four families (D11/D17): ``tolerancing_param`` (bad input / bad enum
+    The six families (four locked in D11/D17, plus ``tolerancing_reconcile`` and
+    ``tolerancing_empty_report`` below): ``tolerancing_param`` (bad input / bad enum
     member; carries a ``known_gap`` / ``precondition`` discriminator for a CB/NSC/crash
     refusal, D21), ``tolerancing_unavailable`` (``OpenTolerancing`` -> None, or an
     enum-TYPE reach failure), ``tolerancing_run`` (``Succeeded=False`` / ``ErrorMessage``
     / a pythonnet throw mid-run), ``tolerancing_parse`` (the report canary failed — the
     anti-silent-zero family) + the FIFTH (D21/D22) ``tolerancing_reconcile`` (an authored
     operand produced NEITHER a parsed row NOR an error line — the over-optimistic
-    canary). One exception type carries the discriminator on a
+    canary) + the SIXTH ``tolerancing_empty_report`` (the engine wrote a zero-byte
+    report file, refused before the report is decoded). One exception type carries the discriminator on a
     ``family`` instance attribute (mirrors ``AnalysisResultError`` / ``OptimizeError``);
     the WIRE contract is the ``error_family`` string, never ``isinstance``.
     """
@@ -1423,6 +1426,11 @@ def _parse_sensitivity(text, out, spec=None):
         )
 
     # RSS estimate (G5 — required finite for sensitivity).
+    if not spec.rss_label:      # a criterion with no RSS line cannot be parsed as a sensitivity report (never a TypeError)
+        raise ToleranceError(
+            f"the {spec.member} criterion has no RSS label for a sensitivity report; refusing to parse it",
+            family="tolerancing_parse",
+        )
     rss_change, rss_change_ok = _to_finite_float(
         _search(text, r"Estimated change\s*:\s*" + _NUM)
     )

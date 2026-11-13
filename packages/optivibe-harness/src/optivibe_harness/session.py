@@ -56,6 +56,15 @@ CHANNEL_ALIVE = "alive"
 CHANNEL_DEAD = "dead"
 CHANNEL_UNKNOWN = "unknown"
 
+# The licence read is False AND the process environment has no WINDIR.
+# The wrapped text ("ZOS-API connect failed after N attempts: " + this) must stay
+# under the doctor's 240-character clip so the remedy is not cut off.
+_WINDIR_ABSENT_MESSAGE = (
+    "WINDIR is missing from this server's environment, so the licence reads as "
+    "invalid; the environment, not the licence, is the likely cause. "
+    "Launch the server with the full environment (MCP host env)."
+)
+
 # ------------------------------------------------------------------------- #
 # The refusal prose. THREE module constants and TWO named readers, which
 # together are the whole surface of the human wording review.
@@ -941,6 +950,12 @@ class ZemaxSession:
                 if lic_status == "error":
                     raise lic_val
                 if not lic_val:
+                    # [measured: probe-180]: a process environment without
+                    # WINDIR makes the engine read the licence as invalid. Name the cause
+                    # (read-only; the environment is never patched). Kept short: the
+                    # doctor clips the wrapped text at 240 characters.
+                    if "WINDIR" not in os.environ:
+                        raise SessionConnectError(_WINDIR_ABSENT_MESSAGE)
                     raise SessionConnectError(
                         "License is NOT valid for the ZOS-API (entitlement gap)."
                     )

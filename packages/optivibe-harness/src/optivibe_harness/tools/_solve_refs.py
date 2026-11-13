@@ -45,7 +45,7 @@ inherited from every cell read in this family (a known limit).
 ------------------------------------------------------------------------------------
 WHY THIS MODULE IS AS LARGE AS IT IS
 ------------------------------------------------------------------------------------
-The measurement is **267** ``ast.stmt``, and the size is deliberate rather than
+The measurement is **279** ``ast.stmt``, and the size is deliberate rather than
 incidental. The table below is EXCLUSIVE (every function in exactly one bucket) and
 EXHAUSTIVE (the buckets sum to the module total):
 
@@ -78,12 +78,13 @@ EXHAUSTIVE (the buckets sum to the module total):
 * **29 — the confirm** (both halves, ``type_after`` AND the re-read ``ref_after``, plus
   the ORDERED TOTAL four-row consequence partition):
   ``_confirm_one`` 12, ``confirm_after`` 11, ``_consequence`` 6.
-* **54 — the refusal prose** and its ordered three-tier ``(table, solve_type)`` routing:
-  ``_detail`` 31, ``refusal_message`` 3, ``failure_note`` 6, ``_remedy`` 10, ``_replay`` 4.
-* **18 — module-level**: the docstring, four imports, the three frozen vocabularies and
-  the nine constants the wire and the prose share.
+* **62 — the refusal prose** and its ordered three-tier ``(table, solve_type)`` routing:
+  ``_detail`` 31, ``refusal_message`` 3, ``failure_note`` 6, ``_remedy`` 10, ``_replay`` 4,
+  ``_gap_phrase`` 5, ``_offset_support`` 3.
+* **22 — module-level**: the docstring, four imports, the three frozen vocabularies and
+  the thirteen constants the wire and the prose share.
 
-124 + 42 + 29 + 54 + 18 = **267**.
+124 + 42 + 29 + 62 + 22 = **279**.
 
 THE LATEST CHANGE MOVED IT 258 -> 267 (+9). A ``remove_surface`` whose count read-back
 fails now carries the pre-mutation scan in its error, so the ``detail`` assembly moved out
@@ -330,6 +331,8 @@ _UNAUDITED_PAR_TYPES = frozenset({
 })
 
 #: ``unscanned`` is capped; ``unscanned_count`` reports the TRUE total, never this length.
+#: ``unscanned_count`` counts GAP RECORDS, not cells (a whole-table gap is ONE record with
+#: ``cell`` None); the key keeps its name (0.2.3 decision) and this is its documentation.
 _UNSCANNED_CAP = 20
 
 #: The key the MINIMAL PROJECTION is published under when the full block cannot be shipped.
@@ -1198,12 +1201,65 @@ def disclosure(scan, confirmed):
 # be a merge of the reference FACT with a CONSEQUENCE that does not exist yet.
 #: What ``set_solve`` will accept for a pickup parameter this scan could not put a NUMBER
 #: on. NOT a value -- a short instruction, because there IS no value to give.
+#: 0.2.3: the old
+#: "pass 0.0 ONLY after confirming from the live cell" precondition is RETIRED -- no read
+#: door exposes that value -- and the phrase states only the two facts that always hold.
 _REPLAY_NULL = ("NOT AVAILABLE from this scan -- either this cell does not support the "
                 "parameter or its value could not be read, and this refusal CANNOT TELL "
-                "WHICH; set_solve requires all four fields and refuses a non-finite one, "
-                "and 0.0 is its documented no-op, but pass 0.0 ONLY after confirming from "
-                "the live cell that there is no value, because substituting it for a real "
-                "one re-authors a DIFFERENT relationship")
+                "WHICH; set_solve needs a finite number here, and substituting a guess "
+                "re-authors a DIFFERENT relationship")
+#: The ``Column`` wording (lane B2, T4): ``Column`` names the cell the value FOLLOWS. It takes a
+#: member NAME and has no zero-equivalent. Gotcha 324 measured a cross-cell pickup as legal
+#: (``radius <- Thickness``, ``thickness <- Radius``), so "own cell" is offered as the usual
+#: choice, never as the only legal one. ``%s`` is the target's own Column member name.
+_REPLAY_NULL_COLUMN = ("NOT AVAILABLE from this scan -- Column names the cell this row follows; "
+                       "pass %s (this row's own cell) unless the design follows a different "
+                       "cell")
+#: Offset on a target whose catalog entry says ``supports_offset`` is False (gotcha 325: radius,
+#: conic, semi_diameter silently drop it and read NaN). ``%s`` is the target cell token.
+_REPLAY_OFFSET_IGNORED = ("NOT APPLICABLE -- the engine ignores Offset on a %s target and reads "
+                          "it back as not available, so pass Offset=0.0")
+#: Offset null on a target whose catalog entry has ``supports_offset`` True (thickness): the probe
+#: measured it reading back as written, 0.0 included, so null means the read failed.
+_REPLAY_OFFSET_FAULT = ("NOT READ -- a %s pickup normally reports its Offset (0.0 included), so this "
+                        "read failed; re-run the same remove_surface call to re-scan it, and if it "
+                        "still cannot be read, decide the Offset from the design intent (this tool "
+                        "cannot), because substituting a guess re-authors a DIFFERENT relationship")
+#: What each gap reason MEANS and what to do (lane B2, T3). Only reasons this module emits.
+_GAP_MEANING = {
+    "solve fields unmeasured": "this solve type on this cell is not in the scan's catalog, so "
+                               "it cannot say whether it references the row; check that cell "
+                               "with read_surface before removing",
+    "solve type unreadable": "the engine did not answer reading this solve's type; retry, or "
+                             "check the cell with read_surface",
+    "solve cell unreadable": "the engine did not answer reading this cell; retry, or check the "
+                             "cell with read_surface",
+    "solve view unresolvable": "the engine did not answer reading this solve; retry, or check "
+                               "the cell with read_surface",
+    "solve scan faulted": "the engine did not answer scanning this cell; retry, or check the "
+                          "cell with read_surface",
+    "ref field unreadable": "the engine did not answer reading this solve's reference; retry, "
+                            "or check the cell with read_surface",
+    "ref field not an exact integer": "this solve's reference is not a whole surface number, so "
+                                      "the scan cannot say which row it follows; check the "
+                                      "cell with read_surface",
+    "ref field out of range": "this solve's reference names a surface that does not exist; "
+                              "check the cell with read_surface",
+    "geometry scan faulted": "the engine did not answer reading this surface; retry, or check "
+                             "the surface with read_surface",
+    "surface type unreadable": "the engine did not answer reading this surface's type; retry, "
+                               "or check the surface with read_surface",
+    "surface type unrenderable": "the engine did not answer reading this surface's type; retry, "
+                                 "or check the surface with read_surface",
+    "par scan faulted": "the engine did not answer scanning this surface's parameters; retry, "
+                        "or check the surface with read_surface",
+}
+
+
+def _offset_support(cell):
+    """The catalog's ``supports_offset`` for a pickup on ``cell``: True, False, or None (unknown)."""
+    return _sc._MEASURED.get("%sCell.SurfacePickup" % _sc.TOKEN_TO_COLUMN.get(cell),
+                             (None, None, None))[1]
 
 
 def _replay(hit, name):
@@ -1242,9 +1298,9 @@ def _replay(hit, name):
     and its guard, so the guard enforced the mistake. **A test and the thing it checks must
     not share an author's single reading; that is what an independent review is for.**
 
-    The phrase now NAMES BOTH possibilities and asserts neither, and the ``0.0`` advice
-    carries its PRECONDITION rather than being offered unconditionally -- because the
-    dangerous case is not the caller who cannot re-author, it is the one who re-authors
+    The phrase NAMES BOTH possibilities and asserts neither. (Historical: this fix first
+    made the ``0.0`` advice carry a PRECONDITION rather than offering it unconditionally;
+    0.2.3 retired the advice itself, see the last paragraph below.) The dangerous case is not the caller who cannot re-author, it is the one who re-authors
     successfully into something else.
 
     Distinguishing them properly needs the ``_MEASURED`` ``Supports*`` capability flags,
@@ -1266,18 +1322,24 @@ def _replay(hit, name):
     an enumeration where the claim was universal. It now derives that universe, and an AST
     row forbids a raw ``hit.get(...)`` of ANY nullable pickup parameter inside this render.
 
-    **KNOWN RESIDUAL, stated because a caller ACTS on this text.** ``_REPLAY_NULL`` is
-    worded for the two NUMERIC parameters: its *"refuses a non-finite one, and 0.0 is its
-    documented no-op"* clause is not advice a ``Column`` caller can follow — ``Column``
-    takes a member NAME, and there is no zero-equivalent. Both halves that DO apply are
-    still correct for it (the value is not available from this scan, and substituting a
-    guess re-authors a different relationship), and serving a numeric-flavoured phrase is
-    strictly better than serving a value the door rejects. A column-specific phrase costs a
-    module-level constant (+1 statement) against a ceiling pinned by EQUALITY, so
-    it is DISCLOSED here rather than trimmed in, and ticketed.
+    **The ``0.0`` advice is retired.** It carried a precondition ("only after confirming from
+    the live cell") that no read door can satisfy -- ``read_surface`` returns field NAMES, not
+    values -- so a careful caller halted. The phrase now states only the two facts that always
+    hold (the value is not available from this scan; substituting a guess re-authors a different
+    relationship) and no longer offers ``0.0`` at all. ``Column`` takes a member NAME and has no
+    zero-equivalent, so a null column is served ``_REPLAY_NULL_COLUMN``.
     """
     value = hit.get(name)
-    return _REPLAY_NULL if value is None else value
+    # The phrase follows the TARGET cell (the engine keys both Offset and the pickup rule on it).
+    # Thickness target: a live probe measured Offset reading back exactly as written
+    # (0.0, 0.5, -1.0, never NaN), so a null there is a FAILED READ, not a hidden 0.0.
+    return (value if value is not None else
+            _REPLAY_NULL_COLUMN % (_sc.TOKEN_TO_COLUMN.get(hit.get("cell"), hit.get("cell")),)
+            if name == "column" else
+            _REPLAY_OFFSET_IGNORED % (hit.get("cell"),)
+            if name == "offset" and _offset_support(hit.get("cell")) is False else
+            _REPLAY_OFFSET_FAULT % (hit.get("cell"),)
+            if name == "offset" and _offset_support(hit.get("cell")) is True else _REPLAY_NULL)
 
 
 def _remedy(hit, *, after_attempt=False):
@@ -1291,9 +1353,11 @@ def _remedy(hit, *, after_attempt=False):
     if hit["table"] == _GEOMETRY and hit["solve_type"] == _PICKUP:
         try:
             params = (" (that row becomes surface %s after the removal; the solve's "
-                      "set_solve parameters are Column=%s, ScaleFactor=%s, Offset=%s, and "
-                      "its Surface reference is the row being removed, so a surviving row "
-                      "must be named in its place)"
+                      "set_solve parameters are Column=%s, ScaleFactor=%s, Offset=%s. Its "
+                      "Surface reference is the row being removed, so decide which surviving "
+                      "row the value should now follow (often the row that takes over the "
+                      "removed surface's role; this tool cannot choose it) and pass that "
+                      "row's number, as numbered after the removal, as Surface)"
                       % (hit.get("surface_after"), _replay(hit, "column"),
                          _replay(hit, "scale_factor"),
                          _replay(hit, "offset")))
@@ -1316,6 +1380,21 @@ def _remedy(hit, *, after_attempt=False):
         (" - this message records only the reference, not that solve family's "
          "other parameters, so if the row is gone the solve has to be "
          "re-authored by hand"))
+
+
+def _gap_phrase(gap):
+    """One gap record as prose, NEVER raising: a record is whatever the scan dict carries."""
+    try:
+        return "surface %s %s: %s%s" % (
+            gap["surface"],
+            "whole %s table" % (gap["table"],) if gap["cell"] is None else gap["cell"],
+            gap["reason"],
+            # B2: what the reason MEANS and what to do. ``type is str`` keeps an unhashable
+            # reason from costing the whole phrase.
+            " (" + _GAP_MEANING[gap["reason"]] + ")"
+            if type(gap["reason"]) is str and gap["reason"] in _GAP_MEANING else "")
+    except Exception:  # noqa: BLE001 — an undescribable record is still COUNTED by the caller
+        return "a location that could not be described"
 
 
 def _detail(at, scan, *, after_attempt=False):
@@ -1391,8 +1470,18 @@ def _detail(at, scan, *, after_attempt=False):
     # A TOTAL scan failure carries its own reason and has ZERO gaps, so an UNCONDITIONAL
     # count would report "0 cell(s) could not be scanned" for a scan that did not run at
     # all -- an understatement in exactly the direction this tool exists to avoid.
+    #
+    # 0.2.3: the clause
+    # NAMES each gap record -- ``surface S <cell | whole <table> table>: <reason>`` -- in scan
+    # order, capped at ``_UNSCANNED_CAP`` with "and N more". It counts RECORDS (a whole table
+    # is one), so it never says "cell(s)". Each record renders in ``_gap_phrase``'s own guard,
+    # so no handler is added HERE (``test_r4c_the_refusal_has_NO_outer_catch_all`` pins five).
     if gaps:
-        told.append("%d cell(s) could not be scanned" % (len(gaps),))
+        told.append("%d location(s) could not be scanned (%s)"
+                    % (len(gaps), " | ".join(
+                        [_gap_phrase(g) for g in gaps[:_UNSCANNED_CAP]]
+                        + (["and %d more" % (len(gaps) - _UNSCANNED_CAP,)]
+                           if len(gaps) > _UNSCANNED_CAP else []))))
     # STEP 5 — THE COVERAGE RECORDS, ADDED ONE REVIEW AFTER THE CHANNEL ITSELF.
     # A REFUSED CALLER HAS NO WIRE BLOCK TO FALL BACK ON — this string is the whole of
     # what they get — so omitting the channel meant the one caller who explicitly asked
@@ -1434,7 +1523,7 @@ def refusal_message(at, scan):
         "refusing to remove surface %s with refuse_on_solve_refs=true: %s. No surface was "
         "removed and nothing was mutated. Pass refuse_on_solve_refs=false (the default) to "
         "remove it anyway; the solve_refs disclosure then carries these references in "
-        "full, every cell the scan could not read, and the measured post-removal "
+        "full, every location the scan could not read, and the measured post-removal "
         "consequence of each reference." % (at, _detail(at, scan))
     )
 

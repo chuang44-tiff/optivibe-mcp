@@ -10,6 +10,27 @@ catalog like ``C:\\tmp\\FAKECAT`` resolved differently across the three tools.
 import os
 
 from ..errors import ToolParamError
+from ..glass_build import PAIR_ELIGIBLE_SQL
+
+
+def candidate_entry(catalog, name, vd, pg_f_valid, nd_valid):
+    """One ambiguous_glass candidate; the flags are real booleans (0 == False in Python)."""
+    return {"catalog": catalog, "name": name, "vd": vd,
+            "pg_f_valid": bool(pg_f_valid), "nd_valid": bool(nd_valid)}
+
+
+def ambiguous_message(what, count, param):
+    """The one ambiguous_glass text both tools serve (`what` = "name" / "anchor name")."""
+    return (f"{what} resolves in {count} catalogs; pass {param}. Only a candidate with vd "
+            "non-null and pg_f_valid and nd_valid both true can be paired; pin one of those.")
+
+
+def pairable_catalogs(db_conn, name, exclude_catalog):
+    """Catalogs whose byte-exact row for ``name`` passes PAIR_ELIGIBLE_SQL, minus one, ORDER BY catalog."""
+    rows = db_conn.execute(
+        f"SELECT catalog, name FROM glass WHERE name = ? AND {PAIR_ELIGIBLE_SQL} ORDER BY catalog",
+        (name,)).fetchall()
+    return [r[0] for r in rows if r[1] == name and r[0].lower() != exclude_catalog.lower()]
 
 
 def normalize_catalog(catalog, param_name="catalog"):

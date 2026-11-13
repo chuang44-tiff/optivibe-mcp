@@ -24,12 +24,13 @@ import os
 import re
 import tempfile
 
-from .._io import safe_float
+from .._io import is_finite_number, safe_float
 from ..enums import _resolve_enum
 from ..errors import SurfaceWriteError, ToolParamError
 from ..server import ToolSpec
 from . import _config_common as _ccfg
 from . import _grin_index_common as _gic
+from . import _grounding
 from . import _lens_common as _lc
 from . import _mce_merit_guard as _guard
 from . import _merit_cells as _mc
@@ -346,6 +347,43 @@ def _bool_param(params, key, default):
     return value
 
 
+def _int_digit_count(value):
+    """Decimal digit count of an ``int``, read through the base ``int.__index__`` slot.
+
+    ``len(str(abs(value)))`` re-enters caller-controlled methods (a lying ``__abs__``
+    reports a 400-digit int as 1 digit long; a raising one escapes as ``RuntimeError``),
+    so the magnitude is first copied out to an exact base ``int``. ``str`` of that copy
+    refuses above ``sys.get_int_max_str_digits()``; the fallback is then exact, from the
+    bit length (never an over-estimate) corrected UP against ``10**k``.
+    """
+    n = int.__index__(value)
+    if n < 0:
+        n = -n
+    try:
+        return len(str(n))
+    except ValueError:  # noqa: BLE001 -- above the interpreter's int->str digit limit
+        k = max(1, (int.bit_length(n) * 30103) // 100000)
+        while n >= 10 ** k:
+            k += 1
+        return k
+
+
+def _float_or_param_error(value, key):
+    """``float(value)``, but an ``int`` too large for a float is a ``ToolParamError``.
+
+    A JSON payload reaches that state with a bare 400-digit literal; ``float`` then raises
+    ``OverflowError``, which escapes the door's promised typed refusal as opaque
+    ``internal``. The message names the key and the digit count, never the value. The
+    refusal family stays per door (the callers convert it).
+    """
+    if isinstance(value, int) and not is_finite_number(value):
+        raise ToolParamError(
+            f"{key!r} must be a finite number; got an integer of "
+            f"{_int_digit_count(value)} digits"
+        )
+    return float(value)
+
+
 def _num_param(params, key, default):
     """Pull an optional numeric param (default ``default``); reject bool/non-number.
 
@@ -364,7 +402,7 @@ def _num_param(params, key, default):
         raise ToolParamError(
             f"{key!r} must be a number, got {type(value).__name__} {value!r}"
         )
-    return float(value)
+    return _float_or_param_error(value, key)
 
 
 def _floor_param(params, key, default):
@@ -1156,7 +1194,7 @@ def _grin_dn_max_param_build(params):
         raise ToolParamError(
             f"'grin_dn_max' must be a number, got {type(value).__name__} {value!r}"
         )
-    value = float(value)
+    value = _float_or_param_error(value, "grin_dn_max")
     if not math.isfinite(value) or value <= 0:
         raise ToolParamError(f"'grin_dn_max' must be a finite number > 0, got {value!r}")
     return value
@@ -1177,7 +1215,7 @@ def _grin_min_index_param_build(params):
         raise ToolParamError(
             f"'grin_min_index' must be a number, got {type(value).__name__} {value!r}"
         )
-    value = float(value)
+    value = _float_or_param_error(value, "grin_min_index")
     if not math.isfinite(value) or value < 1.0:
         raise ToolParamError(
             f"'grin_min_index' must be a finite number >= 1.0, got {value!r}"
@@ -3064,13 +3102,15 @@ def add_operand(session, params):
     enum_type = _oc._merit_operand_enum(system)
     try:
         member = _resolve_enum(enum_type, operand)
-    except ToolParamError as exc:
+    except ToolParamError:
         # An unknown operand is an EXPECTED failure -> structured envelope
         # (§a: do not raise into dispatch; pre-empt with a clean ok:false).
         # NOTE: the enum check is BEFORE any AddOperand on BOTH paths, so an unknown
         # operand under config=k authors NO CONF (E2: zero mutation).
+        # No enum member dump; lookup_operand named only when importable.
         return _oc.error_envelope(
-            "add_operand", "optimize_param", str(exc), operand=operand
+            "add_operand", "optimize_param",
+            _grounding.unknown_operand_message(operand), operand=operand,
         )
 
     # LIVE bug 2: capture the operand count BEFORE AddOperand so a
