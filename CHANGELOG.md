@@ -40,9 +40,10 @@ skill and its demo move to it. Refusals now say what to do next. The tool count 
   refocus and a 0.05 mm push). A new section compares them with the 0.2.2 runs (mean 64.20 % against 72.35 %).
 - **The `design-glass-matching` skill** looks at the layout after each kept swap, and reports the track and the
   thickest element against the start lens.
-- **Refusals carry their remedy.** An unknown merit-operand code is refused in one line that points to
-  `lookup_operand` (no list of every code). `add_math_constraint` without a sign convention names the catalog's
-  value. A refusal for a location that could not be scanned names each location and the next step.
+- **Refusals carry their remedy.** `get_operand`, `add_operand` and `add_math_constraint` refuse an unknown
+  merit-operand code in one line that points to `lookup_operand` (no list of every code). `add_math_constraint`
+  without a sign convention names the catalog's value. A refusal for a location that could not be scanned names each
+  location and the next step.
 - **Glass doors:** `find_glass_pair` refuses an anchor glass with no usable dispersion (`anchor_no_dispersion`) and
   lists the catalogs where that glass can pair; `ambiguous_glass` candidates carry `vd` and their validity flags;
   `find_glasses` refuses `sort="delta_pg_f"` and points to `pg_f_anomaly`.
