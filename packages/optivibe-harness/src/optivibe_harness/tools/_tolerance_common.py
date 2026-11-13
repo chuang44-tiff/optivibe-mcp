@@ -305,7 +305,7 @@ _UNITS_LINE_RE = r"Units are\s+([A-Za-z]+)\s*\."
 class ToleranceError(ToolError):
     """A tolerance-tier failure carrying a structured ``family``.
 
-    The four families (D11/D17): ``tolerancing_param`` (bad input / bad enum
+    The six families (four locked in D11/D17, plus ``tolerancing_reconcile`` and
     ``tolerancing_empty_report`` below): ``tolerancing_param`` (bad input / bad enum
     member; carries a ``known_gap`` / ``precondition`` discriminator for a CB/NSC/crash
     refusal, D21), ``tolerancing_unavailable`` (``OpenTolerancing`` -> None, or an
