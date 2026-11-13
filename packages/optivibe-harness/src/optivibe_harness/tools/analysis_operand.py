@@ -42,6 +42,7 @@ from ..errors import SurfaceWriteError, ToolParamError
 from ..server import ToolSpec
 from . import _analysis_common as _ac
 from . import _config_common as _cfg
+from . import _grounding
 from . import _merit_cells as _mc
 
 # Magnitude at/above which a returned operand value is flagged as a likely
@@ -364,11 +365,13 @@ def get_operand(session, params):
     enum_type = _merit_operand_enum(system)
     try:
         member = _resolve_enum(enum_type, operand)
-    except ToolParamError as exc:
+    except ToolParamError:
         # An unknown operand is an EXPECTED failure class -> structured envelope
-        # (do not raise into dispatch; pre-empt with a clean ok:false).
+        # (do not raise into dispatch; pre-empt with a clean ok:false).: no
+        # enum member dump; name lookup_operand only when the reference is importable.
         return _ac.error_envelope(
-            "get_operand", "operand_unknown", str(exc), operand=operand
+            "get_operand", "operand_unknown",
+            _grounding.unknown_operand_message(operand), operand=operand,
         )
 
     # Read the per-param scalars (these RAISE ToolParamError on a bad type, matching

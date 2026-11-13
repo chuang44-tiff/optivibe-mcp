@@ -573,6 +573,30 @@ def _gap_kind(row_i):
     return "glass"
 
 
+def _is_plate(ri, rip1):
+    """True when the glass gap between rows ``ri`` and ``rip1`` is a plane-parallel PLATE.
+
+    :
+    a plate has BOTH bounding faces flat (radius ``inf`` or ``0.0``, the Zemax plane
+    conventions), both ``Standard`` surfaces, zero conic and no asphere coefficients -- so
+    it has no power and no curved edge to grind. An element floor (``min_glass``) is a
+    powered-element rule; applying it to a 0.35 mm filter manufactures a ``violation``.
+
+    Fail-CLOSED on every doubt: an unreadable (NaN) radius or conic, a non-Standard type,
+    a read asphere coefficient set, or a GRIN body is NOT a plate and stays a glass gap.
+    """
+    from . import _grin_cells as _grin
+    for r in (ri, rip1):
+        if _grin._exact_token_match(r.get("type_name"), ("Standard",)) is None:
+            return False
+        if r.get("aspheric_coefficients") is not None or r.get("conic") != 0.0:
+            return False
+        if not (isinstance(r.get("radius"), float)
+                and (math.isinf(r["radius"]) or r["radius"] == 0.0)):
+            return False
+    return True
+
+
 # --------------------------------------------------------------------------- #
 # Per-gap audit (UNFOLDED).
 # --------------------------------------------------------------------------- #
@@ -769,6 +793,18 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
         candidates = [v for v in (center, edge) if v is not None and math.isfinite(v)]
         worst = min(candidates) if candidates else None
         is_violation = worst is not None and worst < threshold
+        # A plane-parallel PLATE keeps its numbers and its threshold but is not a
+        # violation while its thickness is positive (a non-positive plate is a defect, not
+        # a thin filter, and stays flagged).
+        plate = bool(kind == "glass" and (worst is None or worst > 0.0)
+                     and _is_plate(ri, rip1))
+        if plate and is_violation:
+            is_violation = False
+            flags.append(
+                f"gap S{i}->S{i + 1} is a plane-parallel plate (both faces flat): the "
+                f"element floor min_glass={threshold} does not apply, so it is reported "
+                "with its numbers but not as a violation"
+            )
 
         # The back airgap gets a SECOND edge reading, at the last optic's own rim against
         # the flat end surface. It is a DISCLOSURE: which clearance matters depends on the
@@ -812,6 +848,8 @@ def _audit_gaps(rows, n, min_air, min_glass, max_air=None, max_glass=None,
             "frozen_semi": frozen_semi,
             "frozen_surfaces": frozen_surfaces,
         }
+        if plate:
+            gap["plate"] = True
         if own is not None:
             gap["edge_thickness_min_aperture"] = (
                 _safe(legacy_edge) if legacy_edge is not None else None)

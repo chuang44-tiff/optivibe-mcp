@@ -1,7 +1,8 @@
 """tools/tolerance_run.py — the ``tolerance`` tool (sensitivity / monte_carlo).
 
 ONE dispatchable tool ``tolerance(mode, tolerances?, trials?, full?, output_file?, ...)``,
-switched by ``mode={sensitivity, monte_carlo, desensitize, pick_push}`` (mirrors ``optimize``/``dry_run``).
+switched by ``mode={sensitivity, monte_carlo, desensitize, pick_push, quick_yield}`` (mirrors ``optimize``/``dry_run``).
+``quick_yield`` (``_tolerance_quick_yield``) is the refocus-only Quick Yield screen; generally do not use it with the push.
 v1 SCALAR perturbations only (radius TRAD / thickness-air TTHI / index TIND / Abbe
 TABB), RMS-wavefront criterion (field-summed, in waves) with a nominal Strehl read
 ALONGSIDE, default paraxial back-focus compensation.
@@ -35,8 +36,8 @@ The lifecycle:
 11. Strehl-alongside (D8) — nominal ``analyze_strehl`` read; null + warn on failure.
 12. Build the envelope — never-raise (D17).
 
-Error families: ``tolerancing_param``, ``tolerancing_unavailable``, ``tolerancing_run``,
-``tolerancing_parse``.
+Error families (six): ``tolerancing_param``, ``tolerancing_unavailable``, ``tolerancing_run``,
+``tolerancing_parse``, ``tolerancing_empty_report``, ``tolerancing_reconcile``.
 
 Live ZOS-API integration: exercised by the live tolerancing test;
 unit-tested against the fixture-seeded fakes whose
@@ -104,7 +105,7 @@ _TDE_EMPTY_FLOOR = 1
 def _never_raise(tool_name):
     """Wrap the handler so it NEVER raises past its boundary (D17).
 
-    A ``ToleranceError`` keeps its intended structured ``family`` (one of the four
+    A ``ToleranceError`` keeps its intended structured ``family`` (one of the
     frozen families). ANY other ``Exception`` (pythonnet maps every .NET throw onto an
     ``Exception`` subclass) is netted to a typed ``tolerancing_run`` envelope so a
     disconnected engine mid-run becomes ``{ok:false}`` rather than a crash.
@@ -1157,6 +1158,9 @@ def _configure_run(tol, system, mode, trials, output_path, *,
         "number_to_save": (_read(lambda: tol.NumberToSave, int)
                            if has_number_to_save else None),
         "field_write_error": field_write_error,
+        # REPORT ONLY. The core count the tolerancer will use (engine default: logical cores
+        # minus one). Never written, never a miss: an unreadable count is None and the run goes on.
+        "cores": _read(lambda: tol.SetupCore, int),
     }
     misses = []
     if not (criterion_back or "").endswith(spec.member):
@@ -1273,6 +1277,15 @@ def _run_pick_push(session, params):
     return _pick.run(session, params, tolerance)
 
 
+def _merit_mode_guard(criterion, mode):
+    """: ``criterion='merit'`` is judged by ``sensitivity`` and ``monte_carlo`` only; any other mode that
+    reaches here (``desensitize`` forwards ``criterion`` to its inner runs) is refused ``merit_mc_only``."""
+    if criterion == "merit" and mode not in ("sensitivity", "monte_carlo"):
+        raise _tc.ToleranceError(
+            f"criterion='merit' runs under mode='sensitivity' or 'monte_carlo' only, not {mode!r}; "
+            "nothing was opened", family="tolerancing_param", reason="merit_mc_only")
+
+
 @_never_raise("tolerance")
 def tolerance(session, params, *, cap_s=None):
     """Run a tolerance analysis (sensitivity OR monte_carlo). See the module docstring.
@@ -1310,7 +1323,13 @@ def tolerance(session, params, *, cap_s=None):
     # wrapped one) for its BEFORE and AFTER sensitivity runs. Lazy import: the S2a path never loads it.
     if isinstance(params, dict) and dict.get(params, "mode") == "desensitize":
         from . import _tolerance_desensitize as _desens
+        _merit_mode_guard(dict.get(params, "criterion"), "desensitize")     # it forwards ``criterion`` to its inner runs
         return _desens.run(session, params, tolerance)
+    # mode='quick_yield' (refocus-only Quick Yield; generally NOT for use with the push) is intercepted at the same
+    # point, for the same reason: ``_MODE_TO_SETUP`` and its pins stay untouched.
+    if isinstance(params, dict) and dict.get(params, "mode") == "quick_yield":
+        from . import _tolerance_quick_yield as _qy
+        return _qy.run(session, params)
     # (compensator-picker) mode='pick_push' is intercepted at the same point, for the same reason.
     if isinstance(params, dict) and dict.get(params, "mode") == "pick_push":
         # The picker sets its own per-candidate cap, so a caller's ``cap_s`` is echoed-ignored (and a
@@ -1340,10 +1359,7 @@ def tolerance(session, params, *, cap_s=None):
     compensator = _resolve_choice(params, "compensator", _tc._COMPENSATORS, "paraxial")
     sampling = _resolve_sampling(params)
     budget = _resolve_budget(params)
-    if criterion == "merit" and mode != "monte_carlo":
-        raise _tc.ToleranceError(
-            "criterion='merit' runs under mode='monte_carlo' only (the sensitivity report has no merit "
-            "RSS line); nothing was opened", family="tolerancing_param", reason="merit_mc_only")
+    _merit_mode_guard(criterion, mode)
     warnings = []
     # unbound base slot. A lying ``get`` returning None here swaps the caller's
     # EXPLICIT tolerance budget for the auto-derived default one, silently.
@@ -1400,6 +1416,11 @@ def tolerance(session, params, *, cap_s=None):
             # Plain monte_carlo scores the run under the threshold (``yield`` block). The rule is the
             # picker's row 7, restated here because sharing it would mean editing ``_tolerance_pick``.
             mc_threshold = dict.__getitem__(params, "threshold")
+            if isinstance(mc_threshold, list):
+                raise _tc.ToleranceError(
+                    "threshold takes ONE number here; a list (one value per field) is accepted only by "
+                    f"mode='quick_yield', got {mc_threshold!r}; nothing was opened",
+                    family="tolerancing_param", reason="threshold_invalid")
             if not is_finite_number(mc_threshold) or mc_threshold <= 0:
                 raise _tc.ToleranceError(
                     f"threshold must be a finite number > 0 (criterion units), got {mc_threshold!r}; "
@@ -1616,12 +1637,23 @@ def tolerance(session, params, *, cap_s=None):
             try:
                 tde.DeleteAllRows()
             except Exception as exc:  # noqa: BLE001 — a TDE teardown throw must not mask body
-                tde_cleared = False
-                warnings.append(
-                    f"the Tolerance Data Editor could not be cleared after the run "
-                    f"({safe_exc(exc, repr_form=True)}); "
-                    "it may carry leftover scratch rows — reload your .zmx before re-authoring"
-                )
+                # retry the clear ONCE, judged by the same floor check as the entry clear
+                # (``_clear_tde``: a throw, an unreadable count or rows above the floor all mean "not proven").
+                try:
+                    _clear_tde(tde)
+                except Exception:  # noqa: BLE001 — still not proven
+                    tde_cleared = False
+                    warnings.append(
+                        f"the Tolerance Data Editor could not be cleared after the run "
+                        f"({safe_exc(exc, repr_form=True)}); "
+                        "it may carry leftover scratch rows — reload your .zmx before re-authoring"
+                    )
+                    if cb_ctx is not None:
+                        warnings.append(
+                            "the coordinate-break layout was left in place because leftover Tolerance Data "
+                            "Editor rows may still reference its surfaces (removing them is the engine-crash "
+                            "class); reload the design with load_design"
+                        )
             # (7/D15) reap the engine's .ZTD side files on EVERY path, except those that
             # existed before the run; reap the report only when it is the tool's own
             # temp (an explicit output_file is the caller's to keep).
@@ -1632,7 +1664,12 @@ def tolerance(session, params, *, cap_s=None):
                 pass
             # The layout comes out AFTER the TDE rows that reference its surfaces are gone.
             if cb_ctx is not None:
-                cb_ctx.restore = _cb_teardown(system, cb_ctx)
+                if tde_cleared:
+                    cb_ctx.restore = _cb_teardown(system, cb_ctx)
+                else:
+                    # rows that may reference the layout are still in the editor: leave the layout.
+                    cb_ctx.restore = {"restored": False, "steps_run": [], "failed_step": "tde_not_cleared",
+                                      "n_differences": None, "first_differences": [], "mfe_reimposed_writes": 0}
 
     if cb_error is not None:
         if engine_busy:
@@ -1860,6 +1897,7 @@ def tolerance(session, params, *, cap_s=None):
                            if mode == "sensitivity" else None),
             "rss_identity": identity,
             "wall_s": readback["wall_s"],
+            "cores": readback.get("cores"),
         }
         if cap_s is not None:
             run_summary["cap_s"] = float(cap_s)
@@ -2472,11 +2510,14 @@ TOLERANCE_SPEC = ToolSpec(
         "sampling": "number",
         "cb_tilt": "object",
         "cb_group": "object",
-        "threshold": "number",
+        "threshold": ("number", "array"),      # a JSON-Schema type list (a tuple: never aliased): quick_yield takes one number or one per field
         "cap_s": "number",
+        "pupil": "number",
+        "repeats": "number",
+        "baseline": "string",
     },
     description=(
-        "Run a tolerance analysis. mode='sensitivity' gives per-parameter both-sign changes, "
+        "mode='sensitivity' gives per-parameter both-sign changes, "
         "worst offenders, an RSS estimate and hotspots[]: the rows grouped by element, "
         "cemented group or air gap, ranked by share of the RSS (quadrature) with "
         "contribution in criterion units; join hotspots across runs by key only when "
@@ -2491,7 +2532,7 @@ TOLERANCE_SPEC = ToolSpec(
         "the 3 eligible top decenter/tilt hotspots each get one capped dls_cb_group Monte Carlo on 'merit' "
         "(trials, default 200; a trial at the push limit fails), ranked by yield under threshold, else by P90; "
         "near ties are flagged and judge_call (MC2000) returned; "
-        "1 sensitivity run + up to 3 caps inside a 25 min wall budget. Budget, one "
+        "1 sensitivity run + up to 3 caps inside a 25 min wall budget. mode='quick_yield' (budget, baseline): refocus-only Quick Yield, its own metric; per field (worst = upper bound on all passing), threshold number or list, criterion='composite' = all fields; generally not for use with a push. Budget, one "
         "of: budget={vendor, grade, element_decenter, element_tilt} drives the engine "
         "tolerance wizard with element decenter/tilt on; tolerances is a list of {type:<TDE "
         "code>, surface, surface2?, code?, param?, roll_surf?, delta>0 | min+max} (pass a "
@@ -2503,7 +2544,7 @@ TOLERANCE_SPEC = ToolSpec(
         "lookup_operand with domain='tolerance' (the structured tolerance catalog); calling "
         "lookup_operand without domain='tolerance' mis-routes to merit operands. For chapter "
         "context use search_reference. Criterion: 'wavefront' (RMS, waves; default), "
-        "'spot' (RMS radius, lens units) or 'merit' (monte_carlo only: the loaded merit function; compare only "
+        "'spot' (RMS radius, lens units) or 'merit' (sensitivity & MC: the loaded merit function; compare only "
         "on the same merit). Compensator: 'paraxial' (default) refocuses back "
         "focus paraxially and user COMP/CPAR rows are inert; 'dls' (budget required) "
         "optimizes the wizard's back-focus COMP by damped least squares, cycle cap 3; "
@@ -2514,16 +2555,14 @@ TOLERANCE_SPEC = ToolSpec(
         "run_summary.cb_group marks an axis saturated when it hits both bounds; "
         "no other compensator is admitted. Every criterion includes back-focus refocus: do not "
         "tell the user as-built is better on that axis. sampling (default 4; 2 "
-        "under-resolves) is the engine CriterionSampling. output_file keeps the raw report "
-        "(never deleted). Units are per row in authored_operands[].units. A CB/NSC-required "
+        "under-resolves). A CB/NSC-required "
         "operand is a labeled known_gap (run the rest unless strict=true); TNPA/TNMA never "
         "open. TMCO analyses the current configuration only. GRIN: TPAR/TPAI take param (n0 "
-        "is 2, profile coefficients 3..8), disclosed in grin_perturbation. This CLEARS the "
+        "is 2, coefficients 3..8), disclosed in grin_perturbation. This CLEARS the "
         "Tolerance Data Editor and leaves the prescription untouched (except "
         "mode='desensitize'). Gotcha: tolerance a "
         "design LOADED from disk via load_design; an unsaved in-memory system gives "
-        "tolerancing_empty_report. See load_design, optimize, analyze_strehl, "
-        "analyze_wavefront."
+        "tolerancing_empty_report."
     ),
 )
 

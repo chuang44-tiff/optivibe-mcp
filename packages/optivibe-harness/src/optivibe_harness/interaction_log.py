@@ -41,6 +41,17 @@ for the training/audit corpus, so:
   a LOWER BOUND over an UNMEASURED denominator. No row of this ledger — of any
   kind — states completeness, and the ABSENCE of the token (a v1 row) is NOT a
   completeness statement either; there is no backfill.
+- every row carries ``session`` — a per-``InteractionLog``-INSTANCE uuid4 hex minted in
+  ``__init__``. Rows sharing a ``session`` were written by one instance, so a
+  file two writers appended to can be partitioned without ``ts`` or ``seq`` ordering.
+  WHAT THE KEY DOES NOT ESTABLISH: (1) history stays unkeyed — there is no backfill, so
+  ``session is None`` after ``load()`` means a v1/v2 row (or an explicit null) and such a
+  selection is still unpartitionable; (2) it names an INSTANCE, not a process, host or
+  client — one process may build several instances (several keys), and a restarted host
+  gets a fresh key, so equal keys never say "the same session of work"; (3) it does not
+  close the ``coverage`` lower-bound problem: a reference-only session still writes no
+  ledger and pre-activation reference dispatches are still uncounted. The two limits are
+  independent; a fix for one is not a fix for the other.
 - reference rows are discriminated by their ``call`` suffix ``(conn, params)`` —
   a true statement of the reference arg-0 contract. Harness rows end
   ``(session, params)``.
@@ -53,13 +64,14 @@ import json
 import sys
 import time
 import traceback as _tb
+import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from typing import Optional
 
 from . import _io
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # ---- client identity (Half 1) -------------------------------------------------
 CLIENT_STATUS_TOKENS = ("present", "unavailable", "no_request_context", "degraded")
@@ -213,6 +225,9 @@ class InteractionRecord:
     # == a v1 row. A v2 writer NEVER writes ``None`` for either.
     client: Optional[dict] = None
     coverage: Optional[str] = None
+    # The writing ``InteractionLog`` instance's uuid4 hex. Declared
+    # AFTER ``coverage``; ``None`` after ``load()`` == the line had no such key (v1/v2 row).
+    session: Optional[str] = None
 
 
 def _normalize(text: str) -> str:
@@ -251,6 +266,7 @@ class InteractionLog:
         self.path = path
         self._fsync = fsync
         self._seq = 0
+        self._session = uuid.uuid4().hex
         self.dropped_records = 0
 
     def log(
@@ -293,6 +309,7 @@ class InteractionLog:
                 # escape as error_family "internal" on a call that otherwise succeeded.
                 client=_read_client(),
                 coverage=COVERAGE_NOTE,
+                session=self._session,
             )
             # The WRITE BOUNDARY (see ``_json_line``): a lone surrogate in the RAW
             # client-controlled name/version would otherwise raise UnicodeEncodeError

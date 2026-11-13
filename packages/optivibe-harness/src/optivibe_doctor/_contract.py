@@ -95,12 +95,18 @@ REFERENCE_CASES = {                # one canned, read-only call per public door
 # How a FROM_PLANE value resolves, per (tool, param): (plane, query, column index).
 # ONE query, no fallback needed — a (name, catalog) pair taken from the catalog's own first
 # row ALWAYS resolves, because qualifying by catalog is exactly what disambiguates.
+#
+# find_glass_pair takes the first PAIR-ELIGIBLE row, by the reference layer's OWN predicate;
+# an ineligible anchor is refused (anchor_no_dispersion) since 0.2.3.  The predicate text is
+# substituted for the placeholder by _worker._resolve_from_plane at probe time, never copied here.
+PAIR_ELIGIBLE_PLACEHOLDER = "{pair_eligible}"
 FROM_PLANE_SOURCE = {
     ("lookup_glass", "name"): ("glass", "SELECT name, catalog FROM glass LIMIT 1", 0),
     ("lookup_glass", "catalog"): ("glass", "SELECT name, catalog FROM glass LIMIT 1", 1),
-    ("find_glass_pair", "anchor"): ("glass", "SELECT name, catalog FROM glass LIMIT 1", 0),
+    ("find_glass_pair", "anchor"): ("glass",
+                                    "SELECT name, catalog FROM glass WHERE {pair_eligible} LIMIT 1", 0),
     ("find_glass_pair", "anchor_catalog"): ("glass",
-                                            "SELECT name, catalog FROM glass LIMIT 1", 1),
+                                            "SELECT name, catalog FROM glass WHERE {pair_eligible} LIMIT 1", 1),
 }
 
 # Per-plane content fingerprint inputs, for the routing proof.  (table, key column) — the

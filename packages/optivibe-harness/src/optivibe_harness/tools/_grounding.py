@@ -190,6 +190,41 @@ def sign_convention_for(code, engine_version):
             return (GROUNDING_UNAVAILABLE, None)
 
 
+_REF_IMPORTABLE = None   # cached result of reference_importable()
+
+
+def reference_importable():
+    """True when ``optivibe_reference`` can be imported in this interpreter (cached).
+
+    An unknown-merit-operand refusal names ``lookup_operand`` ONLY when this is
+    True ("never name an absent door"). Imported INSIDE the call, never at module scope, and
+    NEVER raises: any failure reads as "not importable". Callers must go through the module
+    attribute (``_grounding.reference_importable()``) so a test can patch it.
+    """
+    global _REF_IMPORTABLE
+    if _REF_IMPORTABLE is None:
+        try:
+            import optivibe_reference  # noqa: F401
+            _REF_IMPORTABLE = True
+        except Exception:  # noqa: BLE001 -- the never-raise belt
+            _REF_IMPORTABLE = False
+    return _REF_IMPORTABLE
+
+
+LOOKUP_OPERAND_HINT = (
+    "resolve the intent with lookup_operand (seat-free, takes a phrase) and retry with "
+    "the code it returns."
+)
+
+
+def unknown_operand_message(code, prefix=""):
+    """The shared unknown-merit-operand refusal text. No enum member list."""
+    msg = f"{prefix}{code!r} is not a merit operand code."
+    if reference_importable():
+        msg += " " + LOOKUP_OPERAND_HINT
+    return msg
+
+
 def reset_cache_for_tests():
     """Drop the cached connection, stamp and warn flag. TEST-ONLY; never called at runtime."""
     global _CACHE, _WARNED

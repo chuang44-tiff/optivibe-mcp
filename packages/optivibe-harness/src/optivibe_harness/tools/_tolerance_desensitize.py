@@ -24,6 +24,9 @@ always runs). The two hazards it exists for, both measured live (P-M2): a plain 
 multi-config lens with no leading CONF inserts CONF 1 AND DELETES THE LAST ROW (so the build makes no
 evaluation between ``add_configuration`` and the first ``set_config_variable``, and a guard proves it),
 and ``reset_to_single_config`` bakes a per-config Variable as Fixed (so the Variables are re-marked).
+
+Rows outside ``IQ_TYPES`` (e.g. RAID/OPLT angle-of-incidence ceilings) stay configuration-1 constraints: they are not
+copied into the perturbed configurations, so a ceiling is not enforced under perturbation.
 """
 import copy
 import math
@@ -42,6 +45,7 @@ from . import _tolerance_layout as _tl
 from . import mce_config, mce_reset, surface_solve
 from ..enums import _resolve_enum
 from ..errors import OptimizeError
+from .._io import safe_exc as _safe_exc
 
 TOOL = "tolerance"
 
@@ -55,6 +59,10 @@ CANARY_REL = 1.5e-9
 DLS_CAP_S = 300.0
 DLS_CANCEL_WAIT_S = 30.0
 DLS_CYCLES = 10
+#: A DLS that is still running (or whose stop cannot be read) after Cancel: the teardown touches nothing.
+STOP_UNCONFIRMED = "optimizer_stop_unconfirmed"
+STOP_UNCONFIRMED_MSG = ("the optimizer did not stop within %g s of Cancel, so the lens was left as it is and "
+                        "nothing was torn down; reload your saved candidate with load_design" % DLS_CANCEL_WAIT_S)
 # The default MCE floor row of a fresh / reset single-config lens: pinned by P-M3
 # (``probe/pm3_mce_floor.json``, OpticStudio 241210, both bench lenses, three floor states). Compared as
 # ``(type name, tuple(_mce_cells.read_param(row, k) for k in (1, 2, 3)))``, NEVER through ``GetCellAt``.
@@ -150,13 +158,10 @@ def validate(params, system):
         n_conf, n_ops, floor = _mce_state(system)
         mfe = system.MFE
         n_rows = int(mfe.NumberOfOperands)
-        conf_rows, ref_rows = [], []
+        conf_rows = []
         for i in range(1, n_rows + 1):
-            op = mfe.GetOperandAt(i)
-            if _tl._tok(op.TypeName) == "CONF":
+            if _tl._tok(mfe.GetOperandAt(i).TypeName) == "CONF":
                 conf_rows.append(i)
-            if _merit_cells.read_ref_map(op):
-                ref_rows.append(i)
         n_surf = int(system.LDE.NumberOfSurfaces)
         cb_rows = [i for i in range(n_surf)
                    if _geom._is_coordinate_break(str(system.LDE.GetSurfaceAt(i).Type))]
@@ -172,11 +177,11 @@ def validate(params, system):
                         "the multi-configuration editor is not at its default floor (%d row(s), row 1 = %r, "
                         "expected one %r row): the recipe resets the editor and would lose authored rows. "
                         "Nothing was opened." % (n_ops, floor, _MCE_FLOOR_ROW))
-    if ref_rows:
-        return _refusal("tolerancing_param", "op_ref_rows",
-                        "merit rows %s carry an Op#-prefixed row reference; whether the engine relocates "
-                        "absolute row references when the recipe's leading CONF row shifts them is unprobed, "
-                        "so the recipe refuses. Nothing was opened." % (ref_rows[:10],))
+    # Op#-prefixed row references (RAID/OPLT angle-of-incidence ceilings, MAXX) are NOT refused: the
+    # live probe (probe-189) measured the engine RELOCATING every Op# cell when the leading CONF row is
+    # inserted (OPLT 7 -> 8, MAXX 2/5 -> 3/6) and again on a row remove, and ``teardown`` restoring them exactly.
+    # ``guard`` therefore compares against the pre-merit with its Op# cells shifted by the CONF insert; a STALE
+    # (un-relocated) cell still fails it. Gotcha: "Op# cells relocate on MFE insert and remove".
     if cb_rows:
         return _refusal("tolerancing_param", "cb_present",
                         "the lens holds coordinate-break surface(s) %s; the recipe's CB layout and surface "
@@ -352,13 +357,41 @@ def paraxial_bfl_shift(session, found, s, adj, plus, minus, undo):
 # --------------------------------------------------------------------------- #
 # the configurations
 # --------------------------------------------------------------------------- #
-def guard(pre, post):
-    """The no-evaluate-window guard: ``post`` must be ``pre`` with exactly one leading CONF 1."""
+def ref_cells(system):
+    """``{(row0, cell0)}`` of every Op#-prefixed row-pointer cell of the live merit (``cell0`` indexes a snapshot's cells)."""
+    mfe = system.MFE
+    out = set()
+    for r in range(int(mfe.NumberOfOperands)):
+        op = mfe.GetOperandAt(r + 1)
+        for c, col in enumerate(_merit_cells._PARAM_COLS):
+            header, kind = _merit_cells.read_cell_kind(op, col)
+            if _merit_cells.is_row_ref_header(header, kind):
+                out.add((r, c))
+    return out
+
+
+def _relocated(pre, refs):
+    """``pre`` as the engine leaves it after ONE row is inserted at row 1: each Op# cell (``refs``) points one lower."""
+    out = []
+    for r, row in enumerate(pre):
+        cells = [(k, v + 1) if (r, c) in refs and k == "i" and v is not None and v >= 1 else (k, v)
+                 for c, (k, v) in enumerate(row["cells"])]
+        out.append(dict(row, cells=cells))
+    return out
+
+
+def guard(pre, post, refs=()):
+    """The no-evaluate-window guard: ``post`` must be ``pre`` with exactly one leading CONF 1.
+
+    ``refs`` are ``pre``'s Op# cells (``ref_cells``): the engine relocates them by +1 across the insert,
+    so the expected shape shifts them; an Op# cell that did NOT move is stale and fails ``rest_is_pre``.
+    """
     first = post[0] if post else None
+    want = _relocated(pre, refs)
     return {"row1_conf1": bool(first and first["type"] == "CONF" and first["cells"][0] == ("i", 1)),
             "n_is_pre_plus_1": len(post) == len(pre) + 1,
-            "rest_is_pre": [_tl.struct_key(r) for r in post[1:]] == [_tl.struct_key(r) for r in pre],
-            "last_row_kept": bool(post and pre and _tl.struct_key(post[-1]) == _tl.struct_key(pre[-1]))}
+            "rest_is_pre": [_tl.struct_key(r) for r in post[1:]] == [_tl.struct_key(r) for r in want],
+            "last_row_kept": bool(post and want and _tl.struct_key(post[-1]) == _tl.struct_key(want[-1]))}
 
 
 def _write_values(session, ctx, cfgs, values_by_cfg):
@@ -398,7 +431,7 @@ def build_configs(session, ctx):
     cfgs = [2, 3] + ([1] if ctx["back_solve"] == "Variable" else [])
     _tool(mce_config.set_config_variable, session, {"row": ctx["row_ids"]["back"], "config": cfgs[0]},
           "set_config_variable(config %d)" % cfgs[0])
-    g = guard(ctx["pre"], _tl.mfe_snapshot(system))
+    g = guard(ctx["pre"], _tl.mfe_snapshot(system), ctx.get("pre_refs", ()))
     ctx["guard"] = g
     if not all(g.values()):
         raise _Fail("the merit function changed shape across the configuration build (%s); an evaluation or "
@@ -427,6 +460,11 @@ def identify_iq_rows(system):
         if not math.isfinite(w):
             inf_rows += 1
         elif w > 0:
+            if _merit_cells.read_ref_map(op):
+                # copied verbatim, an Op# would keep pointing at the BASE row (probe-189); remapping it per block
+                # would also rewrite append_copies' verification, so refuse a row this future IQ_TYPES change selects
+                raise _Fail("merit row %d (%s) is copyable but carries an Op# row reference; a verbatim copy would "
+                            "point at the base block" % (i, t), reason="op_ref_iq_row")
             rows.append(i)
             types.append(t)
         else:
@@ -588,8 +626,16 @@ def run_dls(system):
             out["run_status"] = _rb.run_status_name(opt.RunAndWaitWithTimeout(DLS_CAP_S))
             if out["run_status"] == "TimedOut":
                 out["timed_out"] = True
-                opt.Cancel()
-                opt.WaitWithTimeout(DLS_CANCEL_WAIT_S)
+                # Prove the stop BEFORE Close and before any teardown edit; a throw is unconfirmed too
+                try:
+                    opt.Cancel()
+                    opt.WaitWithTimeout(DLS_CANCEL_WAIT_S)
+                    still_running = bool(opt.IsRunning)
+                except Exception as exc:  # noqa: BLE001 -- a stop that throws is not a confirmed stop
+                    raise _Fail(STOP_UNCONFIRMED_MSG + " (the stop check raised: %s)" % _safe_exc(exc),
+                                reason=STOP_UNCONFIRMED) from exc
+                if still_running:
+                    raise _Fail(STOP_UNCONFIRMED_MSG, reason=STOP_UNCONFIRMED)
             out["wall_s"] = round(time.perf_counter() - t0, 3)
             out["final_mf"] = float(opt.CurrentMeritFunction)
     except OptimizeError as exc:
@@ -646,6 +692,11 @@ def teardown(session, ctx):
     variable_cells_changed, allowed_differences, n_differences, first_differences, mfe_reimposed_writes,
     after_run_unchanged}``. ``ctx["now_state"]`` receives the post-teardown digest.
     """
+    if ctx.get("engine_busy"):      # the optimizer's stop is unconfirmed: edit NOTHING (tolerance_run's engine_busy shape)
+        return {"restored": False, "steps_run": [], "steps_skipped": [], "failed_step": "engine_still_running",
+                "failed_error": STOP_UNCONFIRMED_MSG, "variable_cells_changed": 0, "allowed_differences": 0,
+                "n_differences": None, "first_differences": [], "mfe_reimposed_writes": 0,
+                "after_run_unchanged": None}
     system = session.system
     found, snap0 = ctx["found"], ctx["snap0"]
     run, skipped = [], []
@@ -808,6 +859,7 @@ def _build(session, ctx, row):
     ctx["frozen"] = frozen
     _mark(ctx, "4f")
     ctx["pre"] = _tl.mfe_snapshot(system)
+    ctx["pre_refs"] = ref_cells(system)
     build_configs(session, ctx)
     _mark(ctx, "4j")
     iq_rows, census = identify_iq_rows(system)
@@ -832,7 +884,12 @@ def _build(session, ctx, row):
                     extra={"zero_delta": _tl._jsonable(z)})
     _mark(ctx, "4l")
     ctx["dls_attempted"] = True
-    dls = run_dls(system)
+    try:
+        dls = run_dls(system)
+    except _Fail as exc:
+        if exc.reason == STOP_UNCONFIRMED:
+            ctx["engine_busy"] = True       # step 5 must edit nothing: the optimizer may still be running
+        raise
     ctx["optimizer"] = dls
     if not dls["trace"]["unchanged"]:
         raise _Fail("the optimizer run changed the merit function's row count or first row (%s)" % dls["trace"],
@@ -911,7 +968,9 @@ def _failure(ctx, fail):
     """An ``ok:false`` envelope once the build started. Teardown failure outranks the build reason."""
     restore = ctx["restore"]
     extra = dict(fail.extra) if fail else {}
-    if not restore["restored"]:
+    if ctx.get("engine_busy") and fail:
+        family, reason, message = fail.family, fail.reason, fail.message
+    elif not restore["restored"]:
         family = "tolerancing_run"
         reason = "teardown_failed" if restore["failed_step"] else "restore_unproven"
         message = ("the recipe could not prove the lens restored (%s); reload your saved candidate"
@@ -922,7 +981,7 @@ def _failure(ctx, fail):
         family, reason, message = fail.family, fail.reason, fail.message
     env = _ac.error_envelope(TOOL, family, message, reason=reason, mode="desensitize",
                              restored=restore["restored"], restore=restore, desensitize=_desens_block(ctx),
-                             prescription_changed=restore["variable_cells_changed"] > 0,
+                             prescription_changed=bool(ctx.get("engine_busy")) or restore["variable_cells_changed"] > 0,
                              state_mutated=not restore["restored"], **extra)
     if ctx.get("before_env") is not None:
         env["before"] = ctx["before_block"]

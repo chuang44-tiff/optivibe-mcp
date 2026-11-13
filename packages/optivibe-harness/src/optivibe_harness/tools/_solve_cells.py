@@ -56,7 +56,7 @@ so the error taxonomy is byte-unchanged.
 import math
 
 from ..enums import _resolve_enum
-from ..errors import SurfaceWriteError, ToolParamError
+from ..errors import SolveEnumUnresolvedError, SurfaceWriteError, ToolParamError
 
 
 # --------------------------------------------------------------------------- #
@@ -391,8 +391,8 @@ def solve_type_enum(system):
         import ZOSAPI.Editors as _ed  # type: ignore
 
         return _ed.SolveType
-    except Exception as exc:  # noqa: BLE001 — surface as a param error, not internal
-        raise ToolParamError(
+    except Exception as exc:  # noqa: BLE001 — an ENVIRONMENT fault, own family (0.2.3)
+        raise SolveEnumUnresolvedError(
             f"could not resolve SolveType from ZOSAPI.Editors: {exc}"
         )
 

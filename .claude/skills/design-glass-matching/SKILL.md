@@ -49,11 +49,15 @@ performance, polychromatic RWCE at every field against a control given the same 
    behind its control, or a target lost); screened (measured once, never re-rested); not measured (in `open_arms`).
    Reload the screening lens before the next trial call. Keep a swap
    that improves the failing fields (when all pass: the worst field, and the merit) while every passing field still
-   passes and no other target is lost: track, thickness, and working distance, which the trial does not read.
+   passes and no other target is lost: track, thickness, and working distance, which the trial does not read, so
+   read them on the re-rested arm (`check_clearance`, the track and the thickest element against the start lens).
    `trial_glass_swaps` (which edits the lens while it runs, then restores it) and `substitute_glass` may be held behind a
    permission rule that asks the user first. If a call is denied, do not work around it: report the sets you would trial,
    or the swap you would keep, and stop.
-5. **After every keep**, a keep from a re-try included, the next trial call re-tries the kept slot's cemented partner
+5. **After every keep**, a keep from a re-try included, look before you search on: the keep is a stage end, so save
+   it and run `design-vision-review` with its seq, giving the start lens's track and thickest element in the design
+   intent (about a minute). The review is advice and the readings decide, but answer each finding it records. Then
+   the next trial call re-tries the kept slot's cemented partner
    on the new lens, then the kept slot, then pairs from the screen's leading slots. This is a loop, not one step: each
    keep starts it again, so a keep that came from a partner re-try needs its own partner re-try (in one test both 10x
    runs re-tried once, kept that re-try, and stopped with its partner and 10-12 slots untried). A deep round of one or
@@ -71,4 +75,4 @@ performance, polychromatic RWCE at every field against a control given the same 
    the optimizer's `wall_time_s` before it (each `optimize` envelope) as the measured form-rest subtotal, total elapsed
    time as unavailable, never a guess. Report per slot the reason, lever, candidates, and each trial beside its control at every field where
    measured, else "not measured"; every unfinished arm by name; the decision; and for a keep the on-axis wavefront
-   and field sag before and after.
+   and field sag before and after. Report the track and the thickest element, start lens beside final lens.

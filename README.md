@@ -1,73 +1,51 @@
 # optivibe-mcp
 
-optivibe-mcp is an **experimental** MCP server that provides tooling for a coding
-agent — such as Claude Code — to interface with Zemax OpticStudio.
+**Lens design with an AI agent.** optivibe-mcp gives a coding agent such as Claude Code typed tools for Zemax
+OpticStudio, and skills that take a lens from its first form through glass choice to an as-built tolerance check.
+It is experimental.
 
 ![A 10× / NA 0.45 objective an agent designed in one unattended run, as OpticStudio draws it](demos/walk-in-10x/walk-in-10x-layout.png)
 
 *One unattended run: a 60× objective reworked into a 10× / NA 0.45 apochromat, polychromatic Strehl ≥ 0.935 at
 every field point. [How it was done and measured](demos/walk-in-10x/README.md).*
 
-It exposes OpticStudio operations as typed MCP tools: loading designs, editing lens
-data, running analyses, optimization, and tolerancing, driven through the ZOS-API so
-the agent doesn't have to write raw API code. Alongside the tools is a reference
-layer the agent can query — operand and glass lookups, and full-text search over the
-OpticStudio manual.
+```bash
+pip install optivibe-mcp "optivibe-reference[manual]"
+optivibe-build-data --probe
+claude mcp add optivibe -- C:/path/to/venv/Scripts/optivibe-mcp.exe
+```
 
-Install it with `pip install optivibe-mcp` (on [PyPI](https://pypi.org/project/optivibe-mcp/)); the
-server is also listed in the official [MCP Registry](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.chuang44-tiff/optivibe-mcp)
-as `io.github.chuang44-tiff/optivibe-mcp`. See [Install](#install).
+On [PyPI](https://pypi.org/project/optivibe-mcp/) and in the official [MCP Registry](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.chuang44-tiff/optivibe-mcp)
+as `io.github.chuang44-tiff/optivibe-mcp`. Details: [Install](#install).
 
-## What's in it
+## What it does
 
-- **Tools** (`optivibe-mcp`, in `packages/optivibe-harness/`) — more than 80 typed tools that drive OpticStudio over
-  the ZOS-API. Each returns a uniform result envelope rather than raising, so the
-  agent checks a read-back value instead of assuming a call succeeded. Beyond
-  spherical surfaces it authors aspheres, coordinate breaks, fold mirrors,
-  diffraction gratings, and gradient-index media. For a settled lens it can also show which
-  elements carry the colour and field-curvature terms and trial glass swaps against a control
-  (see [Glass tools](#glass-tools)).
-- **Reference layer** (`optivibe-reference`) — operand and glass lookups plus manual
-  search, to help ground the agent's choices. Engine-free and license-free; its data
-  is built locally (see [Build the reference data](#build-the-reference-data)).
+- **More than 80 typed tools** (`optivibe-mcp`, in `packages/optivibe-harness/`) drive OpticStudio over the ZOS-API:
+  load and edit lenses, analyse, optimize, trial glass swaps and tolerance. Beyond spherical surfaces they author
+  aspheres, coordinate breaks, fold mirrors, diffraction gratings and gradient-index media. Each returns a result
+  envelope with read-backs instead of raising, so the agent checks a value rather than assuming a call worked.
+- **Skills** carry a design through its stages: optimize the form, choose glass, then desensitize the lens so more
+  built copies pass (see [Skills](#skills)).
+- **A reference layer** (`optivibe-reference`) grounds the agent's choices: operand and glass lookups and manual
+  search. Engine-free and licence-free; its data is built locally (see
+  [Build the reference data](#build-the-reference-data)).
 
-The project ships **code only**. No vendor data (glass catalog, manual text, operand
-descriptions) is included — you generate it from your own licensed OpticStudio
-install.
+The project ships **code only**. No vendor data (glass catalog, manual text, operand descriptions) is included; you
+generate it from your own licensed OpticStudio install.
 
 ## Demos
 
-Each demo ships its brief and its lens files, and the agent's stage log where one is included;
-[demos/](demos/README.md) lists them and has a script that re-measures a lens file.
+| Demo | Result |
+|---|---|
+| [A 60× objective reworked into a 10× apochromat, unattended](demos/walk-in-10x/README.md) | Strehl ≥ 0.935 at all four field points in one run |
+| [The same job on a local model](demos/local-model-10x/README.md) | Strehl ≥ 0.834 with a tuned brief; the page says where it trails Opus |
+| [Refining a 20× zoom](demos/zoom-20x/README.md) | Blur at the worst zoom position more than halved; the distortion target missed |
+| [Does the agent design better when it sees the drawing?](demos/vision-ab/README.md) | Every vision run made a shorter lens: 70–100 mm against 140–221 mm |
+| [The glass step against OpticStudio's Hammer](demos/glass-picking/README.md) | On the 10×, all three runs beat Hammer's merit by 12–19 % |
+| [Desensitizing a finished 10× so more built lenses pass](demos/tolerance-desensitize/README.md) | Builds diffraction-limited at every field: 57.50 % to 69.25–74.65 % in four runs |
 
-[An agent reworks a 60× objective into a 10× / NA 0.45 apochromat, unattended](demos/walk-in-10x/README.md)
-One run with no human in the loop produced a 10× / NA 0.45 objective with a polychromatic Strehl ratio of 0.935 or
-better at all four field points, measured afterwards by a separate script.
-
-[A local model does the same job with OptiVibe's skills and MCP server](demos/local-model-10x/README.md)
-Qwen3.8-Flash-Next on a local server, given a brief tuned for this task, met the same targets with a polychromatic
-Strehl of 0.834 or better at all four field points. The page says where it trails Opus.
-
-[An agent refines a 20× zoom, and the promotion gate holds it back](demos/zoom-20x/README.md)
-One run more than halved the blur at the zoom's worst position, missed its distortion target, and the server refused
-to promote the result over two thin filter plates. The headline figures reproduced on a re-read of the saved file.
-
-[Does the agent design a better lens when it can see the drawing?](demos/vision-ab/README.md)
-The same lens task, run with no human in the loop until each arm had three finished lenses: every run that used the layout
-review produced a shorter lens than every run that worked from numbers alone (70–100 mm
-against 140–221 mm), and every vision lens held an on-axis Strehl ratio of 0.93 or better at
-all four wavelengths.
-
-[The agent's glass step against OpticStudio's Hammer, on two microscope objectives](demos/glass-picking/README.md)
-On the 10× / NA 0.45 apochromat all three agent runs reached a lower merit than Hammer (by 12–19 %) and were
-better at every field, changing 3 to 5 of 14 glasses to Hammer's 10. On the 20× / NA 0.70 objective both agent
-runs kept the on-axis target that Hammer's lens fails; one also beat Hammer's merit and every field, with its last
-glass change made by hand. The page lists the limits.
-
-[An agent desensitizes a finished 10× objective so more built lenses pass](demos/tolerance-desensitize/README.md)
-On a 10× / NA 0.45 apochromat with every glass locked, three unattended runs raised the share of simulated builds
-that are diffraction-limited at every field from 57.50 % to 63.65–65.05 %. All three found the same lever, an
-angle-of-incidence ceiling on one surface, and paid up to 0.0018 waves of nominal wavefront for it.
+Each demo ships its brief and lens files; [demos/](demos/README.md) lists them and has a script that re-measures a
+lens file.
 
 ## Prerequisites
 

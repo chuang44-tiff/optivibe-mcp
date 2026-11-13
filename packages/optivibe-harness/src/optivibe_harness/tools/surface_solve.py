@@ -2010,8 +2010,9 @@ def clear_solve(session, params):
 
     THAT SENTENCE IS ABOUT THE GATES, AND F-E IS WHY THE QUALIFIER IS NOW EXPLICIT. An
     unresolvable ``SolveType`` enum is an ENVIRONMENT fault, not a gate verdict, and it
-    now reaches the caller as ``tool_param`` — the same family ``set_solve`` has always
-    served for it. Read broadly, the paragraph above used to promise the opposite about a
+    now reaches the caller as ``engine_enum_unresolved`` (``SolveEnumUnresolvedError``, a
+    ``ToolParamError`` subclass; originally plain ``tool_param``) — the same family
+    ``set_solve`` serves for it. Read broadly, the paragraph above used to promise the opposite about a
     condition it was not written for (0.1.6 PR #8 review batch, F-E).
     """
     system, lde, surface, token, cell, legal = _prelude(session, params)
@@ -2023,6 +2024,9 @@ def clear_solve(session, params):
     # as ``surface_write`` here while ``set_solve`` — which calls the SAME resolver bare,
     # one function down — served ``tool_param`` for the identical condition. Two doors,
     # one fault, two families is a machine-readable signal an agent cannot branch on.
+    # (Update: that fault now reaches BOTH set_solve and clear_solve as
+    # ``engine_enum_unresolved`` -- errors.SolveEnumUnresolvedError, a ToolParamError
+    # subclass raised by _solve_cells.solve_type_enum -- not as plain ``tool_param``.)
     # Only ``_resolve_enum``'s member-absent case is re-familied now, which is ALSO what
     # makes the message below TRUE: it asserts "the enum has no 'Fixed' member", and
     # before the hoist it said that about an enum that could not be RESOLVED AT ALL.

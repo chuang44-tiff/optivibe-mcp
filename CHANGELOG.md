@@ -2,12 +2,70 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.2.2`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.2.3`). Each tag points at the merge
 commit that published that version, and every tag was verified against the version literals
 in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.3] — 2026-11-12
+
+The desensitize loop gets a quick in-loop yield read that is scored, like the judge, at the worst field, and the
+skill and its demo move to it. Refusals now say what to do next. The tool count is unchanged.
+
+### Added
+
+- **`tolerance(mode="quick_yield")`**, a quick in-loop yield read built on the engine's Quick Yield analysis. It
+  refocuses only (a push compensator is refused), runs one analysis per field and reports `fields[]` and a
+  `worst_field`. The headline yield is the lowest per-field pass rate, an upper bound on every field passing in the
+  same trial. `threshold` takes a number or a per-field list; `repeats` pools runs; `baseline=<id>` pairs a candidate
+  with its parent and gives the difference with a combined standard error and a `resolved` flag. The server keeps the
+  last 16 results. Compare its numbers candidate against parent only: it is not the Monte Carlo yield.
+  `criterion="composite"` gives the all-field read.
+- **`save_candidate` reports the lens form**: a `form` block with the total track and the thickest glass (worst over
+  configurations) and their change since the design's first candidate, also written to the manifest row. A failed
+  read gives `form: null` with the reason and never fails the save.
+- **`tolerance(mode="sensitivity")` accepts `criterion="merit"`.**
+- **`run_summary.cores`** reports the number of cores the tolerancer runs on.
+
+### Changed
+
+- **The `design-tolerance-desensitize` skill** confirms each change with a paired per-field Quick Yield read against
+  its parent instead of a 200-trial Monte Carlo, and keeps it only when the worst field gains and no field shows a
+  resolved loss. It holds every field's nominal under a headroom cap, looks at the layout before each yield read,
+  and adds thickness and air-gap moves inside their ceilings to its levers.
+- **The desensitize demo** shows four runs of the new procedure on the same 10× / NA 0.45 apochromat: 57.50 % of
+  builds diffraction-limited at every field rose to 72.75, 74.65, 72.75 and 69.25 % (2000-trial Monte Carlo with
+  refocus and a 0.05 mm push). A new section compares them with the 0.2.2 runs (mean 64.20 % against 72.35 %).
+- **The `design-glass-matching` skill** looks at the layout after each kept swap, and reports the track and the
+  thickest element against the start lens.
+- **Refusals carry their remedy.** An unknown merit-operand code is refused in one line that points to
+  `lookup_operand` (no list of every code). `add_math_constraint` without a sign convention names the catalog's
+  value. A refusal for a location that could not be scanned names each location and the next step.
+- **Glass doors:** `find_glass_pair` refuses an anchor glass with no usable dispersion (`anchor_no_dispersion`) and
+  lists the catalogs where that glass can pair; `ambiguous_glass` candidates carry `vd` and their validity flags;
+  `find_glasses` refuses `sort="delta_pg_f"` and points to `pg_f_anomaly`.
+- **Disclosures ride failing and refused results too**, not only successful ones.
+- **The interaction ledger** gives every row a per-session id (schema 3).
+- **The `get_mtf` description** names the configuration, the series and the automatic frequency ceiling.
+
+### Fixed
+
+- **`tolerance(mode="desensitize")` accepts a merit whose rows reference other rows**: the engine moves those
+  references with the rows, so they were never at risk.
+- **A very large integer argument** is refused in the tool's own error family instead of raising.
+- **A thickness scan** reports a negative gap it cannot convert, instead of passing it.
+- **`check_clearance`** does not apply the minimum glass thickness to flat plates.
+- **Teardown:** the desensitize optimizer's time cap now proves the optimizer stopped before it edits the lens, and a
+  group-compensator run retries clearing its tolerance rows before it removes the group.
+- **A licence that reads invalid** names a missing `WINDIR` in the server's environment as the likely cause.
+- **`optivibe-doctor`** names the reference package and the fix when the two packages' versions do not match.
+
+### Notes
+
+- In a Monte Carlo with the DLS refocus, other variables left on the lens are not used as compensators, and the
+  engine does not apply compensator bounds.
 
 ## [0.2.2] — 2026-11-06
 
@@ -569,6 +627,7 @@ A housekeeping release: no new tools.
 
 - Initial public release of optivibe-mcp.
 
+[0.2.3]: ../../compare/v0.2.2...v0.2.3
 [0.2.2]: ../../compare/v0.2.1...v0.2.2
 [0.2.1]: ../../compare/v0.2.0...v0.2.1
 [0.2.0]: ../../compare/v0.1.18...v0.2.0

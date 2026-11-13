@@ -892,6 +892,14 @@ def _enrichment_plane_of(check):
     return ENRICHMENT_PLANE.get(check.split(".", 1)[1])
 
 
+_PAIR_PREDICATE_SKEW_SUMMARY = (
+    "%s was not called: the installed optivibe-reference lacks the pair predicate this "
+    "harness needs (a version mismatch between the two packages)")
+_PAIR_PREDICATE_SKEW_REMEDY = (
+    "install the optivibe-reference that matches this harness: pip install -e "
+    "../optivibe-reference from a checkout, or pip install --force-reinstall optivibe-mcp")
+
+
 def _grade_tool(check, facts, observations, by_check, checkout_present):
     door = check.split(".", 1)[1]
     plane = _plane_of(door)
@@ -910,6 +918,12 @@ def _grade_tool(check, facts, observations, by_check, checkout_present):
             return Finding(check, Status.SKIP, "blocked",
                            "%s was not called: its probe input could not be derived "
                            "from %s" % (door, blocked), facts, "", blocked)
+        if facts.get("probe_input_reason") == "pair_predicate_unavailable":
+            # Version skew, not bad data: the installed optivibe-reference lacks the pair
+            # predicate this harness consumes. Same status, reason and facts.
+            return Finding(check, Status.UNKNOWN, "probe_input_underivable",
+                           _PAIR_PREDICATE_SKEW_SUMMARY % door, facts,
+                           _PAIR_PREDICATE_SKEW_REMEDY)
         return Finding(check, Status.UNKNOWN, "probe_input_underivable",
                        "%s was not called: no probe input could be derived from the %s "
                        "plane's own data" % (door, facts.get("probe_input_plane")), facts)

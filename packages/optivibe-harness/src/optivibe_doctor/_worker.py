@@ -747,7 +747,10 @@ def _resolve_from_plane(door, params, paths):
     Returns ``(resolved_params, underivable_reason, source_plane)``.  A non-``None`` reason
     means doctor could not form the question at all.
     """
-    from ._contract import FROM_PLANE, FROM_PLANE_SOURCE, PROBE_SENTINEL
+    import importlib
+
+    from ._contract import (FROM_PLANE, FROM_PLANE_SOURCE, PAIR_ELIGIBLE_PLACEHOLDER, PLANES,
+                            PROBE_SENTINEL)
 
     wanted = [name for name, value in params.items() if value is FROM_PLANE]
     if not wanted:
@@ -776,7 +779,18 @@ def _resolve_from_plane(door, params, paths):
                     # check reports the corruption; here doctor simply could not ask.
                     return (None, "probe_input_underivable", plane)
                 try:
-                    caches[key] = conn.execute(query).fetchone()
+                    run_query = query
+                    if PAIR_ELIGIBLE_PLACEHOLDER in query:
+                        module = importlib.import_module("optivibe_reference." + PLANES[plane][0])
+                        pred = getattr(module, "PAIR_ELIGIBLE_SQL", None)   # consume, never re-derive
+                        if pred is None:
+                            # The installed reference does not export the predicate this probe
+                            # needs.  Doctor cannot form the question: UNDERIVABLE (UNKNOWN),
+                            # never a guessed "every row" (a guess reads PASS or a false FAIL
+                            # depending on the first row).
+                            return (None, "pair_predicate_unavailable", plane)
+                        run_query = query.replace(PAIR_ELIGIBLE_PLACEHOLDER, pred)
+                    caches[key] = conn.execute(run_query).fetchone()
                 except BaseException:                              # noqa: BLE001
                     caches[key] = None
                 finally:
