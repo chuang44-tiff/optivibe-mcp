@@ -90,7 +90,8 @@ from ..server import ToolSpec
 # ``resolve_floors`` is the ONE floor resolver both tools share — the record a save
 # writes and the guard a promote applies must not be able to disagree about what
 # ``min_air``/``min_glass`` mean.
-from .clearance import check_clearance, check_clearance_floor_only, resolve_floors
+from .clearance import (_gap_kind, check_clearance, check_clearance_floor_only,
+                        resolve_floors)
 from . import _finding
 from . import _fold_gaps as _fg
 from . import _judgment
@@ -1665,10 +1666,12 @@ def _form_number(value, what):
 def _form_glass_surfaces(system):
     """``[(surface, thickness_mm)]`` for every glass surface of the ACTIVE configuration.
 
-    Glass is a surface whose material is neither air (``""`` / the CB placeholder ``"-"``)
-    nor MIRROR; surfaces ``1..N-2`` (object and image excluded), numbered as the LDE.
+    Glass is decided by the ONE predicate ``clearance._gap_kind``: a surface
+    whose material is neither air (``""`` / the CB placeholder ``"-"``) nor MIRROR, OR an
+    authorable GRIN body (Gradient2 / Gradient3, whose material reads air-like). Surfaces
+    ``1..N-2`` (object and image excluded), numbered as the LDE. A ``Type`` read fault
+    propagates (the form read then reports ``form_error``) rather than guessing air.
     """
-    from ._layout_geometry import _is_air_material, _is_mirror
     from ._merit_cells import _base_token
 
     lde = system.LDE
@@ -1676,7 +1679,7 @@ def _form_glass_surfaces(system):
     for i in range(1, int(lde.NumberOfSurfaces) - 1):
         row = lde.GetSurfaceAt(i)
         token = _base_token(row.Material or "").strip()
-        if _is_air_material(token) or _is_mirror(token):
+        if _gap_kind({"type_name": _base_token(row.Type), "material": token}) != "glass":
             continue
         out.append((i, _form_number(row.Thickness, f"surface {i} thickness")))
     return out
@@ -1723,13 +1726,16 @@ def _read_lens_form(session):
             for surface, thickness in glass:
                 if thick is None or thickness > thick["thickness_mm"]:
                     thick = {"surface": surface, "thickness_mm": thickness, "config": k}
-        if thick is None:
-            raise _FormUnreadable("no glass surface found")
-        return {
+        form = {
             "total_track_mm": float(track),
             "total_track_config": int(track_cfg),
             "thickest_glass": thick,
-        }, None
+        }
+        if thick is None:
+            # A glassless design (all-mirror) keeps the track that read fine.
+            form["thickest_glass_reason"] = (
+                "no glass surface found (every surface 1..N-2 is air or mirror)")
+        return form, None
     except Exception as exc:  # noqa: BLE001 - the form read must never sink a save
         return None, _exc_text(exc)
 
@@ -1751,12 +1757,17 @@ def _form_vs_seq_001(zmx_dir, design_name, seq, form):
         if not isinstance(base, dict):
             return None, "seq 001 has no form record (saved before this change)"
         base_track = _form_number(base.get("total_track_mm"), "seq 001 total_track_mm")
-        base_thick = _form_number(
-            (base.get("thickest_glass") or {}).get("thickness_mm"),
-            "seq 001 thickest glass")
+        # A LITERAL null thickest_glass (a glassless design) is a known state, not a fault:
+        # the glass delta is then null while the track delta stays. A malformed base refuses.
+        base_glass = base.get("thickest_glass", {})
+        base_thick = (None if base_glass is None else _form_number(
+            (base_glass or {}).get("thickness_mm"), "seq 001 thickest glass"))
+        now_glass = form.get("thickest_glass")
+        glass_delta = (None if base_thick is None or now_glass is None
+                       else now_glass["thickness_mm"] - base_thick)
         return {
             "total_track_delta_mm": form["total_track_mm"] - base_track,
-            "thickest_glass_delta_mm": form["thickest_glass"]["thickness_mm"] - base_thick,
+            "thickest_glass_delta_mm": glass_delta,
         }, None
     except Exception:  # noqa: BLE001 - a baseline fault is a disclosure, never a failure
         return None, "seq 001 record unreadable"
@@ -3101,6 +3112,15 @@ def _design_name_error(design_name):
     # caller asserted; _safe_name("") -> "snapshot", so check the pre-sanitize stem.
     if design_name.strip() == "":
         return "design_name must be a non-empty string"
+    # A lone surrogate is a legal ``str`` the manifest/file writers cannot encode
+    # (remainder). Refused HERE, before any
+    # branch that formats ``{design_name!r}``, and rendered ASCII-escaped so the refusal
+    # never carries the raw surrogate.
+    if not _writable_name(design_name):      # non-blank here, so False == not encodable
+        return (
+            "design_name is not utf-8 encodable (it contains a lone surrogate): %s. "
+            "Use a name made of ordinary text."
+            % ascii(design_name))
     # THE NUMERIC-FIRST-SEGMENT CLAUSE. A name whose first
     # underscore segment is all digits would re-enter the LEGACY namespace: design
     # ``0376`` composes ``0376_001_seed.zmx``, which ``is_legacy_name`` reads as
@@ -3123,6 +3143,17 @@ def _design_name_error(design_name):
             f"Use {safe!r}."
         )
     return None
+
+
+def _echo_name(design_name):
+    """``design_name`` as echoed in a refusal: a lone-surrogate str is ASCII-escaped so the
+    envelope stays utf-8 encodable; everything else is returned as is."""
+    if isinstance(design_name, str):
+        try:
+            design_name.encode("utf-8")
+        except Exception:                    # noqa: BLE001 - wide on purpose, like _writable_name
+            return ascii(design_name)
+    return design_name
 
 
 # The producer's design-name rule as a predicate, injected into artifact_naming.legal_readings.
@@ -4173,7 +4204,7 @@ def save_candidate(session, params):
             "ok": False,
             "error_family": "workspace_param",
             "error": name_err,
-            "design_name": design_name,
+            "design_name": _echo_name(design_name),
             "label": label,
             "seq": None,
             "zmx_path": None,
@@ -5458,6 +5489,36 @@ def _finding_refusal_text(outcome):
                                          _finding.REFUSE_FINDING_GATE_INTERNAL])))
 
 
+_JUDGMENT_NOT_WRITTEN_SENTENCE = (
+    " The judgment passed to promote_best was NOT written on this refusal and never "
+    "answers a finding: answer with save_candidate(judgment=...) and promote again.")
+
+
+def _judgment_not_written_note(outcome, judgment, supplied):
+    """: ``{"text", "keys"}`` for a refused promote that carried a judgment.
+
+    Empty (no text, no key) unless the refusal is the UNANSWERED family AND a ``judgment``
+    was supplied. ``judgment_named_open_ids`` = the request's ``finding_ids`` that are among
+    the open ids, in request order, never raising on a malformed (raw, unvalidated) block.
+    """
+    if not supplied or outcome.family != _finding.PROMOTE_FINDING_UNANSWERED:
+        return {}
+    named = []
+    try:
+        detail = outcome.detail if isinstance(outcome.detail, dict) else {}
+        open_ids = [i for i in (detail.get("open_finding_ids") or ())
+                    if isinstance(i, str)]
+        asked = judgment.get("finding_ids") if isinstance(judgment, dict) else None
+        if isinstance(asked, (list, tuple)):
+            for fid in asked:
+                if isinstance(fid, str) and fid in open_ids and fid not in named:
+                    named.append(fid)
+    except Exception:  # noqa: BLE001 - disclosure only; never sink the refusal
+        named = []
+    return {"text": _JUDGMENT_NOT_WRITTEN_SENTENCE,
+            "keys": {"judgment_not_written": True, "judgment_named_open_ids": named}}
+
+
 def _finding_gate_block(outcome):
     """The contract disclosure body, JSON-safe. Emitted ONLY when the gate ENGAGED.
 
@@ -5586,7 +5647,7 @@ def promote_best(session, params):
             "ok": False,
             "error_family": "workspace_param",
             "error": name_err,
-            "design_name": design_name,
+            "design_name": _echo_name(design_name),
             "seq": seq,
             "best_zmx": None,
             "best_png": None,
@@ -5981,6 +6042,12 @@ def promote_best(session, params):
             {} if finding_outcome.verdict == _finding.FINDING_NOT_APPLICABLE
             else _finding_gate_block(finding_outcome))
         if not finding_outcome.permits:
+            # A judgment on THIS request is neither validated nor written on
+            # this refusal and never answers a finding; say so (keys ONLY when a judgment
+            # was supplied and the refusal is the unanswered family).
+            judgment_note = _judgment_not_written_note(
+                finding_outcome, params.get("judgment") if "judgment" in params else None,
+                "judgment" in params)
             # A PRE-FORK exit on the `:3196-3209` shape: every existing promote_best key
             # present and NULLED — this promotes NOTHING. ``identity`` HAS been
             # evaluated by now (three statements above the contract guard), so the
@@ -5990,7 +6057,9 @@ def promote_best(session, params):
             return {
                 "ok": False,
                 "error_family": finding_outcome.family,
-                "error": _finding_refusal_text(finding_outcome),
+                "error": _finding_refusal_text(finding_outcome)
+                         + judgment_note.get("text", ""),
+                **judgment_note.get("keys", {}),
                 "design_name": design_name,
                 "seq": seq,
                 "best_zmx": None,
@@ -6649,7 +6718,8 @@ PROMOTE_BEST_SPEC = ToolSpec(
         "overrode nothing and needs no reason. The reason is written to disk "
         "beside the candidate bytes and read back (judgment_record / judgment_receipt); "
         "judgment is accepted on an UNFORCED promote too, because a note about a design "
-        "you kept should not require forcing to say. When the judgment names "
+        "you kept should not require forcing to say, but a judgment here does not answer "
+        "an open finding: answer it with save_candidate(judgment=...) first. When the judgment names "
         "finding_ids it MUST also carry disposition — acted | declined | superseded | "
         "referred — and each id must name a finding already recorded against this "
         "design; disposition is FORBIDDEN when finding_ids is empty. "

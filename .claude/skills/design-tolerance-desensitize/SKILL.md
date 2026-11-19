@@ -20,9 +20,7 @@ track (about the start lens's, unless the brief gives room). State the ceilings 
 field after what assembly can adjust. That is refocus always, plus ONE push (lateral decenter of one element or
 cemented group) where the lens is centred at assembly, as a microscope objective is. The threshold is an RMS
 wavefront: 0.0714 waves for a diffraction-limited lens, otherwise the brief's, or one you state. A trial whose push
-sits at its travel limit counts as a failure. When the brief gives each field its own threshold, pass Quick Yield
-`threshold` as a list, one value per field (the worst field is then the one with the lowest pass rate against its own
-threshold), and divide each field's row in the judge merit by its threshold so the Monte Carlo reads 1.0 as the limit.
+sits at its travel limit counts as a failure.
 
 1. **Fix the judge before you move anything.**
    - Budget: the brief's, else the wizard preset for the lens type (microscope `{"vendor": "Generic", "grade":
@@ -68,27 +66,27 @@ threshold), and divide each field's row in the judge merit by its threshold so t
      `design-vision-review` with its seq, giving the start lens's track and thickest element in the design intent.
      The review is advice and the readings decide, but answer each finding it records. If you act on one, screen
      again.
-   - **Confirm with a paired per-field Quick Yield read** when the screened changes add up (or after about three
-     rounds). Parent (the last kept lens, reloaded from its candidate file): `tolerance(mode="quick_yield",
-     budget=..., pupil=2, threshold=<the as-built threshold>, trials=1000, repeats=2)`. It runs one analysis per
-     field and returns `fields` and a `worst_field`. Note the result's `id`. Then reload the candidate and run the
-     same call with `baseline=<the parent's id>`. The paired block gives candidate minus parent per field
-     (`fields[].d_yield`) and for the worst field (`worst_field`, also the top-level `d_yield`, `d_p90`), each with
-     an SE and `resolved`.
-   - **Read the parent once.** The server holds the last 4 Quick Yield results across an engine release, so several
-     candidates pair against the same parent read. Measure the parent again only when `baseline` is refused as not
-     held.
-   - Quick Yield is refocus only and reads its own RMS wavefront, not the loaded merit; it does not take the push
-     (`cb_group` is refused). Its yield is NOT the as-built yield: compare it only candidate against parent, never
-     with a Monte Carlo number or with the target.
-   - **Keep** when the worst field's `d_yield` is positive and resolved, `comparable` is true, NO field's `d_yield` is
-     resolved negative, and the worst field's `d_p90` is not resolved higher. A resolved loss at any field reloads
-     the parent. When `worst_field.selection_uncertain` is true or the worst field is `censored`, the gain is not
-     resolved. Anything else is **not confirmed**: you may keep screening from it, but report it as unconfirmed and
-     do not make it the parent until a later paired read resolves it. Save every kept lens as a candidate.
-   - **Memory.** Each analysis (one per field per repeat) holds about 3.7 GB per 1000 trials until the engine closes.
-     After EVERY Quick Yield call: save the lens, `release_engine`, reload it. If a call is refused for memory, lower
-     `repeats`.
+   - **Confirm with a paired gauge read** when the screened changes add up (or after about three rounds). Parent (the
+     last kept lens, reloaded from its candidate file): `tolerance(mode="gauge", budget=..., threshold=<the as-built
+     threshold>, compensator="dls_cb_group", cb_group={"group": <the step 2 group>, "decenter_mm": <travel>})`. It
+     returns the Monte Carlo key set plus `per_field` (each field's `yield`, `p90` and `n_trials`, and the
+     `worst_field`); `yield` is the per-trial worst field, the judge's statistic. Note `run_summary.gauge.id`. Then
+     reload the candidate and run the same call with `baseline=<that id>`. The `paired` block gives candidate minus
+     parent: `verdict` (`gain`, `loss` or `tie`, on the worst-field yield, else P90, else the mean), `d_yield`,
+     `d_p90`, and per field `fields[].d_yield`, each with an SE and `resolved`.
+   - **Read the parent once.** The server holds the last 16 gauge results, so several candidates pair against the same
+     parent read. Measure the parent again only when `baseline` is refused as not held.
+   - The gauge reads like the closing Monte Carlo, push included; the closing Monte Carlo is the judge. It may read
+     above the judge, so compare it only candidate against parent, never with a Monte Carlo number or with the target.
+   - **Keep** when `paired.pairing` is `"paired"` and `paired.d_yield.value` is at or above -0.003 (a gain, a tie,
+     or a loss of at most 0.3 points), and no field loses more than that: a field whose `d_yield` is resolved below
+     -0.003 may lose only if its candidate `per_field` yield is still at or above the yield target (the brief's);
+     otherwise reload the parent. A keep that is not a gain is a sideways step: it moves the loop to a new lens so
+     the next rounds start somewhere new. Track the running total of the `d_yield` values you kept since the start
+     lens. After two sideways steps in a row with no gain, reload the kept lens with the highest running total and
+     take the next round from there. Deliver the kept lens with the highest running total, not simply the last one.
+     Anything else is **not confirmed**: you may keep screening from it, but report it as unconfirmed and do not
+     make it the parent. Save every kept lens as a candidate.
 6. **Closing Monte Carlo.** Run it unless the brief says an outside judge measures the delivered lens; then report
    AFTER as `not measured` and name that judge. When you stop starting rounds: release the engine, reload the lens
    you deliver, load the judge merit and run `tolerance(mode="monte_carlo", compensator="dls_cb_group",
@@ -106,7 +104,7 @@ threshold), and divide each field's row in the judge merit by its threshold so t
    hotspot or the next lever.
 9. **Report.** The start lens and the final lens side by side: the push group, the yield, the P90,
    the nominal at every field, the track and the thickest element, each with the trials it rests on. Then each
-   round: hotspot, cause, lever, the nominal at every field, the track, the paired Quick Yield readings (the worst
+   round: hotspot, cause, lever, the nominal at every field, the track, the paired gauge readings (the worst
    field and its `d_yield`, `d_p90` with their SEs, and any field that lost) and decision (kept, rejected, screened
    out, not confirmed). Name the hotspots left untried.
 

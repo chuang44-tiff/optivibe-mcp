@@ -32,6 +32,7 @@ from . import _asphere_cells as _asph
 from . import _lens_common as _c
 from ._lens_common import _clear_material_to_air  # S-2: shared clear-to-air locus (L30)
 from . import _optimize_common as _oc
+from . import _solve_refs as _refs
 from . import lens_glass, lens_surface, lens_system
 from .optimize_merit_io import _unlink_quiet
 
@@ -484,7 +485,7 @@ class LensSpec:
         )
 
     @classmethod
-    def _reconcile_count(cls, system, target_count):
+    def _reconcile_count(cls, system, target_count, shrink_collector=None):
         """Grow/shrink the LDE to ``target_count`` via the firewall-guarded
         insert/remove tools (never silently skip surfaces, never
         reach an out-of-range engine call).
@@ -536,10 +537,17 @@ class LensSpec:
                 # Move the stop to `host` (auto-clears the old stop at `at`), with
                 # the set_stop read-back proving the move took effect.
                 lens_surface.set_stop_surface(sess, {"surface": host})
-            lens_surface.remove_surface(sess, {"at": at})
+            removed = lens_surface.remove_surface(sess, {"at": at})
+            # Keep the
+            # ``solve_refs`` block ``remove_surface`` returns (the filter keeps ``affected``
+            # blocks and the post-mutation ``established`` fallback; see the helper).
+            if shrink_collector is not None:
+                entry = _shrink_solve_refs_entry(removed)
+                if entry is not None:
+                    shrink_collector.append(entry)
 
     @classmethod
-    def apply(cls, system, spec):
+    def apply(cls, system, spec, shrink_collector=None):
         """Apply ``spec`` to the live ``system`` via the mutator helpers.
 
         Reuses set_aperture / set_field / set_wavelength / set_surface /
@@ -562,7 +570,7 @@ class LensSpec:
         # Reconcile the surface count FIRST so no surface is silently
         # skipped and no extra-surface index ever reaches an out-of-range insert.
         if spec.surfaces:
-            cls._reconcile_count(system, len(spec.surfaces))
+            cls._reconcile_count(system, len(spec.surfaces), shrink_collector)
 
         if spec.aperture_type:
             lens_system.set_aperture(
@@ -2018,13 +2026,21 @@ def apply_lens_spec(session, params):
     # (round-trip mismatch -> rollback) returns directly inside the except and NEVER reaches
     # the reset (the disclosure keys are a SUCCESS-PATH-ONLY stamp).
     success_env = None
+    # Collector for the shrink's ``remove_surface`` solve_refs disclosures (the
+    # ``affected`` ones, plus an established-identities fallback). A COLLECTOR, not a return value: a later failing write raises out of
+    # ``LensSpec.apply``, and a return would be lost on exactly the rollback path.
+    # NO ``refuse_on_solve_refs`` parameter is offered on this tool, deliberately: the
+    # tool-surface budget (every param is served context on every session), and the
+    # caller who wants refuse-before-mutate can call ``remove_surface(at=...,
+    # refuse_on_solve_refs=true)`` directly BEFORE applying the spec.
+    shrink_refs = []
     try:
         try:
             # The atomic boundary covers the MUTATION and the VERDICT (D2 step 3). S1
             # GAP-1a: apply returns the hard-reset disclosure (surfaces_reset /
             # solves_reset_to_fixed) — stamped on the SUCCESS envelope below, NEVER on a
             # rollback (a failed apply returns inside the except and never reaches it).
-            reset_disclosure = LensSpec.apply(system, spec)
+            reset_disclosure = LensSpec.apply(system, spec, shrink_collector=shrink_refs)
             read_back = LensSpec.read(system)
             mismatches = _spec_roundtrip_mismatches(spec, read_back)
             # After apply/reconcile, the system must not be left stop-less. If
@@ -2082,6 +2098,10 @@ def apply_lens_spec(session, params):
                     env["surfaces_reset"] = reset_surfaces
                 if solves_reset:
                     env["solves_reset_to_fixed"] = solves_reset
+            # The shrink's solve-loss disclosure: SUCCESS envelope only, present only when
+            # non-empty (a rollback returns inside the except and reports it differently).
+            if shrink_refs:
+                env["shrink_solve_refs"] = shrink_refs
             # Do NOT return here — hand the committed env to the outer scope so
             # the reset runs OUTSIDE the checkpoint try (after the reap).
             success_env = env
@@ -2097,6 +2117,7 @@ def apply_lens_spec(session, params):
                 system, checkpoint_path, pre_snapshot, reason=repr(exc),
                 mismatches=mismatches, auto_loaded_catalogs=auto_loaded,
                 driven_cells=driven_cells, driven_scan_failed=driven_scan_failed,
+                shrink_removed=bool(shrink_refs),
             )
     finally:
         # D2 step 7: reaped on EVERY path. The LIVE engine writes its native ``.ZDA``
@@ -2191,9 +2212,66 @@ def _mismatches_from_exc(exc):
     return [str(exc)]
 
 
+_SHRINK_ROLLED_BACK_NOTE = (
+    "the shrink removed surfaces that solves referenced, and the rollback restored the "
+    "verified pre-apply checkpoint"
+)
+_SHRINK_UNKNOWN_NOTE = (
+    "the shrink removed surfaces that solves referenced and the restore did NOT verify, "
+    "so whether those solve relationships survive is UNKNOWN"
+)
+
+
+def _shrink_solve_refs_entry(removed):
+    """One ``remove_surface`` return -> a ``shrink_solve_refs`` entry, or ``None``.
+
+    Consumes ``remove_surface``'s return ``{"at", "count", "solve_refs": {"state", ...}}``
+    (``lens_surface.py`` ``return {"at": at, "count": new_count, **_refs.disclosure(...)}``).
+    Kept: the ``affected`` state (a solve on a surviving row referenced the removed row),
+    and a ``could_not_scan`` block whose post-mutation fallback still carries the
+    ``established_before_the_failure`` affected identities (the removal happened and a
+    relationship was already established). A bare ``could_not_scan`` or ``none_affected``
+    names no referenced relationship and is not kept.
+    """
+    block = removed.get("solve_refs") if isinstance(removed, dict) else None
+    if not isinstance(block, dict):
+        return None
+    state = block.get("state")
+    established = block.get(_refs._ESTABLISHED)
+    established_hit = isinstance(established, dict) and bool(
+        established.get("affected_identities"))
+    if state != _refs.VERDICTS[1] and not (
+            state == _refs.VERDICTS[2] and established_hit):
+        return None
+    return {"at": removed.get("at"), "solve_refs": block}
+
+
 def _rollback_lens_apply(system, checkpoint_path, pre_snapshot, *, reason, mismatches,
                          auto_loaded_catalogs=None, driven_cells=(),
-                         driven_scan_failed=None):
+                         driven_scan_failed=None, shrink_removed=False):
+    """Rollback + (when the shrink had removed referenced surfaces) the loss status.
+
+    Never claims lost, never claims restored without evidence: a verified restore says the
+    checkpoint was restored (``shrink_solve_refs_rolled_back: true``); a restore that threw
+    or did not verify says in the error sentence that the loss status is UNKNOWN. The post-restore verify compares a ``LensSpec`` read, which holds no solve
+    state, so the sentence is tied to the verified checkpoint restore, not a solve read.
+    """
+    env = _rollback_core(system, checkpoint_path, pre_snapshot, reason=reason,
+                         mismatches=mismatches, auto_loaded_catalogs=auto_loaded_catalogs,
+                         driven_cells=driven_cells, driven_scan_failed=driven_scan_failed)
+    if shrink_removed:
+        if env.get("rolled_back") is True:
+            env["shrink_solve_refs_rolled_back"] = True
+            env["error"] += "; " + _SHRINK_ROLLED_BACK_NOTE
+        else:
+            # Wording only: no extra wire key (the brief grants the rolled-back flag only).
+            env["error"] += "; " + _SHRINK_UNKNOWN_NOTE
+    return env
+
+
+def _rollback_core(system, checkpoint_path, pre_snapshot, *, reason, mismatches,
+                   auto_loaded_catalogs=None, driven_cells=(),
+                   driven_scan_failed=None):
     """Restore from the checkpoint + POST-RESTORE verify (D2 steps 4-6 / D3 envelope).
 
     - ``LoadFile(ckpt, False)`` restores the pre-apply ``.zmx``.
@@ -2628,7 +2706,14 @@ APPLY_LENS_SPEC_SPEC = ToolSpec(
         "image-stop are caught); returns the read-back spec as proof. auto_load "
         "defaults ON: every declared not-in-use-catalog glass is pre-scanned + "
         "auto-loaded BEFORE the checkpoint (disclosed via auto_loaded_catalogs); a "
-        "no-catalog material refuses pre-mutation (no partial apply)."
+        "no-catalog material refuses pre-mutation (no partial apply). A spec with fewer "
+        "surfaces removes surfaces; on success 'shrink_solve_refs' lists each removal "
+        "whose row a solve on a surviving row referenced (a reference fact: the "
+        "consequence is in each entry; solve references only, not merit or tolerance "
+        "rows, not by_number_refs). A rolled-back apply whose "
+        "shrink had removed such a row sets 'shrink_solve_refs_rolled_back'; if the restore did not verify, the error "
+        "sentence says the loss status is UNKNOWN. For refuse-before-mutate, call "
+        "remove_surface with refuse_on_solve_refs=true first."
     ),
 )
 

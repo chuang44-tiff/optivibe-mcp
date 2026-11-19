@@ -2,12 +2,61 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.2.3`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.2.4`). Each tag points at the merge
 commit that published that version, and every tag was verified against the version literals
 in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.4] — 2026-11-18
+
+The desensitize loop gets an in-loop yield screen that reads the push like the judge does, and the skill confirms
+each change with it. Monte Carlo takes a seed. The tool count is unchanged.
+
+### Added
+
+- **`tolerance(mode="gauge")`**, a fast in-loop yield screen. It reads the lens's wavefront sensitivities once into
+  a linear model, then draws 10000 builds and re-solves each build's compensators the way the native Monte Carlo
+  loads them: refocus, plus the push group's decenter under `compensator="dls_cb_group"`. A trial clipped at a push
+  limit fails. It returns the `monte_carlo` keys plus `per_field` (each field's yield, P90 and trials, and the worst
+  field), and `yield` is the per-trial worst field, the judge's statistic. `baseline=<id>` pairs a candidate with its
+  parent: a `paired` block with a `verdict` (`gain`, `loss` or `tie`), `d_yield`, `d_p90` and per-field `d_yield`,
+  each with an SE and `resolved`. The server keeps the last 16 results. It is an in-loop evaluator and may read above
+  the judge: compare it candidate against parent only. The native Monte Carlo stays the judge.
+- **`tolerance(mode="monte_carlo", seed=N)`** takes a positive integer seed: two reads with the same seed share their
+  draws. The result carries `seed` and `deterministic` (true only when the seed row read back), and a seeded yield
+  block says `pairing: "common_draws"`. A seed on another mode, a non-positive or non-integer seed, or a seed given
+  together with your own SEED row is refused.
+
+### Changed
+
+- **The `design-tolerance-desensitize` skill** confirms each change with a paired gauge read against its parent, push
+  included, instead of a per-field Quick Yield read. It keeps a change down to a 0.3-point loss (a sideways step),
+  tracks the running total of what it kept, steps back to the best kept lens after two sideways steps without a gain,
+  and delivers the kept lens with the highest running total.
+- **Quick Yield's yield SE** is binomial over all `trials × repeats` draws; `repeat_sd` is still reported.
+  `pairing_note` and `se_rule` say the baseline comparison is unpaired. A field within two combined SE of the worst
+  field now makes the worst-field pick `selection_uncertain`.
+- **The Monte Carlo yield block** carries a binomial SE and, unseeded, says the reads are independent.
+- **`optimize`** reports a validity read it could not make as `is_valid_read: "unknown"` with a warning, and never
+  certifies it. Advisory findings arrive in their own `advisories` list. The automatic Hammer run is stopped at about
+  `run_time_m` plus 30 s; the result reports `hammer_bound_s` and `budget_reached`, and keeps the partial result.
+- **`apply_lens_spec`** reports the solve references a shrink removes (`shrink_solve_refs`), and says when a rollback
+  restored them.
+- **Refusals carry their remedy.** `apply_merit_recipe` refuses an unknown operand code in one line that points to
+  `lookup_operand`. `add_math_constraint` names the supported sign conventions, and `add_operand` /
+  `apply_merit_recipe`, when the catalog's convention is not one of them. A `promote_best` refusal for an unanswered
+  finding says when a passed judgment was not written and names the open findings.
+
+### Fixed
+
+- **`save_candidate`'s `form` block** counts GRIN glass, and a design with no glass keeps its track with
+  `thickest_glass: null` and a reason. A design name that is not valid UTF-8 is refused at the door.
+- **`check_clearance` on a folded design** does not apply the minimum glass thickness to flat plates.
+- **Quick Yield** refuses a huge `trials`, `pupil` or other integer in its own error family instead of raising.
+- **A lost engine connection** during an operand-slot count read is reported as a closed session (`get_operand`
+  serves it as `session_closed`), not as an unchecked slot.
 
 ## [0.2.3] — 2026-11-12
 
@@ -628,6 +677,7 @@ A housekeeping release: no new tools.
 
 - Initial public release of optivibe-mcp.
 
+[0.2.4]: ../../compare/v0.2.3...v0.2.4
 [0.2.3]: ../../compare/v0.2.2...v0.2.3
 [0.2.2]: ../../compare/v0.2.1...v0.2.2
 [0.2.1]: ../../compare/v0.2.0...v0.2.1

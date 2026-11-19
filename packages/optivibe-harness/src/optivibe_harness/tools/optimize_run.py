@@ -338,6 +338,23 @@ def _gate_message(family, variables, number_of_operands, merit):
     )
 
 
+# An UNREADABLE IsValid is neither valid nor
+# invalid. The run proceeds (refusing a healthy run on an oracle fault is the mirror defect) but
+# is DISCLOSED -- ``is_valid_read: "unknown"`` on the envelope plus this sentence in ``warning``.
+_IS_VALID_UNKNOWN_MSG = (
+    "the optimizer's IsValid could not be read before the run, so the merit was NOT certified as "
+    "evaluable; if the run fails or the merit reads uncomputable, rebuild the merit per the "
+    "ESCAPE recipe carried by optimize_merit_uncomputable (set_vignetting, REBUILD build_merit, "
+    "re-seed)"
+)
+
+
+def _read_is_valid(handle):
+    # ONE read for BOTH arms (DLS ``opt`` and Hammer ``ham``) so the pair cannot drift.
+    # True = valid, False = invalid (the refusal), None = UNREADABLE (never keyed on a message).
+    return safe_call(lambda: bool(handle.IsValid), None)
+
+
 def _merit_uncomputable_run_message(err_msg):
     """The optimize opt.IsValid-False message (§4.2): the engine's own readiness verdict."""
     return (
@@ -973,8 +990,9 @@ def optimize(session, params):
        cores, and ``Close()``s in ``finally`` (the reap). FIRST in the open body
        (§2b): a guarded ``opt.IsValid`` read — ``False`` short-circuits to
        ``optimize_merit_uncomputable`` (carrying ``opt.ErrorMessage``, ``passes=0``,
-       no cycles run, still reaped by the finally); a read-throw degrades to letting
-       the run proceed (the ``optimize_run_failed`` path is the backstop).
+       no cycles run, still reaped by the finally); an UNREADABLE read is ``unknown``
+       (``_read_is_valid``): the run proceeds but is DISCLOSED (``is_valid_read: "unknown"``
+       plus one ``warning`` sentence), never certified as evaluable.
     5. Read ``merit_before`` from ``mfe.CalculateMeritFunction()``. Run
        ``max_passes`` passes, each ``RunAndWaitWithTimeout(<what is left of
        time_budget_s>)``; after each pass read ``opt.CurrentMeritFunction``, snapshot
@@ -1294,14 +1312,12 @@ def _optimize_impl(session, params):
         # (4b) Authoritative pre-run readiness (§2b). The preflight sentinel already
         # short-circuited the common 9e9 case before opening; THIS catches the rare
         # merit < ceiling yet engine-invalid borderline, 100% faithful (the engine's own
-        # IsValid + ErrorMessage). GUARDED: an IsValid read-throw degrades to letting the
-        # run proceed (the optimize_run_failed path is the backstop) — never crash. The
+        # IsValid + ErrorMessage). GUARDED: an IsValid read-throw is ``unknown`` (not valid, not
+        # invalid): the run proceeds but is DISCLOSED via ``iv_keys`` — never crash. The
         # optimizer is still reaped by _optimizer_session's finally (return-inside-with).
-        try:
-            is_valid = bool(opt.IsValid)
-        except Exception:  # noqa: BLE001 — a read-throw -> backstop: let the run proceed
-            is_valid = True
-        if not is_valid:
+        is_valid = _read_is_valid(opt)
+        iv_keys = {"is_valid_read": "unknown"} if is_valid is None else {}
+        if is_valid is False:
             # §4.2: the IsValid:False detection is SELF-CONTAINED — it must always
             # produce optimize_merit_uncomputable. A degraded engine that throws a
             # NON-AttributeError (.NET remoting fault) on read, or returns a proxy whose
@@ -1359,6 +1375,7 @@ def _optimize_impl(session, params):
                     run_id=run_id,
                     passes=passes_run,
                     artifacts=artifact_trail,
+                    **(iv_keys and dict(iv_keys, warning=_IS_VALID_UNKNOWN_MSG)),
                 ), None, nw)
 
             opt_current = opt.CurrentMeritFunction
@@ -1463,7 +1480,10 @@ def _optimize_impl(session, params):
 
     # Surface the guard note (auto_normalize ran / require_free_stop skip)
     # alongside any run-time warning — neither should clobber the other (§6.3).
-    warning = _merge_warning(guard_warning, warning)
+    warning = _merge_warning(
+        guard_warning,
+        _merge_warning(warning, _IS_VALID_UNKNOWN_MSG if iv_keys else None),
+    )
 
     # MCE: the config-span disclosure + the single-config-over-multi-config
     # WARN (NEVER a refusal). Merge the span warning with the run-time warning.
@@ -1551,6 +1571,7 @@ def _optimize_impl(session, params):
         "n_configs": span["n_configs"],
         "configs_covered": span["configs_covered"],
         "merit_scalar_multi_config": span["merit_scalar_multi_config"],
+        **iv_keys,
         "readback": {
             "opt_current": safe_float(merit_after),
             "mfe_recalc": safe_float(mfe_recalc),
@@ -1580,7 +1601,7 @@ def _optimize_impl(session, params):
     result.update(_merit_reality_divergence_warning(session, safe_float(merit_after)))
     # (§2.5): the opt-in-nudge success disclosure (per_config_thin_nudged +
     # the pairing/knife-edge warning). Absent (byte-identical) when nothing was nudged.
-    result = _apply_nudge_disclosure(result, nudge_disclosure)
+    result = _with_advisories(_apply_nudge_disclosure(result, nudge_disclosure))
     # optimize-verdict-qualification : qualify the merit verdict against the CONFIRMED
     # geometry evidence, LAST (so the bounded headline folds into the finished `warning`).
     result = _qualify_verdict(result)
@@ -1594,8 +1615,9 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
     """The Hammer (global-search) fork of ``optimize`` (§2.4/§2.5).
 
     Hammer opens ``Tools.OpenHammerOptimization()`` (NOT the local optimizer), sets
-    ``AutomaticOptimization``+``TargetRunTimeM``, runs ONE ``RunAndWaitForCompletion()`` that
-    COMMITS to the live LDE, and best-restores the pre-run design if the result came out
+    ``AutomaticOptimization``+``TargetRunTimeM``, runs ONE bounded ``_rb.run_hammer_bounded`` call
+    (``RunAndWaitWithTimeout(run_time_m * 60 + grace)``; on ``TimedOut`` ``Cancel()``, then
+    ``WaitForCompletion()``) that COMMITS to the live LDE, and best-restores the pre-run design if the result came out
     WORSE (never return worse than entry). The result dict is a PARALLEL build that CALLS the
     same leaf helpers the DLS tail uses (no DLS refactor), so the
     ``negative_air_gap_warning`` (via ``_edge_audit_warnings``) rides a Hammer result too.
@@ -1606,7 +1628,7 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
     ``Cancel()`` and ``WaitForCompletion()``, where the result reaches the lens), the Substitute
     solves' ``Catalog`` field is written for the run and put back after the handle closes, and
     ``Succeeded`` is not a gate. ``_hammer_timed.route`` adds the timed result keys. The automatic
-    result is unchanged.
+    result adds ``hammer_bound_s`` (its bound in seconds) and ``budget_reached``.
 
     All reaps run in the ``finally``: the checkpoint ``.zmx``/``.ZDA`` is glob-reaped (#59)
     and ``_hammer_session`` ``Close()``s the optimizer. Failure classes reuse the
@@ -1653,14 +1675,11 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
             # — the OpenHammerOptimization None-raise / a config-set throw — is OUTSIDE this
             # try, so it still surfaces as optimize_unavailable / propagates, un-swallowed.)
             try:
-                # Pre-run readiness (parity with the DLS opt.IsValid guard): a guarded
-                # read-throw degrades to proceeding (the optimize_run_failed path is the
-                # backstop).
-                try:
-                    is_valid = bool(ham.IsValid)
-                except Exception:  # noqa: BLE001 — a read-throw -> backstop: let the run proceed
-                    is_valid = True
-                if not is_valid:
+                # Pre-run readiness (parity with the DLS opt.IsValid guard): ONE shared
+                # three-valued read; a read-throw is ``unknown`` -> proceed, DISCLOSED.
+                is_valid = _read_is_valid(ham)
+                iv_keys = {"is_valid_read": "unknown"} if is_valid is None else {}
+                if is_valid is False:
                     # Pre-run: RAWFC was NOT called, so the design is UNMUTATED — return
                     # without a restore (the outer finally still reaps the checkpoint once).
                     err_msg = _safe_error_message(
@@ -1675,10 +1694,13 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
                         # the outer finally either way.
                         **_oc._uncomputable_row_diagnostics(system),
                     ), None, negative_weight_scan)
-                ok = (ham.RunAndWaitForCompletion() if timed is None   # -> True commits to the live LDE
-                      else timed.run(ham, run_time_m))
-                # A timed run reads Succeeded True after a Cancel, so it is not a gate there.
-                succeeded = timed is not None or bool(getattr(ham, "Succeeded", True))
+                # The automatic run is BOUNDED (run_time_m + grace), measured live;
+                # ``run_name`` is "TimedOut" when the bound fired and the partial result was kept.
+                ok, run_name = (_rb.run_hammer_bounded(ham, run_time_m) if timed is None
+                                else (timed.run(ham, run_time_m), None))
+                # A timed run, or one stopped at the bound, reads Succeeded True after a Cancel: not a gate.
+                succeeded = (timed is not None or run_name == "TimedOut"
+                             or bool(getattr(ham, "Succeeded", True)))
                 if not bool(ok) or not succeeded:
                     # a genuinely-failed run may have committed a PARTIAL/worse
                     # mutation. Capture the failure + EXIT the `with` (Hammer closes) so the
@@ -1721,6 +1743,7 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
             return _dt.ride(_oc.error_envelope(
                 "optimize", "optimize_run_failed", f"{msg} ({restore_note})",
                 run_id=run_id, passes=0, artifacts=artifact_trail,
+                **(iv_keys and dict(iv_keys, warning=_IS_VALID_UNKNOWN_MSG)),
             ), None, negative_weight_scan)
         # NEVER return worse than entry. Restore on a WORSE result EVEN when
         # classify_verdict bins it "stable" (within tol), OR on a NON-FINITE result — NOT
@@ -1818,7 +1841,11 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
         None if after_row is None or after_row["ok"] else
         f"pass00_after snapshot failed: {after_row.get('error')}",
     )
-    warning = _merge_warning(warning, warning_restore)
+    warning = _merge_warning(
+        _merge_warning(warning, warning_restore),
+        _merge_warning(_IS_VALID_UNKNOWN_MSG if iv_keys else None,
+                       _rb.hammer_stop_warning(run_name == "TimedOut", run_time_m)),
+    )
     if not checkpoint_ok:
         warning = _merge_warning(
             warning,
@@ -1906,6 +1933,9 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
         "n_configs": span["n_configs"],
         "configs_covered": span["configs_covered"],
         "merit_scalar_multi_config": span["merit_scalar_multi_config"],
+        **iv_keys,
+        **({} if timed is not None else {
+            "hammer_bound_s": _rb.hammer_bound_s(run_time_m), "budget_reached": run_name == "TimedOut"}),
         "note": (
             "Hammer is wall-time bounded (run_time_m); cycles/max_passes are not used."
         ),
@@ -1939,7 +1969,7 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
     result.update(_merit_reality_divergence_warning(session, safe_float(merit_after)))
     # (§2.5): the opt-in-nudge disclosure rides a Hammer result too (the nudge
     # ran BEFORE the algorithm fork), so a recover_thin nudge is never silently undisclosed.
-    result = _apply_nudge_disclosure(result, nudge_disclosure)
+    result = _with_advisories(_apply_nudge_disclosure(result, nudge_disclosure))
     # optimize-verdict-qualification : the SAME qualifier on the Hammer tail (the
     # both-tails drift-pin -- C1/C2). The Hammer `verdict = "stable"` forcing on the
     # `hammer_restored` branch rides it (ROUND-10a: the old `:1302` pin had drifted to
@@ -3620,6 +3650,28 @@ def _qualify_verdict(result):
     return result
 
 
+def _with_advisories(result):
+    # The ALWAYS-present
+    # ``advisories`` channel. One {"key", "summary"} entry per populated advisory key (the
+    # findings the verdict-qualification ``warning`` does NOT carry: negative_air_gap_warning is
+    # left out because it is built from the same gaps as its geometry_audit entry, which the
+    # ``warning`` headline always names); [] when none fires, so
+    # absence is positively distinguishable from "not looked at". ``warning`` is untouched.
+    result["advisories"] = [
+        {"key": k, "summary": (s if not (s := str(result[k]).split(". ", 1)[0])[200:]
+                               else s[:198].rsplit(" ", 1)[0] + " …")}
+        for k in ("thin_edge_warning", "thin_edge_warning_provisional",
+                  "thin_edge_net_withheld_warning", "buried_center_warning",
+                  "negative_bfl_warning",
+                  "grin_index_nonphysical_warning", "grin_index_box_violated_warning",
+                  "grin_dn_exceeds_envelope_warning", "grin_index_unread_warning",
+                  "grin_axial_monotonicity_not_audited", "grin_index_audit_failed",
+                  "merit_reality_divergence_warning")
+        if result.get(k)
+    ]
+    return result
+
+
 def _mrd_classify_config(poly_env, pw_env, config):
     """Classify ONE config's (field) points into (hits, skipped, n_sampled) (§2.1).
 
@@ -4132,7 +4184,7 @@ OPTIMIZE_SPEC = ToolSpec(
         "the run is stopped, the partial result STAYS in the lens, and the result says "
         "budget_reached: true with run_time_s and the engine's status text; such a lens "
         "is not converged whatever the verdict reads, so call optimize again to continue. "
-        "The checks after the run are outside this budget. Hammer does not use it. "
+        "The checks after the run are outside this budget. Hammer does not use it (its own bound is run_time_m, below). "
         "A DLS or OD result also says what ended its pass loop, in stop_reason: "
         "gain_below_threshold (the last pass changed the merit by less than 1 part in "
         "10000, so the loop stopped by itself, even when that was the last pass allowed), "
@@ -4149,7 +4201,7 @@ OPTIMIZE_SPEC = ToolSpec(
         "it comes out worse. run_time_m is a wall-time CAP, not a target: Hammer runs in "
         "AUTO mode and early-terminates when the global search converges, so a fast return "
         "(well under a second on a small or already-good system) with real merit improvement "
-        "is the expected early-stop, NOT a dropped cap. The automatic Hammer run never substitutes a glass that carries a Substitute solve (set_solve, MaterialSubstitute). hammer_mode='timed' (Hammer only) runs it for the WHOLE run_time_m, up to 60 minutes, so the call blocks that long, and DOES substitute those glasses; glass_changes lists each change with catalog, kind and status, and a discontinued or non-lens pick is flagged, not filtered. catalog (timed only) limits the picks to ONE catalog already in use. A mixed catalog (GL, MISC, MISC1, MISC-CRB) is refused, as is a run whose Substitute solves could draw from one: pass catalog=. Gotcha: require_free_stop defaults True, so this REFUSES a "
+        "is the expected early-stop, NOT a dropped cap. The automatic Hammer run is stopped at about run_time_m minutes plus 30 s; when that bound fires the result says budget_reached: true (hammer_bound_s is the bound in seconds), the lens keeps the partial result and a warning says the search is not finished. The automatic Hammer run never substitutes a glass that carries a Substitute solve (set_solve, MaterialSubstitute). hammer_mode='timed' (Hammer only) runs it for the WHOLE run_time_m, up to 60 minutes, so the call blocks that long, and DOES substitute those glasses; glass_changes lists each change with catalog, kind and status, and a discontinued or non-lens pick is flagged, not filtered. catalog (timed only) limits the picks to ONE catalog already in use. A mixed catalog (GL, MISC, MISC1, MISC-CRB) is refused, as is a run whose Substitute solves could draw from one: pass catalog=. Gotcha: require_free_stop defaults True, so this REFUSES a "
         "glass-vertex stop with no optimizer opened — run normalize_stop first (or pass "
         "auto_normalize). Also REFUSES (optimize_negative_weight) a merit "
         "carrying a NEGATIVE weight, with nothing opened: the sign has been "
@@ -4184,6 +4236,8 @@ OPTIMIZE_SPEC = ToolSpec(
         "low merit can hide a bad position -- read PER-CONFIG performance with the "
         "config=\"all\" graders (get_first_order, analyze_strehl, analyze_wavefront, "
         "check_clearance) rather than accepting the scalar as proof. "
+        "advisories is always present ([] when none): each advisory finding that fired (edge, GRIN and "
+        "merit_reality_divergence keys) as {key, summary}; warning does not carry them. "
         "WALK IN a demanding spec (the optimize-loop skill, 'Walk in a hard target'): easier spec first, then "
         "move the hard spec in by re-weighting, with every stated field and every authored geometric bound kept "
         "at non-zero weight; per-field polychromatic RWCE rows drive (ring 6, wave 0) and STRH never drives and "

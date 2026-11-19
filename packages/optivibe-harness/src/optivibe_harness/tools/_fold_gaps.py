@@ -468,12 +468,23 @@ def _centre_only(i, j, rows, collapsed, kind, reason, ctx, min_air, min_glass, n
     oracle, g, crossing = (orc[1], orc[2], orc[3]) if orc is not None else (None, None, None)
     rec, ce, worst = _record(i, j, rows, collapsed, kind, ctx["parity"], ctx["centre"], None, None,
                              False, reason, oracle, g, crossing, min_air, min_glass, n)
-    flags = [f"fold gap S{i}->S{j} edge not measured: {reason}"]
+    flags = [f"fold gap S{i}->S{j} edge not measured: {reason}"] + _plate_flag(rec, i, j)
     if _cl.controlling_height_source(rows[i]["semi_diameter"], rows[j]["semi_diameter"]) == "substituted_single_finite":
         flags.append(f"fold gap S{i}->S{j}: only one bounding semi-diameter is finite-positive; the fold "
                      "never substitutes a semi, so the edge is not measured")
     return PairResult(rec, _nm(i, j, collapsed, kind, reason, centre=ctx["centre"]),
                       _violation_entry(rec, ce, worst), flags)
+
+
+def _plate_flag(rec, i, j):
+    """The unfolded audit's plate disclosure, for a folded gap exempted from ``min_glass``."""
+    if not rec.get("plate") or not any(
+            v is not None and math.isfinite(v) and v < rec["threshold"]
+            for v in (rec["center_thickness"], rec["edge_thickness"])):
+        return []
+    return [f"gap S{i}->S{j} is a plane-parallel plate (both faces flat): the element floor "
+            f"min_glass={rec['threshold']} does not apply, so it is reported with its numbers "
+            "but not as a violation"]
 
 
 def _record(i, j, rows, collapsed, kind, parity, centre, edge, h, edge_valid, reason, oracle,
@@ -482,6 +493,8 @@ def _record(i, j, rows, collapsed, kind, parity, centre, edge, h, edge_valid, re
     finite = [v for v in (centre, edge) if v is not None and math.isfinite(v)]
     worst = min(finite) if finite else None
     ce = worst is not None and worst < threshold
+    plate = bool(kind == "glass" and (worst is None or worst > 0.0) and _cl.is_plate(rows[i], rows[j]))
+    ce = ce and not plate                    #: same plate exemption as the unfolded audit
     ray = min_ray_gap is not None and min_ray_gap < 0
     fz = [s for s in (i, j) if rows[s].get("semi_solve") == "Fixed"]
     src = _cl.controlling_height_source(rows[i]["semi_diameter"], rows[j]["semi_diameter"])
@@ -499,6 +512,8 @@ def _record(i, j, rows, collapsed, kind, parity, centre, edge, h, edge_valid, re
     }
     if not edge_valid:
         rec["edge_not_measured_reason"] = reason
+    if plate:
+        rec["plate"] = True
     return rec, bool(ce), worst
 
 
@@ -564,7 +579,7 @@ def _evaluate(i, j, rows, walk, frames, traced, min_air, min_glass, n, unavailab
         return _centre_only(i, j, rows, collapsed, kind, ereason, ctx, min_air, min_glass, n)
     rec, ce, worst = _record(i, j, rows, collapsed, kind, parity, centre, edge, h, True, None,   # rule 10
                              oracle, g, crossing, min_air, min_glass, n)
-    return PairResult(rec, None, _violation_entry(rec, ce, worst), [])
+    return PairResult(rec, None, _violation_entry(rec, ce, worst), _plate_flag(rec, i, j))
 
 
 # --------------------------------------------------------------------------- #
@@ -696,7 +711,10 @@ def _record_complete(g):
     mrg = g.get("min_ray_gap")
     if viol is False and fin(mrg) and mrg < 0:                                             # (n1)
         return False
-    if viol is False and any(fin(v) and v < th for v in (g.get("center_thickness"), g.get("edge_thickness"))):
+    plate = g.get("plate") is True                     # a flagged plate is only held to positive thickness
+    if viol is False and any(
+            fin(v) and (v <= 0.0 if plate else v < th)
+            for v in (g.get("center_thickness"), g.get("edge_thickness"))):
         return False                                                                       # (n2)
     return True
 

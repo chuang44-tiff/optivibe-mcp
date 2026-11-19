@@ -46,12 +46,14 @@ def _rec(y, p90=0.09, bound="exact"):
     return {"yield": y, "bound": bound, "p50": 0.06, "p90": p90, "mean": 0.06}
 
 
-def test_repeats_pool_to_the_mean_with_a_repeat_sd_standard_error():
+def test_repeats_pool_to_the_mean_with_a_binomial_se_over_every_draw():
     out, stats = qy.summarise([_rec(0.50), _rec(0.60)], trials=1000)
     sd = math.sqrt(((0.50 - 0.55) ** 2 + (0.60 - 0.55) ** 2) / 1)
     assert out["value"] == pytest.approx(0.55)
-    assert out["se"] == pytest.approx(sd / math.sqrt(2))
-    assert out["se_kind"] == "repeat_sd/sqrt(repeats)"
+    assert out["se"] == pytest.approx(math.sqrt(0.55 * 0.45 / 2000))
+    assert out["se_kind"].startswith("binomial over trials*repeats")
+    assert out["repeat_sd"] == pytest.approx(sd)
+    assert stats["p90"]["se"] == pytest.approx(0.0)
     assert out["censored"] is False
 
 
@@ -93,6 +95,13 @@ def test_a_censored_field_that_can_lie_below_the_pick_is_named_as_competing():
     w = qy._worst_index(fields)
     assert fields[w]["field"] == 1
     assert qy._competing_fields(fields, w) == [2]
+
+
+def test_an_exact_field_within_two_combined_se_of_the_pick_is_named_as_competing():
+    fields = [_field(1, 0.40), _field(2, 0.43), _field(3, 0.80)]
+    for f in fields:
+        f["yield"]["se"] = 0.015
+    assert qy._competing_fields(fields, 0) == [2]
 
 
 # ------------------------------------------------------------------ paired reads

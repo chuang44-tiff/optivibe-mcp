@@ -42,6 +42,7 @@ from ..enums import _resolve_enum
 from ..errors import SurfaceWriteError, ToolParamError
 from ..server import ToolSpec
 from . import _config_common as _ccfg
+from . import _grounding
 from . import _lens_common as _lc
 from . import _merit_cells as _mc
 from . import _merit_io as _mio
@@ -906,8 +907,10 @@ def _phase1_validate(system, mfe, recipe, range_disclosures=None):
         if op_type not in member_cache:
             try:
                 member_cache[op_type] = _resolve_enum(enum_type, op_type)
-            except ToolParamError as exc:
-                errors.append({"index": index, "type": op_type, "error": str(exc)})
+            except ToolParamError:
+                # The shared one-line refusal, no enum member dump.
+                errors.append({"index": index, "type": op_type,
+                               "error": _grounding.unknown_operand_message(op_type)})
                 # Cannot read the signature of an unknown type — skip the rest.
                 continue
 

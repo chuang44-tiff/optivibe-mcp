@@ -6,12 +6,12 @@ returns ``TimedOut`` with the optimizer still running; ``Cancel()`` then stops i
 succeeds and the optimizer opens again. A lens that held one DLS cycle for more than 160 s
 stopped the same way.
 
-LOCAL optimizer only. This module's pass loop (``run_pass`` / ``Budget``) is not used for Hammer.
-On an AUTOMATIC Hammer handle those calls improved an internal copy that never committed and
-blocked the tool slot (earlier probe rounds). A MANUAL Hammer handle (``AutomaticOptimization``
-False) was measured later: ``RunAndWaitWithTimeout`` -> ``Cancel`` -> ``WaitForCompletion``
-commits at the wait and the slot reopens after ``Close()``. That run lives in ``_hammer_timed``,
-not here.
+LOCAL optimizer pass loop (``run_pass`` / ``Budget``) is not used for Hammer. Hammer has its own
+single-call bound, ``run_hammer_bounded``, below. Earlier probe rounds read ``RunAndWaitWithTimeout``
++ ``Cancel`` on an AUTOMATIC Hammer handle as wedging; a later live probe (Cooke 40 degree)
+found the sequence clean there too: ``TimedOut`` at the requested time,
+``Cancel()`` True, ``WaitForCompletion()`` commits the result to the lens, the slot reopens after
+``Close()``. The MANUAL handle's timed run lives in ``_hammer_timed``.
 
 Cycle-safe: imports nothing from ``optimize_run``.
 """
@@ -45,6 +45,46 @@ def run_status_name(value):
         return str(value).rsplit(".", 1)[-1].strip()
     except Exception:  # noqa: BLE001 - a bridged value whose __str__ throws
         return ""
+
+
+#: Seconds added to the documented Hammer budget (``run_time_m`` minutes) before the automatic run is
+#: stopped: the engine's own ``TargetRunTimeM`` stop gets first call, and this only catches a run that
+#: does not honour it. A live test patches it to bound a sub-second run.
+HAMMER_GRACE_S = 30.0
+
+
+def hammer_bound_s(run_time_m):
+    """The wall bound of an AUTOMATIC Hammer run: ``run_time_m`` minutes plus ``HAMMER_GRACE_S``."""
+    return float(run_time_m) * 60.0 + HAMMER_GRACE_S
+
+
+def run_hammer_bounded(ham, run_time_m):
+    """Run an AUTOMATIC Hammer handle at most ``hammer_bound_s`` seconds -> ``(ok, status_name)``.
+
+    ``RunAndWaitWithTimeout`` returns a ``RunStatus`` ENUM, compared by NAME. ``Cancel()`` only after
+    ``TimedOut``, then ``WaitForCompletion()`` on ``TimedOut`` AND ``Completed`` (the
+    only measured sequence: probe run1 waited after ``Completed``), where the result reaches the lens;
+    the return values of Cancel and the wait are not success flags. The wait itself is unbounded
+    (live: 0.25-0.38 s after a Cancel). ``ok`` is False on ``FailedToStart`` (or anything
+    that is neither name), so the caller keeps its failure path. A raise propagates to the caller.
+    """
+    name = run_status_name(ham.RunAndWaitWithTimeout(hammer_bound_s(run_time_m)))
+    if name == "TimedOut":
+        ham.Cancel()
+    if name in ("TimedOut", "Completed"):
+        ham.WaitForCompletion()      # the probed sequence on both names (on Completed it returned False in 0.001 s)
+    return name in ("Completed", "TimedOut"), name
+
+
+def hammer_stop_warning(bound_reached, run_time_m):
+    """The disclosure of an automatic Hammer run stopped at its bound, or None."""
+    if not bound_reached:
+        return None
+    return (
+        f"the automatic Hammer run was stopped at its wall bound ({hammer_bound_s(run_time_m):g} s = "
+        f"run_time_m {float(run_time_m):g} min + {HAMMER_GRACE_S:g} s grace); the lens holds the best "
+        "result found so far (kept unless it was worse than entry) and the search is NOT finished"
+    )
 
 
 def run_pass(opt, remaining_s):
@@ -181,6 +221,10 @@ __all__ = [
     "STOP_TIME_BUDGET",
     "TIME_BUDGET_S_CAP",
     "clock",
+    "HAMMER_GRACE_S",
+    "hammer_bound_s",
+    "hammer_stop_warning",
+    "run_hammer_bounded",
     "run_pass",
     "run_status_name",
     "stop_warning",
