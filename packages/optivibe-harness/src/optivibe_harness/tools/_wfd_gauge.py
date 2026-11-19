@@ -846,7 +846,7 @@ def _mismatch(ra, rb):
     for name, i in (("rule_id", 0), ("seed", 1), ("n", 2), ("row set", 3)):
         if pa[i] != pb[i]:
             return name
-    if ga.get("topology_digest") != gb.get("topology_digest"):
+    if ga.get("topology_digest") is None or ga.get("topology_digest") != gb.get("topology_digest"):
         return "topology"
     if ga.get("threshold") != gb.get("threshold"):
         return "threshold"
@@ -902,8 +902,11 @@ def paired(res_a, res_b):
     for f in range(ar["field_rms"].shape[1]):
         fields.append({"index": f, "d_yield": _yield_diff(passed(ar, f, thr_a), passed(br, f, thr_b), mode)})
     no_loss = not any(x["d_yield"]["resolved"] and x["d_yield"]["value"] < 0 for x in fields)
+    topo_a, topo_b = res_a["gauge"].get("topology_digest"), res_b["gauge"].get("topology_digest")
+    if thr_a != thr_b or topo_a is None or topo_a != topo_b:   # different bars / lenses, whatever `reason` names first
+        verdict, no_loss = None, None
     return {"pairing": "paired" if mode else "independent", "reason": reason, "d_yield": d_yield, "d_p90": d_p90,
             "d_mean": d_mean, "d_tail": d_tail, "statistic": stat, "verdict": verdict,
             "n_common": min(n_a, n_b) if mode else 0,
-            "topology_same": res_a["gauge"].get("topology_digest") == res_b["gauge"].get("topology_digest"),
+            "topology_same": topo_a is not None and topo_a == topo_b,
             "fields": fields, "no_field_loss": no_loss}
