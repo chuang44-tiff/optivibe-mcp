@@ -1,5 +1,8 @@
 """tools/_tolerance_quick_yield.py -- ``tolerance(mode="quick_yield")``: OpticStudio's Quick Yield analysis. NOT dispatchable.
 
+YIELD SE. The yield's SE is binomial over the pooled ``trials * repeats`` draws (the repeats were measured to behave as
+a binomial); ``repeat_sd`` is reported, not used. A baseline read is an UNPAIRED comparison (no seed, no shared draws).
+
 WHAT IT IS. One call = the wizard budget on the loaded lens, then ``repeats`` rounds of Quick Yield analyses
 (``IAS_QuickYield``) with ``CompensatorStrategy = OptimizeAllDampedLeastSquares`` (a back-focus refocus), all
 wavelengths. By DEFAULT a round is one analysis PER FIELD (``Field.SetFieldNumber(k)``, k = 1..F); with
@@ -17,9 +20,10 @@ at that field's threshold (``threshold`` is a number for every field, or a list 
 drawn SEPARATELY, so each field's yield is a MARGINAL pass rate. The headline (``worst_field`` and the top-level
 ``yield``) is the LOWEST of those marginals (tie: the higher P90): an UPPER BOUND on the pass rate of every field
 passing in the SAME trial, which is what the native ``monte_carlo`` / ``pick_push`` judge scores. A censored field read is
-a bound: when another field's bound can lie below the picked field's yield (or two exact fields tie on yield and P90) the
-worst field is ``selection_uncertain`` (``competing_fields`` names them) and the headline is ``censored``, so a paired
-read never calls it ``resolved``; a headline censored from above (``>=``) is only a lower bound of the upper bound. It is not comparable
+a bound: when another field's bound can lie below the picked field's yield, two exact fields tie on yield and P90, or two
+uncensored fields lie within 2 combined yield SE of each other, the worst field is ``selection_uncertain``
+(``competing_fields`` names them) and the headline is ``censored``, so a baseline comparison never calls it
+``resolved``; a headline censored from above (``>=``) is only a lower bound of the upper bound. It is not comparable
 with the yield of ``monte_carlo``; compare a Quick Yield result with another Quick Yield result of the same statistic
 and field count only (``baseline=<id>``; anything else is refused ``baseline_incomparable``). With
 ``criterion='composite'`` the number is the "Field: All" COMPOSITE RMS wavefront curve read at one threshold: it
@@ -203,6 +207,30 @@ def new_id():
 # --------------------------------------------------------------------------- #
 # validate: every refusal is pure -- nothing is opened
 # --------------------------------------------------------------------------- #
+MAX_INT32 = 2 ** 31 - 1         # the engine's Int32 limit for NumMonteCarlo / PupilSampling
+
+
+def _show_int(value):
+    """``str(value)``, except a huge int (``str`` raises ValueError past 4300 digits) is named by its digit count."""
+    if abs(value) > 10 ** 18:
+        return f"an integer of about {math.ceil(value.bit_length() * 0.30103)} digits"
+    return str(value)
+
+
+def _show(value):
+    """``repr(value)`` for a refusal message, safe for any caller value: a huge int (``repr`` raises ValueError past 4300
+    digits) is named by its digit count, a list is shown entry by entry, and anything else that still cannot be rendered
+    is named by its type. Ordinary values render exactly as ``repr`` does."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return _show_int(value) if abs(value) > 10 ** 18 else repr(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_show(v) for v in value) + "]"
+    try:
+        return repr(value)
+    except ValueError:
+        return f"<a {type(value).__name__} holding an integer too large to show>"
+
+
 def _int_param(params, key, default, low, high=None):
     if not dict.__contains__(params, key):
         return default
@@ -210,10 +238,10 @@ def _int_param(params, key, default, low, high=None):
     if isinstance(value, float) and math.isfinite(value) and value == int(value):
         value = int(value)
     if isinstance(value, bool) or not isinstance(value, int):
-        raise _refuse(f"{key} must be an integer, got {value!r}; nothing was opened", f"{key}_invalid")
+        raise _refuse(f"{key} must be an integer, got {_show(value)}; nothing was opened", f"{key}_invalid")
     if value < low or (high is not None and value > high):
         bound = f">= {low}" if high is None else f"in {low}..{high}"
-        raise _refuse(f"{key} must be {bound}, got {value}; nothing was opened", f"{key}_invalid")
+        raise _refuse(f"{key} must be {bound}, got {_show_int(value)}; nothing was opened", f"{key}_invalid")
     return value
 
 
@@ -238,7 +266,7 @@ def validate(params):
         if criterion not in ("wavefront", COMPOSITE):
             raise _refuse("mode='quick_yield' reads the RMS wavefront: criterion must be absent or 'wavefront' (one "
                           "analysis per field, the default) or 'composite' (one 'Field: All' analysis); "
-                          f"got {criterion!r}; nothing was opened", "criterion_not_wavefront")
+                          f"got {_show(criterion)}; nothing was opened", "criterion_not_wavefront")
         statistic = COMPOSITE if criterion == COMPOSITE else PER_FIELD
     if dict.__contains__(params, "compensator"):
         comp = dict.__getitem__(params, "compensator")
@@ -247,17 +275,17 @@ def validate(params):
                           "refused; omit compensator or pass 'dls' (OptimizeAllDampedLeastSquares); nothing was opened",
                           "paraxial_focus_no_results")
         if comp != "dls":
-            raise _refuse(f"mode='quick_yield' admits compensator 'dls' (the default) only, got {comp!r}; "
+            raise _refuse(f"mode='quick_yield' admits compensator 'dls' (the default) only, got {_show(comp)}; "
                           "nothing was opened", "compensator_invalid")
     if not isinstance(dict.get(params, "budget"), dict):
         raise _refuse("mode='quick_yield' needs budget={vendor, grade, element_decenter, element_tilt}; "
                       "nothing was opened", "budget_required")
     budget = tr._resolve_budget(params)
-    trials = _int_param(params, "trials", QY_MIN_N, 1)
+    trials = _int_param(params, "trials", QY_MIN_N, 1, MAX_INT32)
     if trials < QY_MIN_N:
         raise _refuse(f"trials must be >= {QY_MIN_N} (Quick Yield raises ArgumentException below that), got {trials}; "
                       "nothing was opened", "trials_below_minimum")
-    pupil = _int_param(params, "pupil", DEFAULT_PUPIL, 1)
+    pupil = _int_param(params, "pupil", DEFAULT_PUPIL, 1, MAX_INT32)
     repeats = _int_param(params, "repeats", DEFAULT_REPEATS, 1, MAX_REPEATS)
     threshold = DEFAULT_THRESHOLD
     if dict.__contains__(params, "threshold"):
@@ -269,19 +297,19 @@ def validate(params):
                               "threshold_list_composite")
             bad = [v for v in threshold if isinstance(v, bool) or not is_finite_number(v) or v <= 0]
             if bad:
-                raise _refuse(f"every threshold entry must be a finite number > 0 (waves), got {bad!r} in {threshold!r}; "
+                raise _refuse(f"every threshold entry must be a finite number > 0 (waves), got {_show(bad)} in {_show(threshold)}; "
                               "nothing was run", "threshold_invalid")
             threshold = [float(v) for v in threshold]
         elif isinstance(threshold, bool) or not is_finite_number(threshold) or threshold <= 0:
             raise _refuse(f"threshold must be a finite number > 0 (waves) or a list of them, one per field, got "
-                          f"{threshold!r}; nothing was opened", "threshold_invalid")
+                          f"{_show(threshold)}; nothing was opened", "threshold_invalid")
         else:
             threshold = float(threshold)
     cap_s = DEFAULT_CAP_S
     if dict.__contains__(params, "cap_s"):
         cap_s = dict.__getitem__(params, "cap_s")
         if isinstance(cap_s, bool) or not is_finite_number(cap_s) or cap_s <= 0:
-            raise _refuse(f"cap_s must be a finite number > 0 (seconds per analysis), got {cap_s!r}; nothing was opened",
+            raise _refuse(f"cap_s must be a finite number > 0 (seconds per analysis), got {_show(cap_s)}; nothing was opened",
                           "cap_s_invalid", family="tolerancing_param")
         cap_s = float(cap_s)
     baseline = None
@@ -289,7 +317,7 @@ def validate(params):
         baseline = dict.__getitem__(params, "baseline")
         baseline = store_get(baseline) if isinstance(baseline, str) else None
         if baseline is None:
-            raise _refuse(f"baseline {dict.__getitem__(params, 'baseline')!r} is not a quick_yield result held by this process (a server restart, "
+            raise _refuse(f"baseline {_show(dict.__getitem__(params, 'baseline'))} is not a quick_yield result held by this process (a server restart, "
                           f"or {STORE_MAX} newer results, empties it); {BASELINE_REMEDY}; nothing was opened",
                           "baseline_unknown")
     return {"budget": budget, "trials": trials, "pupil": pupil, "repeats": repeats, "threshold": threshold,
@@ -403,7 +431,11 @@ def run_record(xs, ys, threshold):
 
 
 def summarise(records, trials):
-    """Pool the repeats: means, the repeat SD (more than one repeat) or a binomial SE (one), and the censored flag."""
+    """Pool the repeats: means, the yield's binomial SE over the pooled ``trials * repeats`` draws, and the censored flag.
+
+    The yield SE is ``sqrt(p (1 - p) / (trials * n))`` for any repeat count (the repeats were measured to behave as a
+    binomial: 1.14x the binomial variance over 148 reads); ``repeat_sd`` and ``yields`` stay published as diagnostics. The
+    p50 / p90 / mean SEs stay ``repeat_sd / sqrt(repeats)`` (they have no binomial analogue)."""
     n = len(records)
     yields = [r["yield"] for r in records]
     p90s = [r["p90"] for r in records if r["p90"] is not None]
@@ -414,14 +446,16 @@ def summarise(records, trials):
     out = {"value": y, "censored": bool(bounds),
            "bound": (bounds[0] if len(set(bounds)) == 1 else ("mixed" if bounds else "exact")),
            "yields": yields, "repeat_sd": _sd(yields)}
-    if n > 1:
-        out["se"], out["se_kind"] = out["repeat_sd"] / math.sqrt(n), "repeat_sd/sqrt(repeats)"
-    elif y is not None:
+    if y is None:
+        out["se"], out["se_kind"] = None, None
+    elif n > 1:
+        out["se"] = math.sqrt(max(y * (1.0 - y), 0.0) / (trials * n))
+        out["se_kind"] = ("binomial over trials*repeats (the repeats behave as a binomial; repeat_sd is reported but "
+                          "not used)")
+    else:
         out["se"] = math.sqrt(max(y * (1.0 - y), 0.0) / trials)
         out["se_kind"] = ("binomial (one repeat: a floor, not a repeat SD; assumes the N reconstructed draws are "
                           "independent)")
-    else:
-        out["se"], out["se_kind"] = None, None
     stats = {}
     for name, vals in (("p50", p50s), ("p90", p90s), ("mean", means)):
         sd = _sd(vals)
@@ -448,8 +482,9 @@ _DIGEST_KEYS = ("budget_digest", "topology_digest")
 def paired(base, cand):
     """candidate - baseline for yield, P90 and mean, with a combined SE and a ``resolved`` flag at > 2 SE.
 
-    Quick Yield has no seed, so the two results share no draws: the comparison is ALWAYS independent and the combined
-    SE is ``sqrt(se_a^2 + se_b^2)``. ``comparable`` is False (with the first mismatch as ``reason``) when the two ran a
+    Quick Yield has no seed, so the two reads share no draws: this is an UNPAIRED comparison of two independent reads
+    (the block keeps the name ``paired`` and ``pairing: "independent"`` for wire compatibility) and the combined SE is
+    ``sqrt(se_a^2 + se_b^2)``, the noise of both reads (about 1.4x one read). ``comparable`` is False (with the first mismatch as ``reason``) when the two ran a
     different threshold, N, pupil, compensator, budget rows or topology; then ``resolved`` is forced False. A censored
     yield is a bound, not a number: it is never ``resolved``. A statistic with no SE (one repeat: P90 and mean) has
     ``resolved`` null.
@@ -476,12 +511,14 @@ def paired(base, cand):
         return {"value": d, "se": se, "resolved": resolved}
 
     cens = base["yield"]["censored"] or cand["yield"]["censored"]
-    out = {"pairing": "independent", "pairing_note": "no seed: the two results share no draws",
+    out = {"pairing": "independent", "pairing_note": ("no seed: the two reads share no draws, so this is an UNPAIRED comparison of two "
+                                         "independent reads"),
            "baseline_id": base["id"], "comparable": comparable, "reason": reason,
            "d_yield": diff("yield", base["yield"], cand["yield"], censored=cens),
            "d_p90": diff("p90", base["p90"], cand["p90"]),
            "d_mean": diff("mean", base["mean"], cand["mean"]),
-           "censored": cens, "se_rule": "sqrt(se_a^2 + se_b^2); resolved when |difference| > 2 SE"}
+           "censored": cens, "se_rule": ("unpaired: sqrt(se_a^2 + se_b^2), the noise of both reads (about 1.4x one read); "
+                       "resolved when |difference| > 2 SE")}
     bf, cf = base.get("fields"), cand.get("fields")
     if bf and cf and len(bf) == len(cf):
         out["fields"] = [{"field": b["field"],
@@ -789,7 +826,9 @@ def _yield_interval(yld):
 
 def _competing_fields(fields, w):
     """The fields (numbers) whose reads leave the choice of worst field ``w`` uncertain: another field whose true yield
-    can lie below the picked field's true yield (a censored bound admits it), or one that ties it on yield AND P90."""
+    can lie below the picked field's true yield (a censored bound admits it), one that ties it on yield AND P90, or one
+    statistically CLOSE to it: neither is censored, both yield SEs are known and
+    ``|y_j - y_w| <= 2 * sqrt(se_j^2 + se_w^2)`` (the pick is then within noise)."""
     lo_w, hi_w = _yield_interval(fields[w]["yield"])
     out = []
     for j, f in enumerate(fields):
@@ -798,7 +837,11 @@ def _competing_fields(fields, w):
         lo, hi = _yield_interval(f["yield"])
         tie = (not f["yield"]["censored"] and not fields[w]["yield"]["censored"]
                and f["yield"]["value"] == fields[w]["yield"]["value"] and f["p90"]["value"] == fields[w]["p90"]["value"])
-        if lo < hi_w or tie:
+        yj, yw = f["yield"], fields[w]["yield"]
+        close = (not yj["censored"] and not yw["censored"] and yj.get("se") is not None and yw.get("se") is not None
+                 and yj["value"] is not None and yw["value"] is not None
+                 and abs(yj["value"] - yw["value"]) <= 2.0 * math.sqrt(yj["se"] ** 2 + yw["se"] ** 2))
+        if lo < hi_w or tie or close:
             out.append(f["field"])
     return out
 
@@ -939,8 +982,8 @@ def _run(session, params):
                 "least one repeat; that field's yield is a bound, not a value")
         if uncertain:
             warnings.append(
-                f"selection_uncertain: field {best['field']} has the lowest read, but the censored read(s) or tie of "
-                f"field(s) {competing} admit a lower true yield; the worst field and the headline are not a definite value")
+                f"selection_uncertain: field {best['field']} has the lowest read, but the censored read(s), tie or "
+                f"closeness (within 2 combined SE) of field(s) {competing} admit a lower true yield; the worst field and the headline are not a definite value")
         worst_field = {"field": best["field"], "yield": best["yield"]["value"], "p90": best["p90"]["value"],
                        "threshold": best["threshold"], "censored": head_censored,
                        "bound": best["yield"]["bound"], "selection_uncertain": uncertain, "competing_fields": competing}

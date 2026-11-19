@@ -5329,15 +5329,18 @@ def _hammer_session(system, *, run_time_m=None, cores=None, automatic=True):
        without it ``RunAndWaitForCompletion()`` silently NO-OPS (returns False, merit
        unchanged, no commit). Then set ``TargetRunTimeM`` (a wall-time CAP, minutes; auto
        mode stops early on converge) and clamp cores.
-    3. yield ``(ham, cores_used)`` for the caller to run ONE ``RunAndWaitForCompletion()``
-       + read ``CurrentMeritFunction``.
+    3. yield ``(ham, cores_used)`` for the caller to run ONE bounded run
+       (``_run_budget.run_hammer_bounded``: ``RunAndWaitWithTimeout`` -> ``Cancel()`` on ``TimedOut`` ->
+       ``WaitForCompletion()``) + read ``CurrentMeritFunction``.
     4. ``finally: ham.Close()`` ALWAYS (guarded — a teardown failure never masks the run
        outcome). This is the L22 single-seat reap.
 
     TWO MODES. ``automatic=True`` (the default) is the run above, and its constraint stands:
-    call ONLY ``RunAndWaitForCompletion()`` and NEVER ``Run()`` / ``RunAndWaitWithTimeout()`` /
-    ``Cancel()`` on an automatic handle (rounds 3 and 4: they improved an INTERNAL copy that
-    never committed and wedged the single-instance ``Tools`` resource). ``automatic=False`` is
+    NEVER call ``Run()`` on an automatic handle (rounds 3 and 4 read ``Run`` / ``RunAndWaitWithTimeout`` /
+    ``Cancel`` there as improving an INTERNAL copy and wedging the ``Tools`` slot; a later live probe
+    found ``RunAndWaitWithTimeout`` -> ``Cancel()`` ->
+    ``WaitForCompletion()`` clean on the AUTOMATIC handle: the result reaches the lens at the wait and
+    the slot reopens, so ``_run_budget.run_hammer_bounded`` uses that sequence). ``automatic=False`` is
     the manual mode the timed run uses (probe Q1-Q7): ``AutomaticOptimization =
     False``, no ``TargetRunTimeM`` (accepted but ignored there), then
     ``RunAndWaitWithTimeout(seconds)`` -> ``Cancel()`` -> ``WaitForCompletion()``. Measured:

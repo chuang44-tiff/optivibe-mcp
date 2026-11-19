@@ -1068,8 +1068,10 @@ def verify_cpar_axes(rows, cb1, ranges):
 # --------------------------------------------------------------------------- #
 # Saturation of the group compensator's CPAR axes (D2) and the per-trial bound counts (Amendment B).
 # --------------------------------------------------------------------------- #
-# A CPAR value within 0.1 % of its bound counts as AT the bound (the probe's BOUND_REL): the engine overshoots the
-# bound by up to 9e-4 relative, so a strict test would miss real hits.
+# A CPAR value within 0.1 % of its bound counts as AT the bound (the probe's BOUND_REL).: the engine does not
+# enforce compensator bounds under OptimizeAll DLS (the report warns "Boundary constraints on compensators will be
+# ignored"; one 10x trial read 0.0714 against a +-0.05 range, 43 % past it), so a value at or past the threshold counts
+# as a hit, however far past, and a strict test would miss real hits.
 SAT_REL = 1e-3
 # The statistics block prints 6 decimals: an extremum is known to within this much. A value inside this band of the
 # threshold cannot be classified, so the flag is ``None`` there (never a guess).
@@ -1104,7 +1106,8 @@ def cpar_saturation(stats, cb1, effective, rel=SAT_REL):
 
     Error directions: a true bound hit read ``False`` needs the engine to print an extremum short of the bound by
     more than ``r * rel`` (it never did in the probes); a ``True`` needs both printed extrema beyond the threshold.
-    The engine overshoots a bound by up to 9e-4 relative, so overshoot counts as a hit and nothing is clamped.
+    The engine may ignore a compensator bound entirely (a 0.0714 read against a +-0.05 range), so any
+    overshoot counts as a hit and nothing is clamped.
     """
     by_label = {blk["label"]: blk for blk in stats or []}
     out = []

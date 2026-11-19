@@ -496,8 +496,9 @@ def remove_surface(session, params):
     DISCLOSE BY DEFAULT, and this is the WEAKER of the two safety postures — recorded
     rather than glossed. An agent that does not read the key still destroys the
     relationship under ``ok: true``. The default is nonetheless disclose, for two
-    reasons: ``lens_spec._reconcile_count``'s shrink loop calls this as a BARE STATEMENT
-    with the returned dict discarded and no channel to pass an override down, so
+    reasons: ``lens_spec._reconcile_count``'s shrink loop calls this and keeps only the
+    ``affected`` solve_refs blocks (``shrink_solve_refs``); it has no channel to pass
+    ``refuse_on_solve_refs``, by design, so
     refuse-by-default would break a shipped MCP door with no escape hatch; and under
     refuse-by-default a ``could_not_scan`` must resolve either to a refusal (a
     denial-of-service on a structural tool via any one wedged cell anywhere) or to a
@@ -869,8 +870,9 @@ REMOVE_SURFACE_SPEC = ToolSpec(
         "in 'unscanned', which does refuse. Merit and tolerance rows that name the "
         "removed surface by number slide to the next surface; they are listed in "
         "'by_number_refs', and the multi-configuration rows the engine deleted in "
-        "'mce_rows_deleted'. A surface range that only spans it is not listed, and the "
-        "shrink path inside apply_lens_spec reports none of this."
+        "'mce_rows_deleted'. A surface range that only spans it is not listed. "
+        "apply_lens_spec's shrink path reports the solve references only, as "
+        "'shrink_solve_refs'; it does not report by_number_refs or mce_rows_deleted."
     ),
 )
 

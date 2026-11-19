@@ -24,6 +24,10 @@ sideways by up to 0.05 mm. A build whose push sits at its travel limit counts as
 
 A small bench: four runs on one lens, each judged once. See [Limits](#limits).
 
+> **Since 0.2.4:** these runs used the 0.2.3 procedure. The shipped skill now confirms each change with a paired
+> gauge read that includes the push (`tolerance(mode="gauge")`), in place of the per-field Quick Yield read in step 7
+> below. See the [CHANGELOG](../../CHANGELOG.md).
+
 ## The setup
 
 **The lens.** A 10x / NA 0.45 microscope apochromat, EFL 20.0012 mm, working distance 3.1212 mm, track 82.993 mm,

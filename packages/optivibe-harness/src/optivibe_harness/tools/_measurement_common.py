@@ -32,7 +32,7 @@ from .._io import safe_float
 from .analysis_operand import _merit_operand_enum, _SUSPICIOUS_MAGNITUDE
 from ._solve_cells import is_driving
 from ..enums import _resolve_enum
-from ..errors import ToolParamError
+from ..errors import SessionClosedError, ToolParamError, map_dotnet_exception
 
 # A 9-arg GetOperandValue takes (type, a2, a3, a4, a5, a6, a7, a8, a9). The
 # trailing args are MANDATORY (analysis_operand). Unused slots are
@@ -54,6 +54,27 @@ def suspicious_sentinel(raw):
     return (not math.isfinite(raw)) or abs(raw) >= _SUSPICIOUS_MAGNITUDE
 
 
+def _transport_loss(exc):
+    """The transport-loss link in ``exc``'s ``__cause__`` chain (``exc`` itself first), else ``None``.
+
+    A link is a loss when it IS a ``SessionClosedError`` or ``map_dotnet_exception`` maps it to one
+    (type-keyed, never a message). Cause-only (``__context__`` is not followed), at most 8 links,
+    cycle-safe, and a raising ``__cause__`` ends the walk. The caller raises the LINK, never a wrapper.
+    """
+    seen, link = set(), exc
+    for _ in range(8):
+        if link is None or id(link) in seen:
+            return None
+        if isinstance(link, SessionClosedError) or isinstance(map_dotnet_exception(link), SessionClosedError):
+            return link
+        seen.add(id(link))
+        try:
+            link = getattr(link, "__cause__", None)
+        except Exception:  # noqa: BLE001 — a hostile attribute ends the walk
+            return None
+    return None
+
+
 def slot_range_problem(system, named):
     """A plain-words refusal when a Surf / Wave / Field slot value is out of range, else ``None``.
 
@@ -67,7 +88,8 @@ def slot_range_problem(system, named):
     read ONCE, only when a slot of that kind is present; a count that cannot be read leaves that
     kind unchecked (the previous behaviour) rather than refusing a read that may be fine. A
     non-numeric value is left to the engine. Headers: ``Surf``; ``Wave`` / ``Wave1`` / ``Wave2``;
-    ``Field``. NEVER raises.
+    ``Field``. Raises ONLY a transport loss met on a count read (the loss itself, see
+    ``_transport_loss``); every other fault leaves the kind unchecked.
     """
     counts = {}
 
@@ -80,7 +102,10 @@ def slot_range_problem(system, named):
                     counts[kind] = int(system.SystemData.Wavelengths.NumberOfWavelengths)
                 else:
                     counts[kind] = int(system.SystemData.Fields.NumberOfFields)
-            except Exception:  # noqa: BLE001 — an unreadable count -> that kind unchecked
+            except Exception as exc:  # noqa: BLE001 — an unreadable count -> that kind unchecked
+                loss = _transport_loss(exc)
+                if loss is not None:
+                    raise loss  # a lost engine is never "an unreadable count": dispatch serves session_closed
                 counts[kind] = None
         return counts[kind]
 

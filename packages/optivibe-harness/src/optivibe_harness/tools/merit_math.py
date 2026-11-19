@@ -236,6 +236,13 @@ def add_math_constraint(session, params):
         if "sign_convention" not in spec or _is_null_convention(spec.get("sign_convention")):
             if (g_status == _grounding.GROUNDING_OK
                     and isinstance(reference_convention, str) and reference_convention):
+                if not _convention_supported(reference_convention):
+                    return _oc.error_envelope(
+                        "add_math_constraint", "merit_math_unresolved",
+                        _unsupported_convention_message(index, code, reference_convention),
+                        index=index, code=code,
+                        reference_sign_convention=reference_convention,
+                    )
                 return _oc.error_envelope(
                     "add_math_constraint", "merit_math_unresolved",
                     f"operand[{index}] ({code}) has no 'sign_convention'; the "
@@ -254,10 +261,15 @@ def add_math_constraint(session, params):
 
         sign_convention = spec.get("sign_convention")
 
+        # Both sides go through the grid's own normalizer, so "measurement "
+        # against "measurement" is the same convention, not a contradiction.
         if (g_status == _grounding.GROUNDING_OK
-                and reference_convention != sign_convention):
+                and _mm._normalize_sign_convention(reference_convention)
+                != _mm._normalize_sign_convention(sign_convention)):
             return _oc.error_envelope(
                 "add_math_constraint", "merit_math_ungrounded",
+                _unsupported_convention_message(index, code, reference_convention)
+                if not _convention_supported(reference_convention) else
                 f"operand[{index}] ({code}) sign_convention mismatch: you supplied "
                 f"{sign_convention!r}, the reference catalog states "
                 f"{reference_convention!r}. Re-read the operand with lookup_operand and "
@@ -479,6 +491,19 @@ def _validate_math_config(system, value):
             f"configuration(s) (valid 1..{n_configs})",
         )
     return cfg, None
+
+
+def _convention_supported(sign_convention):
+    """True iff the cross-check grid has a column for this (normalized) convention."""
+    return _mm._normalize_sign_convention(sign_convention) in _mm._SIGN_CONVENTIONS[:-1]
+
+
+def _unsupported_convention_message(index, code, reference_convention):
+    """: the catalog's convention has no grid column, so no value resubmits."""
+    return (f"operand[{index}] ({code}): the reference catalog lists sign convention "
+            f"{reference_convention!r}, but add_math_constraint's grid supports only "
+            f"{list(_mm._SIGN_CONVENTIONS[:-1])}, so no sign_convention value can be passed "
+            f"for {code} here. Author it with add_operand or apply_merit_recipe instead.")
 
 
 def _is_null_convention(sign_convention):

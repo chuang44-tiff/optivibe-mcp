@@ -206,6 +206,108 @@ def _resolve_trials(params):
     return value
 
 
+_SEED_MAX = 2147483647     # the TDE Seed cell is a 32-bit integer cell; a larger value could not read back
+_SEED_MODES_REFUSED = ("desensitize", "quick_yield", "pick_push")   # intercepted modes that would otherwise ignore ``seed`` silently
+
+
+def _resolve_seed(params, mode):
+    """Resolve the optional ``seed`` (round 2, ``monte_carlo`` only): a positive int, or None.
+
+    Absent or a present ``None`` is "no seed" (today's behaviour). Anything else must be a plain positive ``int`` no larger
+    than the Seed cell: a bool, a float (even an integral one, unlike ``trials``: the value is written to an integer cell
+    and a coerced float would hide a caller's slip), a string, ``0`` (the engine reads 0 as "seed from the clock", i.e. no
+    seed at all) and a negative are each ``tolerancing_param``. ``seed`` on any mode but ``monte_carlo`` is refused, never
+    echoed-ignored: a seed the caller thinks was applied would read as paired reads that are not. Pure; opens nothing.
+    """
+    if not (isinstance(params, dict) and dict.__contains__(params, "seed")):
+        return None
+    value = dict.__getitem__(params, "seed")
+    if value is None:
+        return None
+    if mode != "monte_carlo":
+        raise _tc.ToleranceError(
+            f"seed applies only to mode='monte_carlo', not {mode!r}; nothing was opened",
+            family="tolerancing_param", reason="seed_mode")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _tc.ToleranceError(
+            f"seed must be a positive integer, got {type(value).__name__} {value!r}; nothing was opened",
+            family="tolerancing_param", reason="seed_invalid")
+    if value < 1:
+        raise _tc.ToleranceError(
+            f"seed must be >= 1 (0 means 'seed from the clock', i.e. no seed), got {value}; nothing was opened",
+            family="tolerancing_param", reason="seed_invalid")
+    if value > _SEED_MAX:
+        raise _tc.ToleranceError(
+            f"seed must be <= {_SEED_MAX} (a 32-bit integer cell), got {value}; nothing was opened",
+            family="tolerancing_param", reason="seed_invalid")
+    return value
+
+
+def _seed_intercept_refusal(params):
+    """``seed`` handed to an intercepted mode that has no use for it is refused (mode='gauge' refuses it itself)."""
+    if not (isinstance(params, dict) and dict.__contains__(params, "seed")):
+        return
+    if dict.__getitem__(params, "seed") is None:
+        return
+    mode = dict.get(params, "mode")
+    if mode in _SEED_MODES_REFUSED:
+        raise _tc.ToleranceError(
+            f"seed applies only to mode='monte_carlo', not {mode!r}; nothing was opened",
+            family="tolerancing_param", reason="seed_mode")
+
+
+def _supplied_has_seed_row(supplied):
+    """True when the caller's own ``tolerances`` list carries a ``SEED`` control row."""
+    return isinstance(supplied, list) and any(
+        isinstance(e, dict) and isinstance(e.get("type"), str) and e["type"].upper() == "SEED" for e in supplied)
+
+
+def _insert_seed_row(tde, operand_enum, seed):
+    """Insert ONE ``SEED`` row at TDE row 1 and PROVE it (round 2). Fails CLOSED: any miss raises
+    ``tolerancing_run`` (``reason`` names the arm) and the run does not start.
+
+    Row 1, not appended: the manual (SEED) says only the operands listed UNDER a SEED row take its seed, and a row
+    appended at the bottom seeded nothing (live run 3). Called AFTER every authoring path and after the
+    budget digest / row count were read, so no earlier row index shifts and the digest does not depend on the seed.
+    The proof reads row 1 back FROM THE EDITOR through ``read_tde_rows`` (not the returned handle): the count grew by exactly one, row 1's type
+    is ``SEED`` and its Seed cell reads back the seed.
+    Returns ``{"row": 1, "seed": <read-back>, "n_rows_before": n, "n_rows_after": n + 1}``.
+    """
+    def fail(reason, why):
+        raise _tc.ToleranceError(
+            f"the Monte Carlo seed row could not be proven ({why}); nothing was run",
+            family="tolerancing_run", reason=reason)
+
+    meta = _cat.meta_for("SEED")
+    spec = meta.int_cells[0]
+    try:
+        member = _tc._resolve_tol_enum(operand_enum, "SEED")
+        n_before = int(tde.NumberOfOperands)
+        op = tde.InsertNewOperandAt(1)
+        if op is None:
+            fail("seed_row_not_inserted", "InsertNewOperandAt(1) returned no row")
+        if not bool(op.ChangeType(member)):
+            fail("seed_row_not_inserted", "the engine rejected operand type SEED")
+        _cells.write_int_cell(op, spec, seed)
+        n_after = int(tde.NumberOfOperands)
+        if n_after != n_before + 1:
+            fail("seed_row_count", f"the row count went {n_before} -> {n_after}, expected +1")
+        top = _tc.read_tde_rows(tde)[0]           # the editor's own read-back (the shared reader), row 1 first
+        top_type = top["type"]
+        top_cell = top["cells"].get(spec.col)
+        top_seed = (top_cell[1] if isinstance(top_cell, (list, tuple)) and len(top_cell) > 1
+                    and top_cell[0] == spec.header else None)
+    except _tc.ToleranceError:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- any raw-call fault is the same refusal
+        fail("seed_row_unproven", safe_exc(exc, repr_form=True))
+    if top_type != "SEED":
+        fail("seed_row_not_first", f"row 1 reads back type {top_type!r}, expected 'SEED'")
+    if top_seed != seed:
+        fail("seed_row_value", f"row 1's Seed cell reads back {top_seed!r}, expected {seed}")
+    return {"row": 1, "seed": top_seed, "n_rows_before": n_before, "n_rows_after": n_after}
+
+
 def _bool_param(params, key, default):
     """Pull an optional bool param; reject a non-bool (loud).
 
@@ -1294,7 +1396,10 @@ def tolerance(session, params, *, cap_s=None):
     table + worst offenders + an RSS estimate + ``hotspots[]``) or monte_carlo (mean/std/
     best/worst + cumulative-probability percentiles). ``tolerances`` (optional) is a list of
     ``{type, surface, delta}`` (omit for the default budget). ``trials`` (monte_carlo
-    only, default 20) is the engine ``NumberOfRuns``. ``full`` (monte_carlo) includes
+    only, default 20) is the engine ``NumberOfRuns``. ``seed`` (monte_carlo only, a positive integer; 0 is
+    "seed from the clock" and is refused) inserts a ``SEED`` row at TDE row 1 so two reads with the same seed,
+    trials and tolerance rows share their draws; the row is read back from the editor, and a miss refuses the run.
+    ``full`` (monte_carlo) includes
     the per-trial array. ``output_file`` (optional) overrides the temp report path.
 
     S2a: ``budget={vendor, grade, element_decenter, element_tilt}`` drives the engine
@@ -1304,9 +1409,9 @@ def tolerance(session, params, *, cap_s=None):
     ``run_summary``.
 
     Gotcha: the default criterion is the field-summed RMS WFE in waves; a nominal Strehl is
-    reported ALONGSIDE (D8). monte_carlo is STRUCTURALLY non-deterministic
-    (``deterministic:false`` / ``seed_supported:false`` — the engine exposes no seed,
-    probe §5). The tool CLEARS the Tolerance Data Editor (author-as-scratch, D10). The
+    reported ALONGSIDE (D8). monte_carlo is non-deterministic unless ``seed`` is given
+    (``seed_supported:true``; ``deterministic:true`` only when the SEED row read back with
+    that seed; the typed ``ITolerancing`` has no seed property, the TDE ``SEED`` row is the route). The tool CLEARS the Tolerance Data Editor (author-as-scratch, D10). The
     LDE prescription is left untouched (a side-effect tripwire flags a regression).
 
     The catalogue breakdown is in the served description. Pass a RESOLVED code (ground
@@ -1318,6 +1423,8 @@ def tolerance(session, params, *, cap_s=None):
     adds a conservative per-element TETX/TEDX/TIRR set to the DEFAULT budget; ``strict``
     rejects the whole set on ANY gap. Never raises past the handler.
     """
+    # (r2) a ``seed`` handed to an intercepted mode that has no use for it is refused, before it is dropped.
+    _seed_intercept_refusal(params)
     # (S2b) the canned desensitize recipe is intercepted FIRST, before ``_resolve_mode``, so the
     # S2a bad-mode message stays byte-identical. The recipe calls THIS handler (the never-raise
     # wrapped one) for its BEFORE and AFTER sensitivity runs. Lazy import: the S2a path never loads it.
@@ -1330,6 +1437,10 @@ def tolerance(session, params, *, cap_s=None):
     if isinstance(params, dict) and dict.get(params, "mode") == "quick_yield":
         from . import _tolerance_quick_yield as _qy
         return _qy.run(session, params)
+    # mode='gauge' (the linear-model in-loop screen) is intercepted at the same point, for the same reason.
+    if isinstance(params, dict) and dict.get(params, "mode") == "gauge":
+        from . import _wfd_run
+        return _wfd_run.run(session, params)
     # (compensator-picker) mode='pick_push' is intercepted at the same point, for the same reason.
     if isinstance(params, dict) and dict.get(params, "mode") == "pick_push":
         # The picker sets its own per-candidate cap, so a caller's ``cap_s`` is echoed-ignored (and a
@@ -1351,6 +1462,7 @@ def tolerance(session, params, *, cap_s=None):
     # (1) the REQUIRED mode + optional knobs (bad value -> tolerancing_param).
     mode = _resolve_mode(params)
     trials = _resolve_trials(params)
+    seed = _resolve_seed(params, mode)
     full = _bool_param(params, "full", False)
     strict = _bool_param(params, "strict", False)
     include_mechanical = _bool_param(params, "include_mechanical", False)
@@ -1364,6 +1476,10 @@ def tolerance(session, params, *, cap_s=None):
     # unbound base slot. A lying ``get`` returning None here swaps the caller's
     # EXPLICIT tolerance budget for the auto-derived default one, silently.
     supplied = dict.get(params, "tolerances")
+    if seed is not None and _supplied_has_seed_row(supplied):
+        raise _tc.ToleranceError(
+            "seed cannot be combined with a SEED row in tolerances: the tool inserts its own SEED row at row 1; "
+            "pass one or the other. Nothing was opened.", family="tolerancing_param", reason="seed_conflict")
     if budget is None and _tc._is_dls(compensator):
         return _ac.error_envelope(
             "tolerance", "tolerancing_param",
@@ -1557,6 +1673,7 @@ def tolerance(session, params, *, cap_s=None):
     n_budget_rows = None
     report_bytes = None
     tde_cleared = True
+    seed_readback = None
     cb_ctx = None if cb_spec is None else _CbRun(cb_spec)
     cb_error = None
     engine_busy = False      # a capped run whose stop is unconfirmed: nothing below may edit the lens or the TDE
@@ -1606,6 +1723,11 @@ def tolerance(session, params, *, cap_s=None):
         n_budget_rows = len(tde_rows)
         if criterion == "merit":
             _merit_dmfs_guard(system, tde_rows)      #: the TDE as it will run, before the tool opens
+        # (r2) the SEED row goes in LAST: after both authoring paths and after ``tde_rows`` / the digest
+        # ``n_budget_rows`` were read (no earlier row index is used past here, so none shifts), at row 1 because only the
+        # operands listed UNDER a SEED row take its seed. The clear in ``finally`` removes it with the rest.
+        if seed is not None:
+            seed_readback = _insert_seed_row(tde, operand_enum, seed)
 
         # (4) open the single slot (D13: None -> tolerancing_unavailable, nothing run).
         with _tc._tolerancing_session(system) as tol:
@@ -1928,7 +2050,9 @@ def tolerance(session, params, *, cap_s=None):
             hotspots=hotspots, hotspots_withheld=hotspots_withheld,
             compensator_statistics=parsed.get("compensator_statistics"),
             yield_block=(None if mc_threshold is None else _mc_yield_block(
-                parsed.get("per_trial"), compensator, at_bound, mc_threshold, _tc._CRITERIA[criterion].member)),
+                parsed.get("per_trial"), compensator, at_bound, mc_threshold, _tc._CRITERIA[criterion].member,
+                mc_pairing=True, seeded=_seed_proven(seed, seed_readback))),
+            seed=seed, seed_readback=seed_readback,
         ))
     except Exception as exc:  # noqa: BLE001 -- on the CB path the restore status rides EVERY failure
         if cb_ctx is None:
@@ -1947,28 +2071,55 @@ def _cb_group_rule_id(rule_id, cb_spec, effective):
 
 
 _YIELD_KEYS = ("n_trials", "n_pass", "yield", "n_at_bound", "p90")
+_MC_YIELD_SE_KIND = "binomial sqrt(p(1-p)/n_trials); assumes the trials are independent"
+_MC_YIELD_PAIRING_NOTE = ("no seed: two reads share no draws, so a difference of two reads carries the noise of both "
+                          "(about 1.4x one read)")
+_MC_YIELD_SEEDED_NOTE = ("seeded: the draws are shared only with another read of the same seed, trials and tolerance row "
+                         "set. A different lens with the same rows shares the draws, but how much a difference of the two "
+                         "reads gains depends on how alike the lenses respond; a different row set breaks the pairing")
 
 
+def _seed_proven(seed, seed_readback):
+    """True only when a seed was asked for AND the row read back from the editor carrying that seed."""
+    return (seed is not None and isinstance(seed_readback, dict)
+            and seed_readback.get("row") == 1 and seed_readback.get("seed") == seed)
 
-def _mc_yield_block(values, compensator, at_bound, threshold, criterion_member):
+
+def _mc_yield_block(values, compensator, at_bound, threshold, criterion_member, mc_pairing=False, *, seeded=False):
     """The ``yield`` block of a ``monte_carlo`` run under ``threshold``, scored by the picker's ``stats``.
 
     ``dls_cb_group``: a trial fails when it is at a push bound or has no finite value. Any other compensator has no
     push bound: a trial fails only when it has no finite value. Never a guess: an unpairable list is a named reason.
+
+    ``mc_pairing`` (only the real engine Monte Carlo passes it): adds the binomial ``se`` and the
+    ``pairing`` statement. The gauge (``_wfd_run``) calls this too and re-uses ONE set of draws, so it must not say
+    "no seed, no shared draws". ``seeded`` (round 2, with ``mc_pairing``) says the run carried a proven SEED row:
+    ``pairing`` is then ``common_draws`` with the note that the draws are shared only on the same seed, trials and rows.
     """
     from . import _tolerance_pick as _pick
     push = compensator == "dls_cb_group"
     block = {"threshold": threshold, "criterion": criterion_member,
              "failure_rule": "at_push_bound_or_untraceable" if push else "untraceable"}
     if not isinstance(values, list) or not values:
-        return dict(block, **{"yield": None, "reason": "no_per_trial"})
+        return _mc_pairing_keys(dict(block, **{"yield": None, "reason": "no_per_trial"}), mc_pairing, seeded)
     if not push:
         at_bound = [False] * len(values)
     elif (not isinstance(at_bound, list) or len(at_bound) != len(values)
             or not all(isinstance(f, bool) for f in at_bound)):
-        return dict(block, **{"yield": None, "reason": "at_bound_unknown"})
+        return _mc_pairing_keys(dict(block, **{"yield": None, "reason": "at_bound_unknown"}), mc_pairing, seeded)
     got = _pick.stats(values, at_bound, threshold)
-    return dict(block, **_pick._clean({k: got[k] for k in _YIELD_KEYS}))
+    return _mc_pairing_keys(dict(block, **_pick._clean({k: got[k] for k in _YIELD_KEYS})), mc_pairing, seeded)
+
+
+def _mc_pairing_keys(block, on, seeded=False):
+    """``block`` plus ``se`` / ``se_kind`` / ``pairing`` / ``pairing_note`` when ``on``. ``se`` is
+    ``sqrt(p(1-p)/n_trials)`` of the block's own ``yield`` and ``n_trials``; None when either is absent or n is 0."""
+    if not on:
+        return block
+    p, n = block.get("yield"), block.get("n_trials")
+    se = math.sqrt(max(p * (1.0 - p), 0.0) / n) if isinstance(p, (int, float)) and n else None
+    pairing, note = (("common_draws", _MC_YIELD_SEEDED_NOTE) if seeded else ("independent", _MC_YIELD_PAIRING_NOTE))
+    return dict(block, se=se, se_kind=_MC_YIELD_SE_KIND, pairing=pairing, pairing_note=note)
 
 
 def _cb_group_report(text, cb_ctx, cb_spec, parsed, full, warnings):
@@ -2359,7 +2510,8 @@ def _build_envelope(mode, parsed, authored, trials, echoed_trials, full,
                     tde_cleared=True, recon=None, known_gaps=None,
                     grin_perturbation=None, grin_coverage_warning=None, *,
                     criterion="wavefront", compensator="paraxial", run_summary=None,
-                    hotspots=None, hotspots_withheld=None, compensator_statistics=None, yield_block=None):
+                    hotspots=None, hotspots_withheld=None, compensator_statistics=None, yield_block=None,
+                    seed=None, seed_readback=None):
     """Build the locked SENSITIVITY / MONTE_CARLO result envelope (D8/D9/D11/D12/D13/D16).
 
     S2a: ``criterion`` / ``compensator`` (the REQUESTED values, defaulting to today's
@@ -2475,10 +2627,13 @@ def _build_envelope(mode, parsed, authored, trials, echoed_trials, full,
             base["hotspots_withheld"] = hotspots_withheld
         return base
 
-    # monte_carlo: STRUCTURAL determinism honesty (D12 — always present, always false).
+    # monte_carlo: determinism honesty (D12 — always present). r2: the engine takes a SEED row, so the
+    # capability is real (``seed_supported``); ``deterministic`` is true ONLY when a seed was asked for AND the row
+    # read back from the editor carrying it (``_seed_proven``). An unseeded run is not deterministic.
     base["trials"] = int(echoed_trials) if echoed_trials is not None else int(trials)
-    base["deterministic"] = False
-    base["seed_supported"] = False
+    base["seed"] = seed
+    base["deterministic"] = _seed_proven(seed, seed_readback)
+    base["seed_supported"] = True
     base["monte_carlo"] = parsed["monte_carlo"]
     if base["trials"] < _tc._MIN_STABLE_TRIALS:
         warnings.append(
@@ -2500,6 +2655,7 @@ TOLERANCE_SPEC = ToolSpec(
         "mode": "string",
         "tolerances": "array",
         "trials": "number",
+        "seed": "integer",
         "full": "boolean",
         "output_file": "string",
         "include_mechanical": "boolean",
@@ -2524,15 +2680,15 @@ TOLERANCE_SPEC = ToolSpec(
         "run_summary.topology_digest is equal, and compare runs only when budget_rule_id, "
         "criterion, compensator and sampling are equal. mode='monte_carlo' gives "
         "mean/std/best/worst + cumulative percentiles (trials, default 20; full=true adds "
-        "per-trial values; non-deterministic, no seed; threshold adds a yield block, an untraceable or at-push-bound trial failing; capped at 10 s/trial plus 60 s unless cap_s is given, then reason capped, no statistics; an untraceable trial is the stall trigger; criterion='merit' with a DMFS row in the merit and element decenter/tilt rows is refused, merit_dmfs_with_element_tolerances). Both return run_summary. "
+        "per-trial values; threshold adds a yield block, an untraceable or at-push-bound trial failing; capped at 10 s/trial plus 60 s unless cap_s is given, then reason capped, no statistics; an untraceable trial is the stall trigger; criterion='merit' with a DMFS row in the merit and element decenter/tilt rows is refused, merit_dmfs_with_element_tolerances). Both return run_summary. "
         "mode='desensitize' (budget required) is the CONTROL recipe, not the main path: 10 DLS "
         "cycles against the top hotspot's perturbation (TSTX/TSTY/TTHI), then sensitivity again; "
         "it CHANGES the prescription by design (reload to revert) and judges nothing; confirm "
         "with monte_carlo dls. mode='pick_push' (budget, cb_group={decenter_mm}) picks the push compensator: "
         "the 3 eligible top decenter/tilt hotspots each get one capped dls_cb_group Monte Carlo on 'merit' "
         "(trials, default 200; a trial at the push limit fails), ranked by yield under threshold, else by P90; "
-        "near ties are flagged and judge_call (MC2000) returned; "
-        "1 sensitivity run + up to 3 caps inside a 25 min wall budget. mode='quick_yield' (budget, baseline): refocus-only Quick Yield, its own metric; per field (worst = upper bound on all passing), threshold number or list, criterion='composite' = all fields; generally not for use with a push. Budget, one "
+        "1 sensitivity run + up to 3 caps inside a 25 min wall budget. mode='quick_yield' (budget, baseline): refocus-only Quick Yield, its own metric; per field (worst = upper bound on all passing), threshold number or list, criterion='composite' = all fields; generally not for use with a push. "
+        "mode='gauge' (budget, threshold, compensator dls|dls_cb_group[, baseline]): linear-model in-loop screen; monte_carlo keys + per_field. Budget, one "
         "of: budget={vendor, grade, element_decenter, element_tilt} drives the engine "
         "tolerance wizard with element decenter/tilt on; tolerances is a list of {type:<TDE "
         "code>, surface, surface2?, code?, param?, roll_surf?, delta>0 | min+max} (pass a "
@@ -2556,9 +2712,9 @@ TOLERANCE_SPEC = ToolSpec(
         "no other compensator is admitted. Every criterion includes back-focus refocus: do not "
         "tell the user as-built is better on that axis. sampling (default 4; 2 "
         "under-resolves). A CB/NSC-required "
-        "operand is a labeled known_gap (run the rest unless strict=true); TNPA/TNMA never "
-        "open. TMCO analyses the current configuration only. GRIN: TPAR/TPAI take param (n0 "
-        "is 2, coefficients 3..8), disclosed in grin_perturbation. This CLEARS the "
+        "operand is a labeled known_gap (run the rest unless strict=true); "
+        "TMCO analyses the current configuration only. GRIN: TPAR/TPAI take param, "
+        "disclosed in grin_perturbation. This CLEARS the "
         "Tolerance Data Editor and leaves the prescription untouched (except "
         "mode='desensitize'). Gotcha: tolerance a "
         "design LOADED from disk via load_design; an unsaved in-memory system gives "

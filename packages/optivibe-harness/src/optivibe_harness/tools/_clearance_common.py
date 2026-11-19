@@ -340,3 +340,27 @@ def is_optical_surface(row):
     # (infinite or zero radius) is NOT an optical anchor.
     R = row.get("radius")
     return isinstance(R, (int, float)) and math.isfinite(R) and R != 0.0
+
+
+def is_plate(ri, rip1):
+    """True when the glass gap between rows ``ri`` and ``rip1`` is a plane-parallel PLATE.
+
+    :
+    a plate has BOTH bounding faces flat (radius ``inf`` or ``0.0``, the Zemax plane
+    conventions), both ``Standard`` surfaces, zero conic and no asphere coefficients -- so
+    it has no power and no curved edge to grind. An element floor (``min_glass``) is a
+    powered-element rule; applying it to a 0.35 mm filter manufactures a ``violation``.
+
+    Fail-CLOSED on every doubt: an unreadable (NaN) radius or conic, a non-Standard type,
+    a read asphere coefficient set, or a GRIN body is NOT a plate and stays a glass gap.
+    """
+    from . import _grin_cells as _grin
+    for r in (ri, rip1):
+        if _grin._exact_token_match(r.get("type_name"), ("Standard",)) is None:
+            return False
+        if r.get("aspheric_coefficients") is not None or r.get("conic") != 0.0:
+            return False
+        if not (isinstance(r.get("radius"), float)
+                and (math.isinf(r["radius"]) or r["radius"] == 0.0)):
+            return False
+    return True
