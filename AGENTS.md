@@ -38,7 +38,8 @@ this honest:
   (`build_merit` or your own operands), then `dry_run` to confirm readiness *without*
   opening the optimizer.
 - **The stop must be free.** `optimize` / `dry_run` default-refuse a glass-vertex
-  aperture stop — run `normalize_stop` first (or pass `auto_normalize`). A front-vertex
+  aperture stop — run `normalize_stop` first (or pass `auto_normalize=true` to `optimize`;
+  `dry_run` takes `require_free_stop=false`). A front-vertex
   glass stop is also handled by `normalize_stop` (it inserts a zero-thickness dummy air
   stop ahead of the front glass); do not hand-build a dummy stop.
 - **Call `optimize` once; it owns the loop.** It runs monitored optimization internally

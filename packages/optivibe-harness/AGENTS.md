@@ -1,8 +1,8 @@
 # AGENTS.md — optivibe-harness
 
 The ZOS-API automation layer for optivibe-mcp: typed tools wrapping Zemax
-OpticStudio (via pythonnet / `clr`), the MCP server, and the agent runtime. The
-typed ZOS-API surface *is* the syntax-safety layer — the agent reasons about the
+OpticStudio (via pythonnet / `clr`) and the MCP server; the agent is the coding agent
+that calls them. The typed ZOS-API surface *is* the syntax-safety layer — the agent reasons about the
 design and calls typed tools; there is no fragile command-string translation
 step.
 

@@ -496,7 +496,7 @@ def _ref_outcome(view, field, at, n):
         return False, "ref field not an exact integer"
     if not 0 <= raw <= n - 1:
         return False, "ref field out of range"
-    return raw == at, None
+    return at is None or raw == at, None
 
 
 # One PRE-mutation ``affected`` entry, as ``(entry, degraded_reason_or_None)``. Every value
@@ -516,11 +516,16 @@ def _ref_outcome(view, field, at, n):
 # missing knowledge is disclosed BESIDE it. So the optional pickup extras are guarded, the
 # unreadable one is emitted ``None``, and the caller is handed a GAP reason to append next
 # to the hit it is keeping. Discarding the hit was the deviation; this is the conformance.
+#
+# ``at is None`` IS THE ANY-TARGET MODE (0.2.5, the read door): every in-range reference is a
+# hit, there is no removal so there is no ``surface_after`` (``None``), and ``source`` is the
+# reference the cell actually holds, read off the same view.
 def _hit(surface, at, name, table, solve_type, field, view):
     entry = {"surface": surface,
-             "surface_after": surface - 1 if surface > at else surface,
+             "surface_after": None if at is None else surface - 1 if surface > at else surface,
              "cell": name, "table": table, "solve_type": solve_type,
-             "ref_field": field, "source": at}
+             "ref_field": field,
+             "source": _field(view, field) if at is None else at}
     degraded = None
     if solve_type == _PICKUP:
         try:
@@ -647,8 +652,14 @@ def geometry_refs(system, lde, surface, at, n):
     return hits, gaps, []
 
 
-def cb_par_refs(system, lde, surface, at, n):
+def cb_par_refs(system, lde, surface, at, n, row=None):
     """The Par1..Par6 arm, GATED on ``_cb_cells.is_coordinate_break``. NEVER raises.
+
+    ``at`` IS THE REMOVED ROW, OR ``None`` FOR THE READ DOOR'S ANY-TARGET MODE (0.2.5):
+    ``emit_solves_block`` calls this with ``at=None`` and the row it already holds (``row``,
+    so the read door pays no second ``GetSurfaceAt``) to disclose every Par pickup of a
+    coordinate-break row. It is the SAME scan and the SAME reader -- ``_ref_outcome`` is the
+    only place the two modes differ -- never a second reader of Par solve state.
 
     THE GATE IS A FIDELITY REQUIREMENT, NOT AN OPTIMISATION: a Standard row's Par1 is a
     STRING cell whose Double read RAISES live (``ArgumentException("Expected Double, got
@@ -668,6 +679,14 @@ def cb_par_refs(system, lde, surface, at, n):
     The polarity is Standard-only-clean, not CB-scanned/Standard-clean. A sentence that
     names another module's behaviour is a claim about THAT module and has to be re-derived
     from it, never carried across by analogy.
+
+    0.2.5 NARROWED THAT FLAG, AND THIS IS THE DECLARED CHANGE: ``emit_solves_block`` now
+    CONSUMES this arm for a coordinate-break row (any-target mode, ``at=None``, through
+    ``_solve_read.par_keys``) and drops ``par_cell_solves_not_audited`` for a CB row whose Par
+    scan left no gap. The boolean still covers asphere / GRIN / grating rows -- the same three
+    families the ``par_refs_not_audited`` record below names -- an unrecognised type and a
+    CB with an unreadable Par cell. The two keys stay DIFFERENT keys (a per-surface boolean
+    on the read door, a list on the removal door).
 
     WHY THE POLICY RECORD LEFT THE GAP CHANNEL (a defect reproduced and measured
     live before it was believed). A gap makes ``_verdict`` return ``could_not_scan``, so ONE
@@ -694,7 +713,7 @@ def cb_par_refs(system, lde, surface, at, n):
     this module refuses to encode (the probe captures record it as UNMEASURED).
     """
     try:
-        row = lde.GetSurfaceAt(surface)
+        row = lde.GetSurfaceAt(surface) if row is None else row
         is_cb = _cb.is_coordinate_break(row)
     except Exception:  # noqa: BLE001 — is_coordinate_break RAISES on a Type read throw
         return [], [_gap(surface, None, _CB_PAR, "surface type unreadable")], []

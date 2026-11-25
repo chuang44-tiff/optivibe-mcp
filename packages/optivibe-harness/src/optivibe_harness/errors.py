@@ -196,6 +196,28 @@ class SolveRefsRefusalError(ToolParamError):
     error_family = "solve_refs_refused"
 
 
+class TopologyRefusedError(ToolParamError):
+    """A correct split/cement call refused for a reason about the LENS, not the params.
+
+    ``insert_surface(glass=...)`` (split) and ``remove_surface(cement=...)`` (cement) take
+    parameters that can be perfectly valid while the lens in front of them cannot take the
+    operation: the surface is not a glass element, the gap is not an air gap between two
+    elements, a face type is not modelled, the design has several configurations, a number
+    is unreadable, or the result would have a crossing (non-positive) edge. ``tool_param``
+    would tell an automated caller to retry with different parameters; this fault wears its
+    own family. It subclasses ``ToolParamError`` deliberately (the ``SolveRefsRefusalError``
+    pattern): the refusal is pre-mutation (or proven rolled back) and caller-actionable, and
+    ``except ToolParamError`` sites keep catching it. ``reason`` is one of
+    ``_element_topology.REASONS``. There is no registry of error families to update.
+    """
+
+    error_family = "topology_refused"
+
+    def __init__(self, message, *, reason):
+        super().__init__(message)
+        self.reason = reason
+
+
 class SolveEnumUnresolvedError(ToolParamError):
     """The ``SolveType`` enum could not be imported from ``ZOSAPI.Editors`` (0.2.3).
 

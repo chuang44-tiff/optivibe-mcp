@@ -58,6 +58,7 @@ _CANCEL_S, _ARM_OVERHEAD_S = 30.0, 30.0
 _SIZE_FACTOR = 1.5               # a set's default budget is this times the control's time to rest
 _CYCLES, _BLOCK_PASSES, _BLOCK_S, _MIN_BLOCK_S = 50, 10, 60.0, 10.0
 _GATE_PCT = 1.0
+_FLOOR_TOL_MM = 1e-3         # an edge this close under its floor is the solver residual: on the floor, not a violation
 _UNUSABLE_WALL_S = 6.0           # charge for a block whose envelope wall time is unusable
 _AXCL_ZONE = 0.707
 _RING = 6
@@ -93,7 +94,8 @@ _MSG = {
     "drop": "drop must be true or false",
     "open_dropped": "rerun this set with drop=false",
     "not_run": "not measured: see this call's error",
-    "coverage": "slots at rest %d of %d; open %s; untried %s; sweep %s; never tried %s; search %.0f s",
+    "coverage": "slots at rest %d of %d; open %s; untried %s; open arms %d; sweep %s; never tried %s; "
+                "search %.0f s since the first trial on these slots in this server session",
     "budget": "time_budget_s must be a number from 10 to 600",
     "budget_call": "time_budget_s is per arm (the control and each set) and one call is capped at "
                    "%g s: with %d sets each arm can have at most %g s",
@@ -132,7 +134,13 @@ _MSG = {
     "not_saved": "save_candidate failed: %s; no loadable file",
     "geometry": "the geometry audit did not certify the lens (%s)",
     "new_violation": "new clearance violation at surface %s (%s) the control does not have: the "
-                     "merit function does not hold it; add the floor and run the trial again",
+                     "floor is not held by this arm: raise the weight of its floor row, or add one if "
+                     "the merit has none, and run the trial again",
+    "new_violation_miss": "new clearance violation at surface %s (%s) the control does not have, %.4g mm "
+                          "under its %g mm floor: the floor is not held by this arm: raise the weight of "
+                          "its floor row, or add one if the merit has none, and run the trial again",
+    "on_floor": "surface %s (%s) is %.2g mm under its %g mm floor, within the %g mm solver residual: "
+                "on the floor, not counted as a violation",
     "off_control": "%s is %.2f%% off the control (over 1%%): the merit function does not hold "
                    "it; the arm is still measured, so judge the comparison with that in mind, or add "
                    "the constraint and run the trial again",
@@ -568,6 +576,28 @@ def _violations(env):
     return out
 
 
+def _floor_misses(env):
+    """``{(surface, kind): miss in mm}`` for the violation rows of a save_candidate envelope, and
+    ``{("floor", key): floor}``. The miss is None (a full violation) unless every row of that key carries a
+    finite worst and threshold with worst under threshold. The shared clearance comparison is unchanged;
+    only the trial reads this."""
+    summary = env.get("clearance_summary")
+    rows = summary.get("violations") if isinstance(summary, dict) else None
+    out = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        worst, floor = row.get("worst"), row.get("threshold")
+        miss = None
+        if all(type(v) in (int, float) and math.isfinite(v) for v in (worst, floor)) and worst < floor:
+            miss = round(floor - worst, 9)          # 0.5 - 0.499 reads 1.0000000000000009e-3 unrounded
+        key = (row.get("surface"), row.get("kind"))
+        known = out.get(key, 0.0)
+        out[key] = None if miss is None or known is None else max(known, miss)
+        out.setdefault(("floor", key), floor)
+    return out
+
+
 def _arm(run, entries, label, control, budget):
     """Steps 7 to 9 for one arm (``entries`` None = the control). Returns the arm record."""
     system = run.session.system
@@ -623,8 +653,24 @@ def _arm(run, entries, label, control, budget):
     if verdict.endswith("_unverified"):
         return fail("geometry_or_clearance", _MSG["geometry"] % (verdict,))
     fresh = sorted(arm["violations"] - run.control_violations, key=repr) if control else []
+    misses, on_floor = _floor_misses(saved), []
+    for key in list(fresh):
+        miss = misses.get(key)
+        if miss is not None and miss <= _FLOOR_TOL_MM:
+            fresh.remove(key)
+            on_floor.append({"surface": key[0], "kind": key[1], "miss_mm": miss,
+                             "floor_mm": misses[("floor", key)]})
     if fresh:
-        return fail("geometry_or_clearance", _MSG["new_violation"] % fresh[0])
+        miss = misses.get(fresh[0])
+        if miss is None:
+            return fail("geometry_or_clearance", _MSG["new_violation"] % fresh[0])
+        return fail("geometry_or_clearance",
+                    _MSG["new_violation_miss"] % (*fresh[0], miss, misses[("floor", fresh[0])]))
+    if on_floor:
+        d["on_the_floor"] = on_floor
+        arm["floor_warning"] = "; ".join(
+            _MSG["on_floor"] % (r["surface"], r["kind"], r["miss_mm"], r["floor_mm"], _FLOOR_TOL_MM)
+            for r in on_floor)
     vec = arm["vec"] = run.read_vector(system)
     bad = _gate_first_order(run, vec, control, d, arm)
     if bad:
@@ -1059,6 +1105,7 @@ def _trial_row(run, i, entries, res, cvec, cvalue, prediction):
                            "trial": _offsets(tvec) if colour and status != "not_measured" else None},
             "better": better, "worse": worse, "layout": layout,
             "first_order_warning": a.get("first_order_warning") if a else None,
+            "floor_warning": a.get("floor_warning") if a else None,
             "candidate_path": a["candidate_path"] if a else None,
             "prediction_source": "none" if colour else "explanatory",
             "predicted": None if colour else ((prediction or {}).get("prediction") or {}).get("petzval_sum")}
@@ -1092,7 +1139,7 @@ def _lens_key(found, stop):
     return dict(key, stop=stop)
 
 
-def _coverage(run, sets, res):
+def _coverage(run, sets, res, open_arms):
     led = getattr(run.session, "_glass_coverage", None)
     if not isinstance(led, dict) or _ls.diff(led["key"], run.key):
         led = run.session._glass_coverage = {"key": run.key, "tried": set(), "at_rest": set()}
@@ -1112,13 +1159,13 @@ def _coverage(run, sets, res):
         if arm:
             scope["ever"] |= {e["surface"] for e in entries}
     never = [x for x in run.slots if x not in scope["ever"]]
-    done = not open_ and not untried
+    done = not open_ and not untried and not open_arms     # an arm this call left open is not done
     wall = round(_call_clock() - scope["t0"], 1)
     names = lambda rows: ", ".join("S%d" % x for x in rows) or "none"  # noqa: E731
     return {"slots": run.slots, "at_rest": at_rest, "open": open_, "untried": untried,
-            "sweep_done": done, "never_tried": never, "search_wall_s": wall,
+            "sweep_done": done, "never_tried": never, "search_wall_s": wall, "open_arm_count": len(open_arms),
             "summary": _MSG["coverage"] % (len(at_rest), len(run.slots), names(open_), names(untried),
-                                           "done" if done else "not done", names(never), wall)}
+                                           len(open_arms), "done" if done else "not done", names(never), wall)}
 
 
 def _budget_block(run, sets, res):
@@ -1163,6 +1210,7 @@ def _assemble(run, sets, res, proof, predictions):
               for i, e in enumerate(sets)] if not res["first_load"] else []
     cmsg = _MSG["control_budget"] % run.control_budget if control and control["status"] == "not_finished" \
         else (control["message"] if control else None)
+    open_arms = _open_arms(sets, res, cmsg, trials, stops)
     body = {
         "stops": {"control": cstop, "trials": stops, "summary": summary}, "term": run.term,
         "pair_um": run.pair_um if colour else None, "unit": "um" if colour else "1/mm",
@@ -1183,8 +1231,8 @@ def _assemble(run, sets, res, proof, predictions):
                    "prediction": None if colour else predictions,
                    "restore_proof": {k: proof[k] for k in ("items", "n_differences",
                                                            "first_differences", "optimizer_confirmed")}},
-        "open_arms": _open_arms(sets, res, cmsg, trials, stops),
-        "coverage": _coverage(run, sets, res)}
+        "open_arms": open_arms,
+        "coverage": _coverage(run, sets, res, open_arms)}
     restored, ckpt = proof["restored"], ({} if proof["restored"] else {"checkpoint_path": run.ckpt})
     if res["fault"]:
         return _ac.error_envelope(_TOOL, "glass_trial_failed", _MSG["failed"] % (res["fault"][1],),
@@ -1240,13 +1288,18 @@ TRIAL_GLASS_SWAPS_SPEC = ToolSpec(
         "design_name (default glass_trial) names the saved candidate files. require_free_stop "
         "(default true) is passed to every optimise; pass false to trial a lens whose stop sits on "
         "a glass vertex. drop (default true) allows the dropped verdict; pass false to screen, so "
-        "no arm is dropped. open_arms lists every arm not measured (the "
+        "no arm is dropped. An arm that ends up to 1e-3 mm under a clearance floor (the solver's residual) is "
+        "measured and carries floor_warning; a larger miss is refused. open_arms lists every arm not measured (the "
         "control included) with the action that closes it. coverage counts this lens's glass rows at "
         "rest, open or untried across calls (information, not a gate); it resets when anything the lens state records changes except glass: radii, thicknesses, conics, "
         "semi-diameters, surface types, solves, even-asphere terms, the stop, merit rows, wavelengths, fields, aperture; vignetting and other settings are not seen. "
-        "coverage also reports sweep_done (every slot at rest on the current lens), never_tried "
+        "coverage also reports sweep_done (every slot at rest on the current lens and no arm of this "
+        "call left open: a slot at rest through one arm does not close another arm, so open_arms must be "
+        "empty too; open_arm_count is its length), never_tried "
         "(slots no arm has run on in this search, which a keep does not reset) and search_wall_s "
-        "(seconds since the first trial_glass_swaps call on these slots started in this session; two designs with the same glass "
+        "(seconds since the first trial_glass_swaps call on these slots started in this server session, "
+        "as the summary line says; a lens whose list of glass rows differs, or a new server session, "
+        "starts the clock again; two designs with the same glass "
         "rows share one search, and reloading the same design does not restart the clock). not_measured gives a "
         "reason and says nothing about whether the glass helps. Nothing is applied: load_design "
         "applies your choice."

@@ -13,7 +13,7 @@ READ ROUTE. The batch route only: ``"CurrentAndChief"`` OPD on 6 rings x 24 arms
 terms in numpy. Per state that is F x W x 144 rays and no chief ray (the ``own_drop`` composition reads none).
 
 STATES. nominal; each edit row at its non-zero bounds; the focus column at +-h on the back gap; the push columns at
-+-r on Par 1 / Par 2 of the push group's entry CB (4 states). One state at a time, every state restored exactly.
++-r on Par 1 / Par 2 (decenter) and / or Par 3 / Par 4 (tilt) of the push group's entry CB (2 states per Par). One state at a time, every state restored exactly.
 
 THE ROW GATE (locked 1.7, run on every call). For every edit row above 1 % of the native RSS the gauge's composite
 change at each bound is compared with the native sensitivity row; either side off by more than 5 %, or a sign flip,
@@ -352,11 +352,30 @@ def push_column_check(row_col, push_col):
     return float(np.linalg.norm(a - b) / n)
 
 
+# the push columns: coordinate-break Par# -> (push_column_check key, the tolerance row whose own column it must match)
+PUSH_CHECK = {1: ("x", "TEDX"), 2: ("y", "TEDY"), 3: ("tilt_x", "TETX"), 4: ("tilt_y", "TETY")}
+PUSH_PAR_SETS = ((1, 2), (3, 4), (1, 2, 3, 4))      # decenter, tilt, or both on the one group
+
+
 def push_check_warnings(check):
+    code_of = {axis: code for axis, code in PUSH_CHECK.values()}
     return ["push_column_nonlinear: the %s push column differs from the %s row's own column by %.1f %% (> %.0f %%); the "
             "push is read from its own +-r states, so this warns and never refuses" %
-            (axis, "TEDX" if axis == "x" else "TEDY", 100.0 * v, 100.0 * PUSH_CHECK_REL)
+            (axis, code_of.get(axis, axis), 100.0 * v, 100.0 * PUSH_CHECK_REL)
             for axis, v in sorted((check or {}).items()) if _finite(v) and v > PUSH_CHECK_REL]
+
+
+def push_pars(push):
+    """``{par: range}`` of the resolved ``cb_group`` (Par 1/2 decenter in lens units, Par 3/4 tilt in degrees), validated;
+    ``gauge_input`` otherwise. The pack and the states are built from this one dict."""
+    pars = (push or {}).get("pars")
+    ok = (isinstance(pars, dict) and tuple(sorted(pars)) in PUSH_PAR_SETS
+          and all(_finite(v) and v > 0 for v in pars.values())
+          and pars.get(1) == pars.get(2) and pars.get(3) == pars.get(4))
+    if not ok:
+        raise _Refuse("gauge_input", "the push carries no usable pars (Par 1+2 decenter and/or Par 3+4 tilt, each a pair of "
+                      "one positive range); got %r" % (pars,))
+    return {int(k): float(v) for k, v in pars.items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -671,12 +690,14 @@ def paraxial_focus(ctx):
     return tb
 
 
-def push_states(ctx, group_pair, r):
-    """``{par: (z_lo, z_hi)}`` for Par 1 (decenter X) and Par 2 (decenter Y) of the push group at -r / +r."""
+def push_states(ctx, group_pair, pars):
+    """``{par: (z_lo, z_hi)}`` for each Par of ``pars`` ({par: r}; 1/2 decenter, 3/4 tilt) on the push group's ENTRY CB
+    at -r / +r, one cell at a time, each cleared after its read."""
     a, b = group_pair
     marker = "g%d_%d_cb" % (a, b)
     out = {}
-    for par, name in ((1, "decenter_x"), (2, "decenter_y")):
+    for par in sorted(pars):
+        name, r = _tc._CPAR_AXES[par][0], float(pars[par])
         pair = []
         for v in (-r, r):
             ctx.check_time()
@@ -889,7 +910,8 @@ def acquire_pack(session, sens_env, *, push=None, cap_s=None, budget=None, rig_f
     """Acquire one ``wfd_pack v1`` for the loaded lens, or return a refusal dict (``ok: False``). Never raises.
 
     ``sens_env`` is the inner sensitivity envelope (rows, nominal criterion, run summary). ``push`` is None for
-    refocus-only, else ``{"group", "a", "b", "decenter_mm"}`` of the resolved ``cb_group``. ``budget`` is the wizard
+    refocus-only, else ``{"group", "a", "b", "decenter_mm", "pars"}`` of the resolved ``cb_group`` (``decenter_mm`` is None for
+    a tilt-only push; ``pars`` is the resolver's ``{par: range}`` and the one source of the columns). ``budget`` is the wizard
     budget (TWAV and the COMP bounds are read from it; spec 1.8 has no such parameter and needs one).
     """
     t_total = time.monotonic()
@@ -901,6 +923,8 @@ def acquire_pack(session, sens_env, *, push=None, cap_s=None, budget=None, rig_f
             return refusal("gauge_input", "the sensitivity envelope carries no rows or no finite nominal criterion")
         rows = classify_rows(rows_in, float(nominal))
         attach_folds(rows, float(nominal))
+        if push is not None:
+            push_pars(push)                      # a malformed push refuses before a rig is built
         layout = derive_layout(rows, push)
         rig = (rig_factory or Rig)(session, cap_s)
         fields, waves = rig.tables()
@@ -994,17 +1018,18 @@ def _walk(rig, rows, layout, push, reads, comp, fields, waves, sens_env, nominal
     n_states += 2
     columns = {"focus": {"h": h, "z_lo": _ls(zlo), "z_hi": _ls(zhi), "nonlinearity": curv}}
     check = {}
+    pars = push_pars(push) if push is not None else {}
     if push is not None:
-        ps = push_states(rig, (int(push["a"]), int(push["b"])), float(push["decenter_mm"]))
-        n_states += 4
-        for par, name in ((1, "push_x"), (2, "push_y")):
-            columns[name] = {"r": float(push["decenter_mm"]), "z_lo": _ls(ps[par][0]), "z_hi": _ls(ps[par][1])}
-        for axis, par, code in (("x", 1, "TEDX"), ("y", 2, "TEDY")):
+        ps = push_states(rig, (int(push["a"]), int(push["b"])), pars)
+        n_states += 2 * len(pars)
+        for par in sorted(pars):
+            columns[_g().PAR_LABEL[par]] = {"r": pars[par], "z_lo": _ls(ps[par][0]), "z_hi": _ls(ps[par][1])}
+            axis, code = PUSH_CHECK[par]
             row = next((r for r in rows if r["code"] == code and (r["surface"], r["surface2"]) == (int(push["a"]), int(push["b"]))
                         and r["z_lo"] is not None and r["z_hi"] is not None and r["hi"] != r["lo"]), None)
             if row is not None:
                 jr = (row["z_hi"] - row["z_lo"]) / (row["hi"] - row["lo"])
-                cp = (ps[par][1] - ps[par][0]) / (2.0 * float(push["decenter_mm"]))
+                cp = (ps[par][1] - ps[par][0]) / (2.0 * pars[par])
                 check[axis] = push_column_check(jr, cp)
     walk_s = time.monotonic() - t_walk
     rs = sens_env.get("run_summary") or {}
@@ -1037,8 +1062,8 @@ def _walk(rig, rows, layout, push, reads, comp, fields, waves, sens_env, nominal
         "rows": pack_rows,
         "z0": _ls(z0), "bfl0": bfl0,
         "columns": columns,
-        "limits": {"focus": [float(comp["min"]), float(comp["max"])], "push": (float(push["decenter_mm"]) if push else None)},
-        "push": ({"group": push["group"], "decenter_mm": float(push["decenter_mm"])} if push else None),
+        "limits": _limits(comp, pars),
+        "push": _push_block(push, pars),
         "native": {"nominal_criterion": nominal, "rss": sens_env.get("rss_estimated_change")},
         "canaries": {"layout": info, "pickup": pick, "symmetry_rel": symmetry, "push_column_check": check,
                      "teardown": None},
@@ -1050,6 +1075,26 @@ def _walk(rig, rows, layout, push, reads, comp, fields, waves, sens_env, nominal
     return pack, {"warnings": gate["warnings"] + push_check_warnings(check), "delta0": gate["delta0"],
                   "folded_share": gate["folded_share"], "demoted": gate["demoted"], "twav_um": reads["twav_um"],
                   "push_column_check": check}
+
+
+def _limits(comp, pars):
+    """``limits.push`` is always present (None without a decenter); ``limits.tilt`` only when a tilt is solved, so a
+    decenter-only or refocus-only pack keeps its identity."""
+    out = {"focus": [float(comp["min"]), float(comp["max"])], "push": pars.get(1)}
+    if 3 in pars:
+        out["tilt"] = pars[3]
+    return out
+
+
+def _push_block(push, pars):
+    if not push:
+        return None
+    out = {"group": push["group"]}
+    if 1 in pars:
+        out["decenter_mm"] = pars[1]
+    if 3 in pars:
+        out["tilt_deg"] = pars[3]
+    return out
 
 
 def _rot_signs(keyed):

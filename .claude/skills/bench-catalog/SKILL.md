@@ -44,7 +44,7 @@ Map the user's ask to a `template.json` written to `<workdir>/out/template.json`
 - `target_basis` keys are ALL optional. **Target given** (common): parse EFL, f/#, FOV
   (a scalar half-field angle in deg, or an explicit `[[x,y,w],…]` list), wavelengths,
   application. Only pin `fnum` if the user pins it; set `wavelengths` only if stated
-  (else native/photopic F/d/C `[0.4861,0.5876,0.6563]`); `mtf_frequency` from the ask
+  (else each design keeps its own wavelength band, recorded as `wavelength_band: native`); `mtf_frequency` from the ask
   else **50 cyc/mm** (locked default — all designs share the basis EFL so one frequency
   is comparable). Ask about frequency ONLY if the user names a sensor/pixel context.
 - **No target** → OMIT `target_basis.efl` → the bench runs a read-only median-EFL census
@@ -86,7 +86,7 @@ never selects it, and it has **no registry key**. The **default template** (unsp
 metrics) = `["first_order","rms_spot","mtf","strehl","clearance"]` (+ `n_elements`).
 
 The machine-readable menu (must equal the 12 registry keys above — the served-boundary
-allowlist; the drift test parses this block):
+allowlist; keep it in sync with the registry keys by hand):
 
 <!-- BENCH_CATALOG_MENU_KEYS
 ["first_order","rms_spot","mtf","strehl","wavefront","distortion","rel_illum",
