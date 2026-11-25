@@ -262,6 +262,17 @@ def _supplied_has_seed_row(supplied):
         isinstance(e, dict) and isinstance(e.get("type"), str) and e["type"].upper() == "SEED" for e in supplied)
 
 
+_QY_ONLY_KEYS = (("baseline", "'quick_yield' or 'gauge'"), ("pupil", "'quick_yield'"), ("repeats", "'quick_yield'"))
+
+
+def _unread_param_warnings(params, mode):
+    """``baseline`` / ``pupil`` / ``repeats`` are read by ``quick_yield`` (all three) and
+    ``baseline`` also by ``gauge``; every other mode drops them, so each present key is echoed-ignored with a warning.
+    Pure; membership through the unbound ``dict`` slot, like the neighbouring wrong-mode blocks."""
+    return [f"{key!r} was passed with mode={mode!r} (it applies only to mode={readers}); echoed-ignored"
+            for key, readers in _QY_ONLY_KEYS if dict.__contains__(params, key)]
+
+
 def _insert_seed_row(tde, operand_enum, seed):
     """Insert ONE ``SEED`` row at TDE row 1 and PROVE it (round 2). Fails CLOSED: any miss raises
     ``tolerancing_run`` (``reason`` names the arm) and the run does not start.
@@ -278,9 +289,9 @@ def _insert_seed_row(tde, operand_enum, seed):
             f"the Monte Carlo seed row could not be proven ({why}); nothing was run",
             family="tolerancing_run", reason=reason)
 
-    meta = _cat.meta_for("SEED")
-    spec = meta.int_cells[0]
     try:
+        meta = _cat.meta_for("SEED")          # inside the fence: a regressed catalog entry is a ``seed_row_*`` refusal
+        spec = meta.int_cells[0]
         member = _tc._resolve_tol_enum(operand_enum, "SEED")
         n_before = int(tde.NumberOfOperands)
         op = tde.InsertNewOperandAt(1)
@@ -1379,6 +1390,16 @@ def _run_pick_push(session, params):
     return _pick.run(session, params, tolerance)
 
 
+def _with_unread_warnings(env, params, mode):
+    """Append the ``_unread_param_warnings`` to an intercepted mode's envelope when it is a success or already carries
+    a ``warnings`` list (the picker's unjudged-run envelope does); a bare refusal gains no key."""
+    if isinstance(env, dict) and (env.get("ok") is True or "warnings" in env):
+        extra = _unread_param_warnings(params, mode)
+        if extra:
+            env["warnings"] = list(env.get("warnings") or []) + extra
+    return env
+
+
 def _merit_mode_guard(criterion, mode):
     """: ``criterion='merit'`` is judged by ``sensitivity`` and ``monte_carlo`` only; any other mode that
     reaches here (``desensitize`` forwards ``criterion`` to its inner runs) is refused ``merit_mc_only``."""
@@ -1431,7 +1452,7 @@ def tolerance(session, params, *, cap_s=None):
     if isinstance(params, dict) and dict.get(params, "mode") == "desensitize":
         from . import _tolerance_desensitize as _desens
         _merit_mode_guard(dict.get(params, "criterion"), "desensitize")     # it forwards ``criterion`` to its inner runs
-        return _desens.run(session, params, tolerance)
+        return _with_unread_warnings(_desens.run(session, params, tolerance), params, "desensitize")
     # mode='quick_yield' (refocus-only Quick Yield; generally NOT for use with the push) is intercepted at the same
     # point, for the same reason: ``_MODE_TO_SETUP`` and its pins stay untouched.
     if isinstance(params, dict) and dict.get(params, "mode") == "quick_yield":
@@ -1446,7 +1467,7 @@ def tolerance(session, params, *, cap_s=None):
         # The picker sets its own per-candidate cap, so a caller's ``cap_s`` is echoed-ignored (and a
         # malformed one still refused, before the picker opens anything).
         if not dict.__contains__(params, "cap_s"):
-            return _run_pick_push(session, params)
+            return _with_unread_warnings(_run_pick_push(session, params), params, "pick_push")
         pick_cap = dict.__getitem__(params, "cap_s")
         if isinstance(pick_cap, bool) or not is_finite_number(pick_cap) or pick_cap <= 0:
             raise _tc.ToleranceError(
@@ -1456,7 +1477,7 @@ def tolerance(session, params, *, cap_s=None):
         if isinstance(env, dict):
             env["warnings"] = list(env.get("warnings") or []) + [
                 "'cap_s' was passed with mode='pick_push' (the picker sets its own per-candidate cap); echoed-ignored"]
-        return env
+        return _with_unread_warnings(env, params, "pick_push")
     system = session.system
 
     # (1) the REQUIRED mode + optional knobs (bad value -> tolerancing_param).
@@ -1480,6 +1501,11 @@ def tolerance(session, params, *, cap_s=None):
         raise _tc.ToleranceError(
             "seed cannot be combined with a SEED row in tolerances: the tool inserts its own SEED row at row 1; "
             "pass one or the other. Nothing was opened.", family="tolerancing_param", reason="seed_conflict")
+    if mode == "monte_carlo" and seed is None and _supplied_has_seed_row(supplied):
+        warnings.append(
+            "tolerances carries a SEED row and no seed= was given: the row's Seed cell is the caller's own, Seed 0 means "
+            "the clock (unseeded), and this run is not proven seeded, so the yield block's pairing stays 'independent' "
+            "even though the run may be seeded. Pass seed=N, the proven way, for reads that share their draws")
     if budget is None and _tc._is_dls(compensator):
         return _ac.error_envelope(
             "tolerance", "tolerancing_param",
@@ -1526,6 +1552,7 @@ def tolerance(session, params, *, cap_s=None):
                     f"{key!r} was passed with mode='sensitivity' (it applies only to "
                     "monte_carlo); echoed-ignored"
                 )
+    warnings.extend(_unread_param_warnings(params, mode))
     mc_threshold = None
     if dict.__contains__(params, "threshold"):
         if mode == "monte_carlo":
@@ -2687,7 +2714,7 @@ TOLERANCE_SPEC = ToolSpec(
         "with monte_carlo dls. mode='pick_push' (budget, cb_group={decenter_mm}) picks the push compensator: "
         "the 3 eligible top decenter/tilt hotspots each get one capped dls_cb_group Monte Carlo on 'merit' "
         "(trials, default 200; a trial at the push limit fails), ranked by yield under threshold, else by P90; "
-        "1 sensitivity run + up to 3 caps inside a 25 min wall budget. mode='quick_yield' (budget, baseline): refocus-only Quick Yield, its own metric; per field (worst = upper bound on all passing), threshold number or list, criterion='composite' = all fields; generally not for use with a push. "
+        "1 sensitivity run + up to 3 caps inside a 25 min wall budget. mode='quick_yield' (budget[, baseline]): refocus-only Quick Yield, its own metric; per field (worst = upper bound on all passing), threshold number or list, criterion='composite' = all fields; generally not for use with a push. "
         "mode='gauge' (budget, threshold, compensator dls|dls_cb_group[, baseline]): linear-model in-loop screen; monte_carlo keys + per_field. Budget, one "
         "of: budget={vendor, grade, element_decenter, element_tilt} drives the engine "
         "tolerance wizard with element decenter/tilt on; tolerances is a list of {type:<TDE "
@@ -2707,7 +2734,7 @@ TOLERANCE_SPEC = ToolSpec(
         "'dls_cb_tilt' (monte_carlo, budget) adds a group alignment-tilt compensator, "
         "cb_tilt={group: a hotspot key E<a>-<b>|G<a>-<b>, range_deg: your mechanical range, "
         "never from sensitivity}; 'dls_cb_group' (same rules) takes cb_group={group, decenter_mm?, "
-        "tilt_deg?}, at least one, lens units / degrees, mechanical: one group's lateral push and/or tilt; "
+        "tilt_deg?}, at least one, lens units/degrees, mechanical: one group's lateral push and/or tilt; "
         "run_summary.cb_group marks an axis saturated when it hits both bounds; "
         "no other compensator is admitted. Every criterion includes back-focus refocus: do not "
         "tell the user as-built is better on that axis. sampling (default 4; 2 "

@@ -7,7 +7,8 @@ CALL ORDER (every refusal before the engine is touched is pure):
   1. ``validate``: budget, threshold, compensator (omitted = the judge's ``dls``), ``cb_group``, trials, ``full``,
      ``cap_s``, ``baseline``; ``criterion`` and every other mode's knob refuse.
   2. ``baseline`` is looked up in the gauge store (a Quick Yield id, an unknown or an expired id refuses).
-  3. multi-configuration lens, the DLS back-gap preflight and (on a push) the existing ``_resolve_cb_group`` run.
+  3. multi-configuration lens, the DLS back-gap preflight and (on a push) the existing ``_resolve_cb_group`` run
+     (``cb_group`` takes ``decenter_mm`` and/or ``tilt_deg``; ``cb_tilt`` and ``dls_cb_tilt`` stay refused).
   4. the inner sensitivity run (always wavefront / paraxial / the caller's budget, built fresh): the row source.
   5. ``_wfd_acquire.acquire_pack`` (T = 37, batch route; row gate; teardown proof) -> ``_wfd_gauge.evaluate`` ->
      the result store -> ``paired`` against the baseline.
@@ -93,7 +94,8 @@ def validate(params):
         raise _refuse("the gauge computes the worst-field RMS wavefront itself; omit criterion (the loaded merit is not "
                       "read); nothing was opened", "gauge_scope", "criterion_refused")
     if dict.__contains__(params, "cb_tilt"):
-        raise _refuse("the gauge takes cb_group (a decenter push), not cb_tilt; nothing was opened", "gauge_scope", "cb_tilt_refused")
+        raise _refuse("the gauge takes cb_group (a decenter and/or tilt push: cb_group.tilt_deg), not cb_tilt; nothing was "
+                      "opened", "gauge_scope", "cb_tilt_refused")
     unknown = sorted(repr(k) for k in params if k not in ALLOWED)
     if unknown:
         raise _refuse("mode='gauge' takes %s; unexpected %s (the gauge is deterministic: there is no seed); nothing was "
@@ -107,6 +109,9 @@ def validate(params):
     thr = dict.__getitem__(params, "threshold")
     if isinstance(thr, list):
         raise _refuse("threshold takes ONE number in mode='gauge', got a list; nothing was opened", "gauge_param", "threshold_invalid")
+    if isinstance(thr, bool):
+        raise _refuse("threshold must be a number of waves, a boolean is not a number, got %s; nothing was opened" % repr(thr),
+                      "gauge_param", "threshold_bool")
     if not is_finite_number(thr) or thr <= 0:
         raise _refuse("threshold must be a finite number > 0 (waves), got %s; nothing was opened" % repr(thr)[:40],
                       "gauge_param", "threshold_invalid")
@@ -115,16 +120,16 @@ def validate(params):
         comp = dict.__getitem__(params, "compensator")
     if comp in ("paraxial", "dls_cb_tilt"):
         raise _refuse("compensator=%r is not available in the gauge (it solves the judge's compensators: 'dls' or "
-                      "'dls_cb_group'); nothing was opened" % comp, "gauge_scope", "compensator_refused")
+                      "'dls_cb_group'%s); nothing was opened"
+                      % (comp, "; a tilt push is compensator='dls_cb_group' with cb_group.tilt_deg" if comp == "dls_cb_tilt" else ""),
+                      "gauge_scope", "compensator_refused")
     if comp not in ("dls", "dls_cb_group"):
         raise _refuse("compensator must be 'dls' or 'dls_cb_group', got %s; nothing was opened" % repr(comp)[:40],
                       "gauge_param", "compensator_invalid")
     has_group = dict.__contains__(params, "cb_group")
     raw = dict.__getitem__(params, "cb_group") if has_group else None
-    if isinstance(raw, dict) and dict.__contains__(raw, "tilt_deg"):
-        raise _refuse("the gauge pushes by decenter only (cb_group.tilt_deg refused); nothing was opened", "gauge_scope", "tilt_refused")
     if comp == "dls_cb_group" and not has_group:
-        raise _refuse("compensator='dls_cb_group' needs cb_group={group, decenter_mm}; nothing was opened", "gauge_param", "cb_group_required")
+        raise _refuse("compensator='dls_cb_group' needs cb_group={group, decenter_mm and/or tilt_deg}; nothing was opened", "gauge_param", "cb_group_required")
     if comp == "dls" and has_group:
         raise _refuse("cb_group needs compensator='dls_cb_group'; nothing was opened", "gauge_param", "cb_group_needs_compensator")
     cap_s, cap_source = DEFAULT_CAP_S, "default"
@@ -187,18 +192,21 @@ def lookup_baseline(baseline):
 # --------------------------------------------------------------------------- #
 def cb_group_summary(spec, res, pack, restored, full):
     """``run_summary.cb_group`` in MC's own key set, from the gauge's clip counts (the gauge authors no CPAR rows)."""
-    r = float(pack["limits"]["push"])
+    g = _g()
+    pars = spec["pars"]
+    eff = {par: float(pack["limits"][g.COMP_LIMIT[g.PAR_LABEL[par]]]) for par in pars}
     by = {a["label"]: a for a in res["axes"]}
     axes = []
-    for par, label in ((1, "push_x"), (2, "push_y")):
+    for par in sorted(pars):
         axis, units = _tc._CPAR_AXES[par]
-        a = by.get(label) or {"n_at_min": 0, "n_at_max": 0}
+        r = eff[par]
+        a = by.get(g.PAR_LABEL[par]) or {"n_at_min": 0, "n_at_max": 0}
         axes.append({"par": par, "axis": axis, "units": units, "range": r, "minimum": None, "maximum": None,
                      "saturated": bool(a["n_at_min"] > 0 and a["n_at_max"] > 0),
                      "n_at_min": a["n_at_min"], "n_at_max": a["n_at_max"]})
     ab = list(res["at_bound"])
-    out = {"group": spec["group"], "decenter_mm": spec["decenter_mm"], "tilt_deg": None,
-           "effective_decenter_mm": r, "effective_tilt_deg": None, "axes": axes,
+    out = {"group": spec["group"], "decenter_mm": spec["decenter_mm"], "tilt_deg": spec["tilt_deg"],
+           "effective_decenter_mm": eff.get(2), "effective_tilt_deg": eff.get(4), "axes": axes,
            "saturated": any(a["saturated"] for a in axes), "n_trials_at_bound": int(sum(1 for f in ab if f)),
            "layout": None, "zero_tilt_max_abs": None, "layout_tde_rows": None, "restored": bool(restored)}
     if full:
@@ -211,7 +219,9 @@ def run_summary(sens_rs, cfg, res, wall_s, spec, pack, restored):
     tr = _tr()
     rule = sens_rs.get("budget_rule_id")
     if spec is not None and rule is not None:
-        rule = tr._cb_group_rule_id(rule, spec, {2: float(pack["limits"]["push"])})
+        g = _g()
+        rule = tr._cb_group_rule_id(rule, spec, {par: float(pack["limits"][g.COMP_LIMIT[g.PAR_LABEL[par]]])
+                                                 for par in (2, 4) if par in spec["pars"]})
     out = {"criterion": CRITERION_NAME, "criterion_units": "waves", "compensator": cfg["compensator"], "compensators": [],
            "cycle_cap": None, "sampling": sens_rs.get("sampling"), "field_mode": sens_rs.get("field_mode"),
            "budget_rule_id": rule, "budget_digest": sens_rs.get("budget_digest"), "n_budget_rows": sens_rs.get("n_budget_rows"),
@@ -237,7 +247,7 @@ def gauge_block(res, pack, acq, sens_wall_s, timings):
 
 def compensation_note(objective):
     return ("The reported criterion (worst-field RMS wavefront, waves) is a LINEAR MODEL of the judge's run: per-field "
-            "Zernike vectors read once at +-each tolerance row, the back-focus gap and the push solved per draw by %s "
+            "Zernike vectors read once at +-each tolerance row, the back-focus gap and the group push (decenter and/or tilt) solved per draw by %s "
             "minimisation, a push at its limit failing. It screens candidates in the loop; native Monte Carlo is the "
             "judge, and the gauge reads low where the Zernike norm runs above the polychromatic RWCE (see "
             "run_summary.gauge.composition)." % ("worst-field" if objective == "worst_field" else "composite"))
@@ -321,7 +331,8 @@ def _run(session, params):
     spec = push = None
     if cfg["compensator"] == "dls_cb_group":
         spec = tr._resolve_cb_group({"cb_group": cfg["cb_group_raw"]}, "dls_cb_group", "monte_carlo", cfg["budget"], system, True)
-        push = {"group": spec["group"], "a": spec["a"], "b": spec["b"], "decenter_mm": spec["decenter_mm"]}
+        push = {"group": spec["group"], "a": spec["a"], "b": spec["b"], "decenter_mm": spec["decenter_mm"],
+                "pars": dict(spec["pars"])}
     # the row source: always wavefront / paraxial, built fresh (never the caller's dict)
     t1 = _CLOCK()
     sens = tr.tolerance(session, {"mode": "sensitivity", "budget": cfg["budget"], "criterion": "wavefront",

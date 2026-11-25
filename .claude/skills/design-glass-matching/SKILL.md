@@ -26,7 +26,7 @@ performance, polychromatic RWCE at every field against a control given the same 
    non-glass change to the lens and does not see vignetting; it informs, it does not judge. The one-swap screen is what found the 10x lever: S1 −26.9 %, S2 −13.4 % with
    Hammer's glasses, the other measured singles −2.3 % or worse. Then go deep where a slot moved.
 3. **Pick candidates by the lever.** `find_glasses` with `sort=pg_f_anomaly` ranks on the anomaly
-   pg_f − (0.6438 − 0.001682·vd) (column `pg_f_anomaly`; window `pg_f_anomaly_min`/`_max`); a pg_f sort orders by vd.
+   pg_f − (0.6438 − 0.001682·vd) (column `pg_f_anomaly`; window `pg_f_anomaly_min`/`_max`); sort=pg_f orders by raw pg_f, and a call with no sort orders by vd.
    Rank only on a list with no `truncated_note`: narrow the vd and anomaly window rather than raise `limit` (15 rows of
    571 hid S-NBH59, the best S1 single; vd 60–100 matches 752); if you rank from a cut list anyway, say so and name
    the cut. One glass can appear once per catalog: count it once

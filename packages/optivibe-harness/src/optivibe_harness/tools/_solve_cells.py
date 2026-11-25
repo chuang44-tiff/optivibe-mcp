@@ -57,6 +57,7 @@ import math
 
 from ..enums import _resolve_enum
 from ..errors import SolveEnumUnresolvedError, SurfaceWriteError, ToolParamError
+from . import _solve_read as _rv
 
 
 # --------------------------------------------------------------------------- #
@@ -838,6 +839,13 @@ def _par_cell_row(row):
 
     An UNRECOGNISED type answers True for the same reason, and that is the fix:
     a type this module has never measured is a type whose Par-cell state is unknown.
+
+    0.2.5: this predicate still says "the five cells do not cover this row". It is no longer
+    the whole answer for a COORDINATE BREAK: ``emit_solves_block`` hands such a row to
+    ``_solve_read.par_keys``, which reads its Par cells and drops the emitted
+    ``par_cell_solves_not_audited`` when none was left unread. The flag therefore still
+    covers asphere / GRIN / grating rows, an unrecognised type, an unreadable row and a CB
+    whose Par scan left a gap -- and ``_FULLY_COVERED_TYPE_TOKENS`` is unchanged.
     """
     try:
         type_name = str(row.Type)
@@ -895,7 +903,8 @@ def _unreadable_block():
 
     It is deliberately the SAME shape a wedged real surface produces — the emit body
     freezes 0..4 top-level keys and adding a fifth for this case would move a contract
-    the read path consumes, for a distinction the caller cannot act on differently.
+    the read path consumes, for a distinction the caller cannot act on differently. (0.2.5 added ``par_solves`` as a
+    fifth key, but only on a coordinate-break row that was READ; this block stays two keys.)
 
     THE TWO KEYS ARE NOT UNIFORMLY LITERAL, and an earlier revision of this text said they
     were (corrected here, not renumbered). On the INVALID-INDEX path both really are
@@ -912,7 +921,14 @@ def _unreadable_block():
 
 
 def emit_solves_block(system, lde, surface):
-    """The solve PATCH for one surface: 0..4 top-level keys, FROZEN order, all additive.
+    """The solve PATCH for one surface: 0..5 top-level keys, FROZEN order, all additive.
+
+    0.2.5: a ``SurfacePickup`` entry also carries ``values`` / ``values_unreadable``
+    (``_solve_read.with_values``), and a coordinate-break row may carry ``par_solves`` --
+    its Par pickups -- BEFORE ``par_cell_solves_not_audited`` (the fifth key; ``par_solves``
+    is a sibling of ``solves`` because ``_cb_solve_guard`` treats every ``solves`` key as a
+    geometry cell token). The order is ``solves``, ``solves_unreadable``, ``par_solves``,
+    ``par_cell_solves_not_audited``, ``mce_overrides_not_audited``.
 
     Its consumers are ``lens_surface._read_surface_dict`` and
     ``lens_describe._describe_one_surface`` — the two frozen insertion points, now
@@ -992,7 +1008,7 @@ def emit_solves_block(system, lde, surface):
                  "fields": None if tag == "unmeasured" else sorted(fields)}
         if tag == "unmeasured":
             entry["fields_unmeasured"] = True
-        solves[token] = entry
+        solves[token] = _rv.with_values(entry, cell, token)   # D1: a pickup's VALUES
 
     _assert_exhaustive_partition(list(solves), unreadable, suppressed, surface)
 
@@ -1010,7 +1026,9 @@ def emit_solves_block(system, lde, surface):
     except Exception:  # noqa: BLE001 — an unreadable row -> disclose (fail-OPEN)
         row = None
     if row is None or _par_cell_row(row):
-        out["par_cell_solves_not_audited"] = True
+        # D2: a coordinate-break row's Par cells ARE read (``par_keys``, via ``cb_par_refs``),
+        # so the flag now survives only for what is still unaudited.
+        out.update(_rv.par_keys(system, lde, surface, row))
     if _mce_overridden(system):
         out["mce_overrides_not_audited"] = True
     assert_wire_safe(out)

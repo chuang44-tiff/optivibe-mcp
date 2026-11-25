@@ -500,6 +500,12 @@ def _convention_supported(sign_convention):
 
 def _unsupported_convention_message(index, code, reference_convention):
     """: the catalog's convention has no grid column, so no value resubmits."""
+    folded = (_mm._normalize_sign_convention(reference_convention) or "").lower()
+    if folded in _mm._SIGN_CONVENTIONS[:-1]:
+        return (f"operand[{index}] ({code}): the reference catalog lists sign convention "
+                f"{reference_convention!r}, which differs from the grid value {folded!r} only in "
+                f"case. The cross-check compares the spellings as written, so no sign_convention value "
+                f"can match it for {code} here; author it with add_operand or apply_merit_recipe instead.")
     return (f"operand[{index}] ({code}): the reference catalog lists sign convention "
             f"{reference_convention!r}, but add_math_constraint's grid supports only "
             f"{list(_mm._SIGN_CONVENTIONS[:-1])}, so no sign_convention value can be passed "

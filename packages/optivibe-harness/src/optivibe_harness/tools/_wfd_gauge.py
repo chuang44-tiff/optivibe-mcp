@@ -10,8 +10,10 @@ Pack (``wfd_pack v1``, amended; only what the core reads is validated, extra met
   ``native {nominal_criterion}``, ``lens {sha256, topology_digest}``, ``budget {rule_id, digest}``,
   ``composition {variant_id}``, ``bfl0``, ``symmetry {partners, mirror_sign, rot_sign}``,
   ``rows [{key, code, lo, hi, mode: edit|fold, width, z_lo?, z_hi?, bfl_lo?, bfl_hi?, native {w_lo, w_hi}}]``,
-  ``columns {focus {h, z_lo, z_hi}, push_x? {r, z_lo, z_hi}, push_y?}`` (the pre-amendment top-level ``refocus`` is
-  read as ``columns.focus``), ``limits {focus: [lo, hi], push: r}`` (needed by ``evaluate`` only).
+  ``columns {focus {h, z_lo, z_hi}, push_x? {r, z_lo, z_hi}, push_y?, tilt_x? {r, ...}, tilt_y?}`` (the pre-amendment
+  top-level ``refocus`` is read as ``columns.focus``; any other column name refuses ``gauge_input``; ``COMP_LABELS`` is the
+  one table), ``limits {focus: [lo, hi], push: r, tilt: r}`` (``evaluate`` only; ``push`` is read for the push labels and
+  ``tilt`` for the tilt labels, each present when its columns are).
   Row arrays are ``[F][W][T]`` lists (``null`` on an absent side). Fold rows carry ``native`` readings (criterion in
   waves at lo / hi); their quadratic is built here (``fold_rms2``).
 
@@ -19,9 +21,13 @@ Pack (``wfd_pack v1``, amended; only what the core reads is validated, extra met
 (n,F), ``at_bound`` (n,)) which the caller MUST pop before serving; ``store_put(result)`` keeps those arrays under
 ``result["gauge"]["id"]`` (``"gauge-"`` prefix, ``STORE_MAX = 16`` slots) and ``paired(res_a, res_b)`` reads two
 results that still carry ``_arrays`` (use ``store_get``). ``result["values"]`` / ``result["at_bound"]`` are the
-per-trial worst-field values and push-bound flags as lists, for ``tolerance_run._mc_yield_block`` (not imported
+per-trial worst-field values and push- or tilt-bound flags (``FAIL_LABELS``; a focus bound does not fail) as lists, for ``tolerance_run._mc_yield_block`` (not imported
 here). ``result["yield_stats"]`` is the ``_tolerance_pick.stats`` dict, ``result["per_field"]`` the served block.
 The ``nominal`` is the worst-field RMS at d = 0.
+
+``result["gauge"]["compensators"]`` is the sorted ``[label, lo, hi]`` rows of the solved columns, focus included: two results
+with different sets (or a set missing on either side) never pair; ``paired`` reports ``reason: "compensator"`` and serves no
+verdict or diff block.
 """
 import hashlib
 import json
@@ -56,6 +62,11 @@ BIAS_NOTE = ("own_drop was graded on the 10x start only (held-out error 2.05 % r
              "polychromatic RWCE on tilted states, so the gauge yield reads low")
 Z95 = 1.959963984540054
 PUSH_LABELS = ("push_x", "push_y")
+TILT_LABELS = ("tilt_x", "tilt_y")
+COMP_LABELS = ("focus",) + PUSH_LABELS + TILT_LABELS      # the one table of compensator columns, in pack order
+COMP_LIMIT = {"focus": "focus", "push_x": "push", "push_y": "push", "tilt_x": "tilt", "tilt_y": "tilt"}   # label -> limits key
+FAIL_LABELS = PUSH_LABELS + TILT_LABELS                  # a draw at a push or tilt bound fails; a focus bound does not
+PAR_LABEL = {1: "push_x", 2: "push_y", 3: "tilt_x", 4: "tilt_y"}   # coordinate-break Par# -> column label
 FAMILY_INPUT, FAMILY_PARAM, FAMILY_SCOPE = "gauge_input", "gauge_param", "gauge_scope"
 FAMILY_FOLD, FAMILY_SYM, FAMILY_COMPOSITE = "gauge_fold_too_large", "gauge_not_symmetric", "gauge_composite_off"
 FAMILY_SOLVE, FAMILY_MODEL = "gauge_solve", "gauge_model_invalid"
@@ -322,8 +333,12 @@ def _load_pack(doc, expect_lens_sha):
     cols = dict(doc.get("columns") or {})
     if "focus" not in cols and isinstance(doc.get("refocus"), dict):
         cols["focus"] = doc["refocus"]
+    unknown = sorted(repr(k) for k in cols if k not in COMP_LABELS)
+    if unknown:
+        return refuse(FAMILY_INPUT, "the pack carries unknown compensator column(s) %s; the gauge solves %s only"
+                      % (unknown, list(COMP_LABELS)))
     labels, vecs = [], []
-    for name in ("focus",) + PUSH_LABELS:
+    for name in COMP_LABELS:
         if name in cols:
             c = _column(cols[name], shape, name, p)
             if is_refusal(c):
@@ -685,9 +700,10 @@ def _check_limits(pack, p_labels):
                 return refuse(FAMILY_INPUT, "limits.focus must be [lo, hi]")
             rows.append((float(v[0]), float(v[1])))
         else:
-            r = lim.get("push")
+            key = COMP_LIMIT[lab]
+            r = lim.get(key)
             if not (_fin(r) and r > 0):
-                return refuse(FAMILY_INPUT, "limits.push must be a positive number")
+                return refuse(FAMILY_INPUT, "limits.%s must be a positive number" % key)
             rows.append((-float(r), float(r)))
     return np.array(rows)
 
@@ -754,7 +770,7 @@ def _evaluate(pack, threshold, n, order, objective, full):
     n_clamped = int(((q < 0) & (q >= -NEG_EPS)).sum())
     rms_f = np.sqrt(np.maximum(q, 0.0))
     worst = rms_f.max(axis=1)
-    push_cols = [i for i, lab in enumerate(pack.comp_labels) if lab in PUSH_LABELS]
+    push_cols = [i for i, lab in enumerate(pack.comp_labels) if lab in FAIL_LABELS]
     at_bound = ((at_min | at_max)[:, push_cols].any(axis=1) if push_cols else np.zeros(n, bool))
     vals, ab = [float(v) for v in worst], [bool(x) for x in at_bound]
     crit = criteria(worst, at_bound, threshold=threshold)
@@ -779,6 +795,7 @@ def _evaluate(pack, threshold, n, order, objective, full):
                      "composition": {"variant_id": COMPOSITION, "route": "batch_opd", "terms": pack.T,
                                      "p1b_heldout_rel": P1B_HELDOUT_REL, "bias_note": BIAS_NOTE},
                      "folded_share": fs["share"],
+                     "compensators": sorted([lab, float(lo), float(hi)] for lab, (lo, hi) in zip(pack.comp_labels, lim)),
                      "focus_at_bound": fb, "warnings": warnings,
                      "solve": {"objective": objective, "max_gap": float(gap.max()), "n_unconverged": n_unconverged, "iterations": info.get("iterations"),
                                "n_clamped": n_clamped},
@@ -791,6 +808,11 @@ def _evaluate(pack, threshold, n, order, objective, full):
 
 # --------------------------------------------------------------------------- the result store (3.8)
 _STORE = OrderedDict()
+STORE_MAX_BYTES = 32 * 1024 * 1024   # the byte budget over every stored result's `_arrays` (beside the STORE_MAX slot count)
+
+
+def _store_bytes():
+    return sum(int(a.nbytes) for v in _STORE.values() for a in (v.get("_arrays") or {}).values())
 
 
 @_safe
@@ -801,7 +823,8 @@ def store_put(result):
     gid = result["gauge"]["id"]
     _STORE.pop(gid, None)
     _STORE[gid] = {"gauge": result["gauge"], "yield_stats": result["yield_stats"], "_arrays": result["_arrays"]}
-    while len(_STORE) > STORE_MAX:
+    # Oldest first until both limits hold. The newest result is always kept, even when it alone exceeds the byte budget.
+    while len(_STORE) > 1 and (len(_STORE) > STORE_MAX or _store_bytes() > STORE_MAX_BYTES):
         _STORE.popitem(last=False)
     return {"ok": True, "id": gid}
 
@@ -840,12 +863,21 @@ def _yield_diff(pass_a, pass_b, paired_mode):
     return _diff(float(pb - pa), math.sqrt(pooled * (1 - pooled) * (1.0 / n_a + 1.0 / n_b)))
 
 
+def _compensators_differ(ga, gb):
+    """True when the solved compensator sets (label, lo, hi) differ, or either side does not carry them (a missing set
+    never pairs, like a None topology)."""
+    ca, cb = ga.get("compensators"), gb.get("compensators")
+    return ca is None or cb is None or ca != cb
+
+
 def _mismatch(ra, rb):
     ga, gb = ra["gauge"], rb["gauge"]
     pa, pb = ga["pairing_key"], gb["pairing_key"]
     for name, i in (("rule_id", 0), ("seed", 1), ("n", 2), ("row set", 3)):
         if pa[i] != pb[i]:
             return name
+    if _compensators_differ(ga, gb):
+        return "compensator"
     if ga.get("topology_digest") is None or ga.get("topology_digest") != gb.get("topology_digest"):
         return "topology"
     if ga.get("threshold") != gb.get("threshold"):
@@ -903,8 +935,17 @@ def paired(res_a, res_b):
         fields.append({"index": f, "d_yield": _yield_diff(passed(ar, f, thr_a), passed(br, f, thr_b), mode)})
     no_loss = not any(x["d_yield"]["resolved"] and x["d_yield"]["value"] < 0 for x in fields)
     topo_a, topo_b = res_a["gauge"].get("topology_digest"), res_b["gauge"].get("topology_digest")
-    if thr_a != thr_b or topo_a is None or topo_a != topo_b:   # different bars / lenses, whatever `reason` names first
-        verdict, no_loss = None, None
+    wrong_bar = thr_a != thr_b
+    wrong_lens = topo_a is None or topo_a != topo_b
+    wrong_comp = _compensators_differ(res_a["gauge"], res_b["gauge"])
+    if wrong_bar or wrong_lens or wrong_comp:   # different bars / lenses / compensator sets, whatever `reason` names first
+        verdict, no_loss, stat = None, None, None   # `statistic` names the block that would decide the verdict
+        # the bar-dependent diffs compare two different bars; on a different lens every diff compares two lenses
+        d_yield, d_tail = None, None
+        for entry in fields:
+            entry["d_yield"] = None
+    if wrong_lens or wrong_comp:   # a different compensator set changes every value, so no diff of the two is a diff of the lens
+        d_p90, d_mean = None, None
     return {"pairing": "paired" if mode else "independent", "reason": reason, "d_yield": d_yield, "d_p90": d_p90,
             "d_mean": d_mean, "d_tail": d_tail, "statistic": stat, "verdict": verdict,
             "n_common": min(n_a, n_b) if mode else 0,

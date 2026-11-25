@@ -2,12 +2,61 @@
 
 All notable changes to **optivibe-mcp**.
 
-Versions are tagged in this repository (`v0.1.0` … `v0.2.4`). Each tag points at the merge
+Versions are tagged in this repository (`v0.1.0` … `v0.2.5`). Each tag points at the merge
 commit that published that version, and every tag was verified against the version literals
 in the tree at that commit.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.2.5] — 2026-11-24
+
+The agent can now change a lens's element count: split a glass element into a cemented pair, or cement an air gap
+shut. The tolerance gauge can tilt the push group, and the read tools report pickup solves in full. The tool count is
+unchanged.
+
+### Added
+
+- **`insert_surface(at, glass=<name>)`** splits a glass element at an interior plane into two cemented halves. With
+  the same glass on both sides the optics are unchanged, so the split is a starting point for a new cemented doublet.
+  A split that would make an edge cross is refused. The result says `split`.
+- **`remove_surface(at, cement="front"|"rear")`** cements the two glass elements around a Standard air gap, keeping
+  the named facing radius. A cement predicted to make an edge cross is refused before anything changes. The result
+  says `cement`.
+- Both operations roll back a failed write and prove the restore. A removal measures what happened to merit rows
+  that named the removed surface (`merit_fate`: `slid`, `count_changed` or `unknown`, plus `merit_count`) instead of
+  assuming they were deleted.
+- **`remove_surface(refuse_on_unaudited=true)`**, also through `cement=`, refuses a removal when a Par table could
+  not be audited for references to the removed surface, and names the tables.
+- **The tolerance gauge can tilt the push group**: `cb_group={group, decenter_mm, tilt_deg}` under
+  `compensator="dls_cb_group"` solves focus plus the decenter and tilt columns given. A draw stopped at a push or tilt
+  limit fails. The gauge block lists its `compensators`, and `paired` withholds the verdict and every difference
+  block when two results used different compensator sets. The gauge's tilt reading has not matched the native
+  Monte Carlo in testing, so the desensitize skill does not use it; decenter-only and refocus-only reads are
+  unchanged.
+- **The `optimize-loop` skill** has a topology scan step: before polishing a lens whose element count may change, try
+  at least three structural moves briefly from one saved start and pick by the comparison.
+
+### Changed
+
+- **`read_surface` and `describe_surfaces`** report a pickup solve's `values` (source surface, column, scale factor,
+  offset), with `values_unreadable` naming any value that could not be read. A coordinate-break row lists its Par
+  pickups under `par_solves`, and a row whose Par scan was complete no longer carries `par_cell_solves_not_audited`;
+  asphere, GRIN and grating rows still do.
+- **`paired`** (gauge) returns `null` for `statistic`, `d_yield`, `d_tail` and each field's `d_yield` whenever it
+  withholds the verdict, and also for `d_p90` and `d_mean` when the lens or the compensator set differs. The gauge's
+  result store is also capped at 32 MiB.
+- **`tolerance`** warns when `baseline`, `pupil` or `repeats` is given to a mode that ignores it, and when a SEED row
+  you wrote is used without `seed=`.
+- **`optimize`**: every Hammer result carries `stopped_early`, with a warning when the automatic run returns early with
+  no gain; `time_budget_s` without `run_time_m` warns.
+- **Glass trials**: `sweep_done` stays false while any arm is open, and the summary reports the open arms. A clearance
+  miss of 1e-3 mm or less is counted as on the floor, and the summary states what the search clock covers.
+
+### Fixed
+
+- **The gauge** refuses a boolean `threshold`.
+- **A sign-convention mismatch** that differs only in case names the grid's value.
 
 ## [0.2.4] — 2026-11-18
 
@@ -677,6 +726,7 @@ A housekeeping release: no new tools.
 
 - Initial public release of optivibe-mcp.
 
+[0.2.5]: ../../compare/v0.2.4...v0.2.5
 [0.2.4]: ../../compare/v0.2.3...v0.2.4
 [0.2.3]: ../../compare/v0.2.2...v0.2.3
 [0.2.2]: ../../compare/v0.2.1...v0.2.2

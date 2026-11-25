@@ -29,6 +29,7 @@ from ..errors import (SolveDrivenError, SolveRefsRefusalError, SurfaceWriteError
 from ..server import ToolSpec
 from . import _asphere_cells as _asph
 from . import _by_number_refs as _bnr
+from . import _element_topology as _topo
 from . import _lens_common as _c
 from . import _measurement_common as _mc
 from . import _optimize_common as _oc
@@ -454,7 +455,11 @@ def insert_surface(session, params):
     out-of-range insert HARD-CRASHES the engine (IPC pipe death), so it can never
     be an exception handler. After the insert, read-back-verify the count grew by
     one (else ``SurfaceWriteError``).
+
+    ``glass=<name>`` is the SPLIT door (``_element_topology.split``); a bare call never reaches it.
     """
+    if params.get("glass") is not None:
+        return _topo.split(session, params)
     system = session.system
     lde = system.LDE
     n = int(lde.NumberOfSurfaces)
@@ -474,6 +479,17 @@ def insert_surface(session, params):
             surface=at,
         )
     return {"at": at, "count": new_count}
+
+
+def _unaudited_refusal(at, scan, strict):
+    """The refusal prose, with the unaudited rows named and the right flag to drop."""
+    msg = _refs.refusal_message(at, scan)
+    if not (strict and scan["verdict"] != _refs.VERDICTS[0]):
+        msg = msg.replace("refuse_on_solve_refs", "refuse_on_unaudited")
+    na = scan.get("not_audited") or ()
+    rows = ", ".join("surface %s (%s)" % (u.get("surface"), u.get("table")) for u in na[:6])
+    return msg + (" Unaudited tables: " + rows + (" and %d more" % (len(na) - 6) if len(na) > 6 else "") + "."
+                  if rows else "")
 
 
 def remove_surface(session, params):
@@ -512,7 +528,10 @@ def remove_surface(session, params):
     grating) is now a COVERAGE record — ``par_refs_not_audited`` — and does not make the
     verdict ``could_not_scan``, so ``refuse_on_solve_refs=true`` PROCEEDS on it. A fault
     (a type that could not be read, or one this package does not recognise) still lands
-    in ``unscanned`` and still refuses.
+    in ``unscanned`` and still refuses. A caller who wants the coverage record to alarm
+    too passes ``refuse_on_unaudited=true`` (0.2.5): a plain boolean, default false, that
+    refuses on a non-empty ``par_refs_not_audited`` and names those rows; it also rides
+    ``cement=``. Callers that do not pass it keep the proceed behaviour above.
 
     WHY THE TRADE WAS TAKEN (a review finding; a deliberate ruling). Before it, ONE
     asphere row — an ordinary case this package ships tools to author — made
@@ -521,13 +540,14 @@ def remove_surface(session, params):
     and removed; the same design with one ``EvenAspheric`` refused. A flag that cannot be
     satisfied on a whole design class is not a safety posture, it is an outage. The cost
     is that a caller who wanted alarm-on-any-unknown no longer gets it for this ONE
-    category, and the richer signal — a strictness level that alarms on coverage too — is
-    ticketed rather than improvised. What must NOT happen is this paragraph quietly
+    category, and the richer signal — a flag that alarms on coverage too — is
+    ``refuse_on_unaudited``. What must NOT happen is this paragraph quietly
     disappearing: the served description carries the same statement, and both are pinned.
 
     THE ORDER OF THE FIRST FIVE STEPS IS LOAD-BEARING:
 
-    * the flag read is the FIRST executable statement, so a malformed flag costs ZERO
+    * the flag read is the FIRST executable statement (the cement dispatch follows it and reads
+      only ``params``), so a malformed flag costs ZERO
       engine reads — the standard ``_require_remove_at``'s own docstring sets ("raises
       BEFORE any engine call"). It could not be met further down, because the shipped
       body reads ``lde.NumberOfSurfaces`` before validating anything;
@@ -553,6 +573,9 @@ def remove_surface(session, params):
     "nothing was mutated", which is false here.
     """
     refuse = _c._require_bool_param(params, "refuse_on_solve_refs")  # zero engine reads
+    unaudited = _c._require_bool_param(params, "refuse_on_unaudited")  # zero engine reads
+    if params.get("cement") is not None:
+        return _topo.cement(session, params)
     system = session.system
     lde = system.LDE
     n = int(lde.NumberOfSurfaces)
@@ -582,8 +605,9 @@ def remove_surface(session, params):
     # pin at 253 requires — that pin's docstring
     # explicitly refuses conversion to an inequality, so a one-statement fix here would
     # have been a re-baseline, not an edit.
-    if refuse and scan["verdict"] != _refs.VERDICTS[0]:
-        raise SolveRefsRefusalError(_refs.refusal_message(at, scan))
+    if (refuse and scan["verdict"] != _refs.VERDICTS[0]) or (unaudited and scan.get("not_audited")):
+        raise SolveRefsRefusalError(_unaudited_refusal(at, scan, refuse) if unaudited
+                                    else _refs.refusal_message(at, scan))
 
     rows_before = _bnr.snapshot(system, at)
     removed = _c.call_noting(lde.RemoveSurfaceAt, at, lambda: _refs.failure_note(at, scan))
@@ -762,29 +786,23 @@ READ_SURFACE_SPEC = ToolSpec(
         "disclosed per cell under solves.<cell> (radius/thickness/conic/semi_diameter/"
         "material). An ABSENT solves key means every cell carries its DEFAULT solve -- "
         "NOT that solves went unchecked. Each entry names the solve TYPE and its FIELD "
-        "NAMES, never values: it tells you a cell is constrained, not what it is "
-        "constrained to. The field names are the ones set_solve takes, one vocabulary in "
-        "both directions. "
+        "NAMES, never values, except a SurfacePickup entry's values. "
+        "The field names are set_solve's. "
         "WHICH TYPES ARE DRIVING: Fixed, Variable, Automatic and \"None\" are NOT "
         "driving -- a cell carrying one of those is an ordinary writable number and "
         "set_surface writes it normally. EVERY OTHER type is driving (SurfacePickup, "
         "MarginalRayHeight, ChiefRayHeight, ...), so the mere PRESENCE of a cell under "
         "solves does not mean the cell is unwritable. \"None\" is a REAL solve type "
         "meaning no solve -- a positive finding, never a failed read; it is suppressed "
-        "like a default, so you will not normally see it, and if you do the cell is "
-        "writable. "
+        "like a default, and the cell is writable. "
         "solves_unreadable lists cells whose solve state did not reach you. It has two "
         "provenances (a cell-read fault, or a whole-block fault) and you cannot tell "
         "which, so do not infer one. A write to such a cell is REFUSED: an unreadable "
         "solve is treated as possibly driving, never as absent, and set_surface has NO "
         "override. "
         "par_cell_solves_not_audited (a boolean, per surface) = this surface carries "
-        "parameter cells outside those five and their SOLVE STATE was NOT inspected; it "
-        "derives from an independent type read, so it can disagree with the row's own "
-        "type on a degraded read. Do NOT confuse it with remove_surface's "
-        "par_refs_not_audited, which is a LIST answering a different question (was that "
-        "table searched for REFERENCES to the row being removed) -- for a coordinate "
-        "break the two legitimately disagree. mce_overrides_not_audited = multi-"
+        "parameter cells outside those five and their SOLVE STATE was NOT inspected; a coordinate break whose Par cells were all read drops it (any Par pickups: par_solves). "
+        "mce_overrides_not_audited = multi-"
         "configuration system, only the CURRENT configuration was read. "
         "See set_solve, clear_solve, set_surface, describe_surfaces."
     ),
@@ -815,9 +833,9 @@ SET_SURFACE_SPEC = ToolSpec(
         "Surface 0 (OBJECT) accepts thickness only (the object distance); other "
         "fields on surface 0 are refused. REFUSES a write to a driven cell before "
         "mutating anything (error_family solve_driven), naming the cell and its solve "
-        "type; there is NO override, so change the relationship or write a different "
-        "cell. Read solves on read_surface before authoring: the block tells you what "
-        "is already there (the solve TYPE and its FIELD NAMES, never values). Material "
+        "type; there is NO override, so change the relationship or write another "
+        "cell. Read solves on read_surface before authoring: the block shows what "
+        "is already there (solve TYPE and FIELD NAMES; SurfacePickup adds values). Material "
         "writes flow through substitute_glass and are NOT covered by the solve refusal, "
         "so a material solve on the cell is not caught here -- read solves first."
     ),
@@ -827,7 +845,7 @@ INSERT_SURFACE_SPEC = ToolSpec(
     name="insert_surface",
     handler=insert_surface,
     required_params=("at",),
-    param_types={"at": "number"},
+    param_types={"at": "number", "glass": "string"},
     description=(
         "Insert a new surface before position 'at' (1..N-1). Out-of-range is "
         "refused BEFORE the engine call (an out-of-range insert crashes the engine). "
@@ -837,12 +855,13 @@ INSERT_SURFACE_SPEC = ToolSpec(
         "on coordinate-break Par1-Par6 and on Par2 of even-asphere and gradient rows, and "
         "for the cocentric, center-of-curvature, compensator and position solves; the 25 "
         "measured solve pairs that carry no surface reference were unchanged by an "
-        "insert (the 4 ZPL macro pairs were not measured), OpticStudio 2025 R1. Removing the "
-        "row a pickup names as its SOURCE is the case that does destroy it -- see "
-        "remove_surface. A glass-vertex aperture stop "
-        "on the FRONT lens vertex is auto-handled by normalize_stop, which inserts a "
-        "zero-thickness dummy AIR stop ahead of the front glass (the OBJECT gap must be "
-        "air) -- do not hand-build a dummy stop with this tool."
+        "insert (the 4 ZPL macro pairs were not measured), OpticStudio 2025 R1. A pickup whose "
+        "SOURCE row is removed is destroyed (see remove_surface). glass=<name> splits the "
+        "Standard glass element whose back face is 'at' into a cemented doublet: the rear "
+        "part takes that glass behind a mean-curvature interface at half thickness (the "
+        "same glass leaves the optics unchanged); a crossing edge is undone and refused; "
+        "returns 'split'. A front-vertex glass stop is normalize_stop's job: do not "
+        "hand-build a dummy stop with this tool."
     ),
 )
 
@@ -850,10 +869,14 @@ REMOVE_SURFACE_SPEC = ToolSpec(
     name="remove_surface",
     handler=remove_surface,
     required_params=("at",),
-    param_types={"at": "number", "refuse_on_solve_refs": "boolean"},
+    param_types={"at": "number", "refuse_on_solve_refs": "boolean",
+                 "refuse_on_unaudited": "boolean", "cement": "string"},
     description=(
-        "Remove an interior surface (1..N-2). Refuses OBJECT/IMAGE and refuses "
-        "removing the stop (reassign via set_stop_surface first). Returns an additive "
+        "Remove an interior surface (1..N-2), never the stop (reassign via "
+        "set_stop_surface first). cement='front'|'rear' (whose facing radius the "
+        "interface keeps) cements the two glass elements around Standard air gap 'at'; a "
+        "predicted crossing edge is refused before anything changes; returns 'cement'. "
+        "Returns an additive "
         "'solve_refs' block on every success: state is none_affected, affected or "
         "could_not_scan, and 'affected' lists each solve on a SURVIVING row that "
         "references the removed row, with what it became. Removing the row a "
@@ -864,15 +887,14 @@ REMOVE_SURFACE_SPEC = ToolSpec(
         "refuse_on_solve_refs=true to "
         "refuse such a removal instead, before anything is mutated. A surface whose "
         "parameter table this package does not audit (asphere, GRIN, grating) is named "
-        "in 'par_refs_not_audited' -- a COVERAGE statement, not a fault, so it does not "
-        "make the state could_not_scan and refuse_on_solve_refs=true does NOT refuse on "
-        "it; a surface whose type could not be READ or recognised is a fault and lands "
-        "in 'unscanned', which does refuse. Merit and tolerance rows that name the "
-        "removed surface by number slide to the next surface; they are listed in "
-        "'by_number_refs', and the multi-configuration rows the engine deleted in "
-        "'mce_rows_deleted'. A surface range that only spans it is not listed. "
-        "apply_lens_spec's shrink path reports the solve references only, as "
-        "'shrink_solve_refs'; it does not report by_number_refs or mce_rows_deleted."
+        "in 'par_refs_not_audited' -- a COVERAGE statement, not a fault: "
+        "refuse_on_solve_refs=true does NOT refuse on "
+        "it (refuse_on_unaudited=true does); a surface whose type could not be READ or recognised is a fault and lands "
+        "in 'unscanned', which does refuse. Rows naming the removed surface by number are "
+        "in 'by_number_refs': tolerance rows slide to the next surface; a merit row's fate "
+        "is measured per call (merit_fate). Deleted multi-config rows: "
+        "'mce_rows_deleted'. A range only spanning it is not listed. apply_lens_spec's "
+        "shrink path reports only 'shrink_solve_refs', not these two."
     ),
 )
 

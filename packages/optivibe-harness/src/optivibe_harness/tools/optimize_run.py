@@ -1279,7 +1279,12 @@ def _optimize_impl(session, params):
             artifact_trail=artifact_trail,
             sink=sink,
             guard_warning=guard_warning,
-            warning=warning,
+            # Hammer is bounded by run_time_m and never reads time_budget_s (0 statements).
+            warning=_merge_warning(warning, (
+                f"Hammer does not use time_budget_s; run_time_m={run_time_m:g} minute(s) applied. "
+                "Pass run_time_m to set the Hammer time."
+            ) if (isinstance(params, dict) and dict.__contains__(params, "time_budget_s")
+                  and not dict.__contains__(params, "run_time_m")) else None),
             variables=variables,
             wall_start=wall_start,
             nudge_disclosure=nudge_disclosure,
@@ -1841,10 +1846,17 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
         None if after_row is None or after_row["ok"] else
         f"pass00_after snapshot failed: {after_row.get('error')}",
     )
+    # An AUTOMATIC run that returns inside a tenth of its cap
+    # with no gain (verdict stable, which a best-restore also forces) is not a run_time_m search. ``stopped_early``
+    # is always on the result; the timed run is never flagged.
     warning = _merge_warning(
         _merge_warning(warning, warning_restore),
-        _merge_warning(_IS_VALID_UNKNOWN_MSG if iv_keys else None,
-                       _rb.hammer_stop_warning(run_name == "TimedOut", run_time_m)),
+        _merge_warning(_merge_warning(_IS_VALID_UNKNOWN_MSG if iv_keys else None,
+                                      _rb.hammer_stop_warning(run_name == "TimedOut", run_time_m)), (
+            f"Hammer stopped after {wall_s:.1f} s of a {run_time_m * 60:g} s cap with no gain: this is not a "
+            f"{run_time_m:g}-minute search. Pass hammer_mode='timed' to search the whole time."
+        ) if (stopped_early := timed is None and run_name != "TimedOut" and verdict == "stable"
+              and (wall_s := time.time() - wall_start) < 0.10 * run_time_m * 60) else None),
     )
     if not checkpoint_ok:
         warning = _merge_warning(
@@ -1916,6 +1928,7 @@ def _optimize_hammer_impl(session, system, mfe, *, run_time_m, cores, cycles, ru
         "status": status,
         "hammer_restored": hammer_restored,
         "checkpoint": checkpoint_ok,
+        "stopped_early": stopped_early,
         "wall_time_s": safe_float(round(time.time() - wall_start, 4)),
         "variables_count": variables,
         "passes": 1,
@@ -4201,7 +4214,7 @@ OPTIMIZE_SPEC = ToolSpec(
         "it comes out worse. run_time_m is a wall-time CAP, not a target: Hammer runs in "
         "AUTO mode and early-terminates when the global search converges, so a fast return "
         "(well under a second on a small or already-good system) with real merit improvement "
-        "is the expected early-stop, NOT a dropped cap. The automatic Hammer run is stopped at about run_time_m minutes plus 30 s; when that bound fires the result says budget_reached: true (hammer_bound_s is the bound in seconds), the lens keeps the partial result and a warning says the search is not finished. The automatic Hammer run never substitutes a glass that carries a Substitute solve (set_solve, MaterialSubstitute). hammer_mode='timed' (Hammer only) runs it for the WHOLE run_time_m, up to 60 minutes, so the call blocks that long, and DOES substitute those glasses; glass_changes lists each change with catalog, kind and status, and a discontinued or non-lens pick is flagged, not filtered. catalog (timed only) limits the picks to ONE catalog already in use. A mixed catalog (GL, MISC, MISC1, MISC-CRB) is refused, as is a run whose Substitute solves could draw from one: pass catalog=. Gotcha: require_free_stop defaults True, so this REFUSES a "
+        "is the expected early-stop, NOT a dropped cap; but an automatic run that returns inside a tenth of its cap with no gain reads stopped_early: true (every Hammer result carries the key) and a warning, and hammer_mode='timed' is the way to search the whole time. Hammer never reads time_budget_s. The automatic Hammer run is stopped at about run_time_m minutes plus 30 s; when that bound fires the result says budget_reached: true (hammer_bound_s is the bound in seconds), the lens keeps the partial result and a warning says the search is not finished. The automatic Hammer run never substitutes a glass that carries a Substitute solve (set_solve, MaterialSubstitute). hammer_mode='timed' (Hammer only) runs it for the WHOLE run_time_m, up to 60 minutes, so the call blocks that long, and DOES substitute those glasses; glass_changes lists each change with catalog, kind and status, and a discontinued or non-lens pick is flagged, not filtered. catalog (timed only) limits the picks to ONE catalog already in use. A mixed catalog (GL, MISC, MISC1, MISC-CRB) is refused, as is a run whose Substitute solves could draw from one: pass catalog=. Gotcha: require_free_stop defaults True, so this REFUSES a "
         "glass-vertex stop with no optimizer opened — run normalize_stop first (or pass "
         "auto_normalize). Also REFUSES (optimize_negative_weight) a merit "
         "carrying a NEGATIVE weight, with nothing opened: the sign has been "

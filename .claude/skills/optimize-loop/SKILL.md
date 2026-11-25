@@ -128,6 +128,13 @@ hands the form back, take it up here for one attempt within the brief, then retu
 Keep a free-form stage log in your reply and in `walk_in_stages.md` when you can write files: per stage the spec
 aimed at, the moves, the readings, the candidate seq and the review outcome -- what helps the next reader.
 
+### Topology scan (before polishing a lens whose element count may change)
+
+Before polishing, list the structural moves this lens could take: split a singlet into a cemented doublet, add an
+air-spaced element at the front, middle or rear, cement a close air gap. Try at least three different ones, each
+briefly, from the same saved start, and compare them on the same measurements. Pick by the comparison, and say which
+you rejected and why.
+
 ### Step 3: Preflight, then optimize
 
 1. `dry_run` first — it confirms readiness (variables set, merit computable) WITHOUT
@@ -221,7 +228,7 @@ Design class: unchanged  (or: name exactly what changed — see below)
 Setup changes: none  (or: list what YOU changed — wavelengths, fields, aperture, scale)
 Figure review: <n> recorded (<k> unanswered)  (or: silent — the eye found nothing; or: not asked)
 
-Verdict: improved / stable / diverged, with any _unphysical / _unverified suffix  (cycles/passes as reported by optimize)
+Verdict: improved / stable / diverged (improved or stable may carry an _unphysical / _unverified suffix)  (cycles/passes as reported by optimize)
 ```
 
 **The last line of the report is the verdict line.** It begins with the literal token

@@ -202,8 +202,9 @@ repository root:
 python packages/optivibe-reference/scripts/build_vendor_data.py
 ```
 
-This reads the glass catalog from your `.agf` files (`ZEMAX_GLASSCAT`) and, if you
-point it at the manual PDF (`OPTIVIBE_MANUAL_PDF`), indexes it for search.
+This reads the glass catalog from your `.agf` files (`ZEMAX_GLASSCAT`) and indexes the
+manual PDF for search: it is found in your OpticStudio install directory, or wherever
+`OPTIVIBE_MANUAL_PDF` points.
 
 The operand and tolerance catalogs are built from a live probe of your install's
 ZOS-API enum surface. Run the two probes **once** first (each boots a headless
