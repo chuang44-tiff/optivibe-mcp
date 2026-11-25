@@ -35,6 +35,7 @@ REASONS = ("not_a_glass_element", "not_an_air_gap_between_elements", "surface_ty
 _EDGES_SOURCE_SPLIT = "sag at each face's own semi, live rows after the writes (gotcha 431)"
 _EDGES_SOURCE_CEMENT = "predicted from the pre-op prescription at each face's own semi"
 _ROLLED_BACK = " -- rolled back (proven)"
+_REMOVED_NOT_RESTORED = " -- the surface was removed and the design changed (nothing was rolled back); reload the design to revert"
 
 
 def _refuse(reason, message):
@@ -59,20 +60,24 @@ def mean_curvature_radius(R_f, R_b):
 def _check_domain(thicknesses, faces):
     """``None`` when the numbers are usable, else the reason text (pure).
 
-    Every thickness is finite and > 0; every face is ``(radius, semi)`` with the semi finite-positive,
-    the radius ``inf`` or finite non-zero, and the semi ``< |radius|`` for a finite radius. Without this
-    the sag helper's 0.0 fallback could turn an invalid sag into an apparently positive edge.
+    Every thickness is finite and > 0; every face is ``(radius, semi, conic)`` with the semi finite-positive,
+    the radius ``inf`` or finite non-zero, the semi ``< |radius|`` for a finite radius, and the conic finite
+    and not closing the surface inside its semi (the conic radical ``1 - (1+k)(h/R)^2`` is not negative: the
+    sag helper would fall back to the sphere sag there). The conic is the one the edge helper uses for that
+    face. Without this the sag helper's 0.0 fallback could turn an invalid sag into an apparently positive edge.
     """
     for t in thicknesses:
         if not (isinstance(t, float) and math.isfinite(t) and t > 0):
             return "a thickness the operation uses is not finite and positive (%r)" % (t,)
-    for R, h in faces:
+    for R, h, k in faces:
         if not _cl._is_finite_positive(h):
             return "a semi-diameter the operation uses is not finite and positive (%r)" % (h,)
         if math.isnan(R) or R == 0:
             return "a radius the operation uses is not inf or finite non-zero (%r)" % (R,)
         if math.isfinite(R) and not h < abs(R):
             return "semi-diameter %r is not smaller than |radius| %r" % (h, R)
+        if not math.isfinite(k) or _cl.conic_sphere_fallback_fired(R, k, h):
+            return "conic %r on radius %r closes the surface inside its semi-diameter %r" % (k, R, h)
     return None
 
 
@@ -201,7 +206,8 @@ def split(session, params):
                 "back face of a glass element whose front face is 'at'-1" % (at - 1))
     if _not_standard((front, back)):
         _refuse("surface_type_not_modelled", "surfaces %d and %d must both be Standard" % (at - 1, at))
-    bad = _check_domain([front["t"]], [(front["R"], front["semi"]), (back["R"], back["semi"])])
+    bad = _check_domain([front["t"]], [(front["R"], front["semi"], front["conic"]),
+                                       (back["R"], back["semi"], back["conic"])])
     if bad:
         _refuse("geometry_unreadable", "surfaces %d and %d: %s" % (at - 1, at, bad))
     probe = _sc.refuse_if_driven(system, lde, at - 1, "thickness")
@@ -241,7 +247,9 @@ def split(session, params):
         back_glass = _lg.substitute_glass(session, glass_args)
         live = _read_rows(system, lde, (at - 1, at, at + 1))
         t_front, t_rear = live[0]["t"], live[1]["t"]
-        bad = _check_domain([t_front, t_rear], [(r["R"], r["semi"]) for r in live])
+        bad = _check_domain([t_front, t_rear], [(live[0]["R"], live[0]["semi"], live[0]["conic"]),
+                                                (live[1]["R"], live[1]["semi"], 0.0),
+                                                (live[2]["R"], live[2]["semi"], live[2]["conic"])])
         if bad:
             _refuse("geometry_unreadable", "after the split: %s" % bad)
         edges = split_edges(live, t_front, t_rear)
@@ -256,7 +264,7 @@ def split(session, params):
     _invalidate(session)
     m1 = _merit_count(system)
     interface = live[1]
-    return {"at": at, "count": int(lde.NumberOfSurfaces), "split": {
+    return {"at": at, "count": n + 1, "split": {
         "front": at - 1, "interface": at, "back": at + 1,
         "glass": {"front": {"material": front["material"], "catalog": front["catalog"]}, "back": back_glass},
         "interface_radius": None if math.isinf(interface["R"]) else interface["R"],
@@ -320,8 +328,8 @@ def cement(session, params):
         _refuse("surface_type_not_modelled", "surfaces %d..%d must be Standard and the facing faces %d and %d "
                 "must have conic 0" % (at - 1, at + 2, at, at + 1))
     bad = _check_domain([rows[0]["t"], rows[2]["t"]],                                         # C6b
-                        [(rows[0]["R"], rows[0]["semi"]), (rows[1]["R"], rows[2]["semi"]),
-                         (rows[2]["R"], rows[2]["semi"]), (rows[3]["R"], rows[3]["semi"])])
+                        [(rows[0]["R"], rows[0]["semi"], rows[0]["conic"]), (rows[1]["R"], rows[2]["semi"], 0.0),
+                         (rows[2]["R"], rows[2]["semi"], 0.0), (rows[3]["R"], rows[3]["semi"], rows[3]["conic"])])
     if bad:
         _refuse("geometry_unreadable", "surfaces %d..%d: %s" % (at - 1, at + 2, bad))
     if rule == "front":                                                                       # C7
@@ -359,6 +367,8 @@ def cement(session, params):
                                         field="rollback", intended=None, actual=failed) from exc
             raise
         if count == n - 1:              # the row is gone: a write now would hit the wrong row
+            if isinstance(exc, HarnessError):
+                _en.raise_with_note(exc, _REMOVED_NOT_RESTORED)
             raise
         raise SurfaceWriteError("unknown state, count %d (expected %d or %d)" % (count, n, n - 1),
                                 field="count", intended=n - 1, actual=count, surface=at) from exc

@@ -23,7 +23,8 @@ unchanged.
 - **`remove_surface(at, cement="front"|"rear")`** cements the two glass elements around a Standard air gap, keeping
   the named facing radius. A cement predicted to make an edge cross is refused before anything changes. The result
   says `cement`.
-- Both operations roll back a failed write and prove the restore. A removal measures what happened to merit rows
+- Both operations roll back a failed write and prove the restore, and refuse (`geometry_unreadable`) a conic face that
+  closes inside its semi-diameter. A removal measures what happened to merit rows
   that named the removed surface (`merit_fate`: `slid`, `count_changed` or `unknown`, plus `merit_count`) instead of
   assuming they were deleted.
 - **`remove_surface(refuse_on_unaudited=true)`**, also through `cement=`, refuses a removal when a Par table could
@@ -31,7 +32,8 @@ unchanged.
 - **The tolerance gauge can tilt the push group**: `cb_group={group, decenter_mm, tilt_deg}` under
   `compensator="dls_cb_group"` solves focus plus the decenter and tilt columns given. A draw stopped at a push or tilt
   limit fails. The gauge block lists its `compensators`, and `paired` withholds the verdict and every difference
-  block when two results used different compensator sets. The gauge's tilt reading has not matched the native
+  block when two results used different compensator sets or push groups (a push run's gauge block carries
+  `push_group`). The gauge's tilt reading has not matched the native
   Monte Carlo in testing, so the desensitize skill does not use it; decenter-only and refocus-only reads are
   unchanged.
 - **The `optimize-loop` skill** has a topology scan step: before polishing a lens whose element count may change, try
@@ -45,7 +47,7 @@ unchanged.
   asphere, GRIN and grating rows still do.
 - **`paired`** (gauge) returns `null` for `statistic`, `d_yield`, `d_tail` and each field's `d_yield` whenever it
   withholds the verdict, and also for `d_p90` and `d_mean` when the lens or the compensator set differs. The gauge's
-  result store is also capped at 32 MiB.
+  result store is also capped at 32 MiB and keeps the most recently used results.
 - **`tolerance`** warns when `baseline`, `pupil` or `repeats` is given to a mode that ignores it, and when a SEED row
   you wrote is used without `seed=`.
 - **`optimize`**: every Hammer result carries `stopped_early`, with a warning when the automatic run returns early with

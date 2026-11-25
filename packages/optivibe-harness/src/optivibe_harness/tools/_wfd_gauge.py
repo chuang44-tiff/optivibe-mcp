@@ -27,7 +27,8 @@ The ``nominal`` is the worst-field RMS at d = 0.
 
 ``result["gauge"]["compensators"]`` is the sorted ``[label, lo, hi]`` rows of the solved columns, focus included: two results
 with different sets (or a set missing on either side) never pair; ``paired`` reports ``reason: "compensator"`` and serves no
-verdict or diff block.
+verdict or diff block. A pack with a push also carries ``result["gauge"]["push_group"]`` (the ``cb_group`` key the push moves;
+a refocus-only result has no such key): two pushes on different groups never pair, whatever their limits.
 """
 import hashlib
 import json
@@ -803,6 +804,8 @@ def _evaluate(pack, threshold, n, order, objective, full):
            "_arrays": {"worst": worst, "field_rms": rms_f, "at_bound": at_bound}}
     if full:
         res["per_trial"], res["per_trial_at_bound"] = vals, ab
+    if isinstance(pack.doc.get("push"), dict):   # a refocus-only pack keeps its block byte-identical
+        res["gauge"]["push_group"] = pack.doc["push"].get("group")
     return res
 
 
@@ -835,6 +838,7 @@ def store_get(gid):
     if got is None:
         return refuse(FAMILY_PARAM, "baseline %r is not in the gauge store (unknown or expired); rerun the baseline "
                                     "gauge in this session" % (gid,))
+    _STORE.move_to_end(gid)   # least-recently-used: a hit is the newest
     return got
 
 
@@ -867,7 +871,7 @@ def _compensators_differ(ga, gb):
     """True when the solved compensator sets (label, lo, hi) differ, or either side does not carry them (a missing set
     never pairs, like a None topology)."""
     ca, cb = ga.get("compensators"), gb.get("compensators")
-    return ca is None or cb is None or ca != cb
+    return ca is None or cb is None or ca != cb or ga.get("push_group") != gb.get("push_group")
 
 
 def _mismatch(ra, rb):
